@@ -39,8 +39,8 @@ export interface ScheduleOptions {
   lockedTaskIds?: string[];
 }
 
-const iso = (date: Date) => date.toISOString().slice(0, 10);
-const parse = (value: string) => new Date(`${value}T12:00:00`);
+const parseDate = (value: string) => new Date(`${value}T12:00:00`);
+const toIso = (value: Date) => value.toISOString().slice(0, 10);
 const unique = (values: string[]) => [...new Set(values)];
 
 export function calendarForTask(task: ScheduleTask, options: ScheduleOptions = {}) {
@@ -50,29 +50,28 @@ export function calendarForTask(task: ScheduleTask, options: ScheduleOptions = {
 }
 
 export function isWorkingDay(date: Date, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const day = date.getDay();
   const unavailable = unique([
     ...(calendar.holidays ?? []),
     ...(calendar.organizationClosures ?? []),
     ...(resourceId ? calendar.employeeLeave?.[resourceId] ?? [] : []),
   ]);
-  return day !== 0 && day !== 6 && !unavailable.includes(iso(date));
+  return date.getDay() !== 0 && date.getDay() !== 6 && !unavailable.includes(toIso(date));
 }
 
 export function addWorkingDays(value: string, amount: number, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const date = parse(value);
+  const date = parseDate(value);
   const direction = amount < 0 ? -1 : 1;
   let remaining = Math.abs(amount);
   while (remaining > 0) {
     date.setDate(date.getDate() + direction);
     if (isWorkingDay(date, calendar, resourceId)) remaining -= 1;
   }
-  return iso(date);
+  return toIso(date);
 }
 
 export function workingDaysBetween(start: string, finish: string, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const from = parse(start);
-  const to = parse(finish);
+  const from = parseDate(start);
+  const to = parseDate(finish);
   if (from > to) return 0;
   let count = 0;
   for (const cursor = new Date(from); cursor <= to; cursor.setDate(cursor.getDate() + 1)) {
@@ -85,35 +84,36 @@ export function durationInWorkingDays(task: ScheduleTask) {
   return task.isMilestone ? 1 : task.durationUnit === "weeks" ? task.duration * 5 : task.duration;
 }
 
-function finishFromStart(task: ScheduleTask, calendar: WorkingCalendar) {
-  if (task.isMilestone || task.duration <= 1) return task.start;
-  return addWorkingDays(task.start, durationInWorkingDays(task) - 1, calendar, task.resourceId);
+function finishFromStart(task: ScheduleTask, options: ScheduleOptions) {
+  if (task.isMilestone || durationInWorkingDays(task) <= 1) return task.start;
+  return addWorkingDays(task.start, durationInWorkingDays(task) - 1, calendarForTask(task, options), task.resourceId);
 }
 
-function startFromFinish(task: ScheduleTask, calendar: WorkingCalendar) {
-  if (task.isMilestone || task.duration <= 1) return task.finish;
-  return addWorkingDays(task.finish, -(durationInWorkingDays(task) - 1), calendar, task.resourceId);
+function startFromFinish(task: ScheduleTask, options: ScheduleOptions) {
+  if (task.isMilestone || durationInWorkingDays(task) <= 1) return task.finish;
+  return addWorkingDays(task.finish, -(durationInWorkingDays(task) - 1), calendarForTask(task, options), task.resourceId);
 }
 
-function dependencyStart(predecessor: ScheduleTask, successor: ScheduleTask, dependency: ScheduleDependency, options: ScheduleOptions) {
+function dependencyConstraintStart(predecessor: ScheduleTask, successor: ScheduleTask, dependency: ScheduleDependency, options: ScheduleOptions) {
   const calendar = calendarForTask(successor, options);
+  const duration = durationInWorkingDays(successor);
   const lag = dependency.lagDays;
   if (dependency.type === "SS") return addWorkingDays(predecessor.start, lag, calendar, successor.resourceId);
-  if (dependency.type === "FF") return addWorkingDays(finishFromStart(predecessor, calendar), lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
-  if (dependency.type === "SF") return addWorkingDays(predecessor.start, lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
-  return addWorkingDays(finishFromStart(predecessor, calendar), lag === 0 ? 1 : lag, calendar, successor.resourceId);
+  if (dependency.type === "FF") return addWorkingDays(finishFromStart(predecessor, options), lag - duration + 1, calendar, successor.resourceId);
+  if (dependency.type === "SF") return addWorkingDays(predecessor.start, lag - duration + 1, calendar, successor.resourceId);
+  return addWorkingDays(finishFromStart(predecessor, options), lag === 0 ? 1 : lag, calendar, successor.resourceId);
 }
 
 export function hasCircularDependency(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
-  const edges = new Map<string, string[]>();
-  dependencies.forEach((dependency) => edges.set(dependency.predecessorId, [...(edges.get(dependency.predecessorId) ?? []), dependency.successorId]));
+  const graph = new Map<string, string[]>();
+  dependencies.forEach((dependency) => graph.set(dependency.predecessorId, [...(graph.get(dependency.predecessorId) ?? []), dependency.successorId]));
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): boolean => {
     if (visiting.has(id)) return true;
     if (visited.has(id)) return false;
     visiting.add(id);
-    if ((edges.get(id) ?? []).some(visit)) return true;
+    if ((graph.get(id) ?? []).some(visit)) return true;
     visiting.delete(id);
     visited.add(id);
     return false;
@@ -130,19 +130,16 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
     visiting.add(task.id);
-    const constraints = incoming.get(task.id) ?? [];
-    let dependencyStartDate: string | undefined;
-    for (const dependency of constraints) {
+    const constraints = (incoming.get(task.id) ?? []).map((dependency) => {
       const predecessor = byId.get(dependency.predecessorId);
-      if (!predecessor) continue;
+      if (!predecessor) return undefined;
       visit(predecessor);
-      const earliest = dependencyStart(predecessor, task, dependency, options);
-      if (!dependencyStartDate || earliest > dependencyStartDate) dependencyStartDate = earliest;
-    }
-    if (dependencyStartDate) { if (!options.lockedTaskIds?.includes(task.id) || task.start < dependencyStartDate) task.start = dependencyStartDate; }
-    const projectStart = options.projectStart;
-    if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
-    task.finish = finishFromStart(task, calendarForTask(task, options));
+      return dependencyConstraintStart(predecessor, task, dependency, options);
+    }).filter((value): value is string => Boolean(value));
+    const earliest = constraints.length ? constraints.reduce((latest, value) => value > latest ? value : latest) : undefined;
+    if (earliest && (!options.lockedTaskIds?.includes(task.id) || task.start < earliest)) task.start = earliest;
+    if (options.projectStart && !task.parentId && task.start < options.projectStart) task.start = options.projectStart;
+    task.finish = finishFromStart(task, options);
     visiting.delete(task.id);
   };
   result.forEach(visit);
@@ -158,20 +155,20 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
     visiting.add(task.id);
-    const successorConstraints: string[] = [];
+    const constraints: string[] = [];
     for (const dependency of outgoing.get(task.id) ?? []) {
       const successor = byId.get(dependency.successorId);
       if (!successor) continue;
       visit(successor);
-      const successorCalendar = calendarForTask(successor, options);
       const lag = dependency.lagDays;
-      if (dependency.type === "FS") successorConstraints.push(addWorkingDays(successor.start, lag === 0 ? -1 : -lag, successorCalendar, task.resourceId));
-      if (dependency.type === "SS") successorConstraints.push(addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
-      if (dependency.type === "FF") successorConstraints.push(addWorkingDays(successor.finish, -lag, successorCalendar, task.resourceId));
-      if (dependency.type === "SF") successorConstraints.push(addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
+      const calendar = calendarForTask(successor, options);
+      if (dependency.type === "FS") constraints.push(addWorkingDays(successor.start, lag === 0 ? -1 : -lag, calendar, task.resourceId));
+      if (dependency.type === "SS") constraints.push(addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, calendar, task.resourceId));
+      if (dependency.type === "FF") constraints.push(addWorkingDays(successor.finish, -lag, calendar, task.resourceId));
+      if (dependency.type === "SF") constraints.push(addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, calendar, task.resourceId));
     }
-    task.finish = successorConstraints.length ? successorConstraints.reduce((latest, date) => date < latest ? date : latest) : options.projectFinish ?? task.finish;
-    task.start = startFromFinish(task, calendarForTask(task, options));
+    task.finish = constraints.length ? constraints.reduce((earliest, value) => value < earliest ? value : earliest) : options.projectFinish ?? task.finish;
+    task.start = startFromFinish(task, options);
     visiting.delete(task.id);
   };
   result.forEach(visit);
@@ -180,7 +177,9 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
 
 export function scheduleTasks(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions | WorkingCalendar = {}) {
   if (hasCircularDependency(tasks, dependencies)) throw new Error("Circular dependency detected. Please remove one of the links and try again.");
-  const normalized: ScheduleOptions = "holidays" in options || "organizationClosures" in options || "employeeLeave" in options ? { defaultCalendar: options as WorkingCalendar } : options as ScheduleOptions;
+  const normalized = "holidays" in options || "organizationClosures" in options || "employeeLeave" in options
+    ? { defaultCalendar: options as WorkingCalendar }
+    : options as ScheduleOptions;
   return normalized.direction === "backward" ? scheduleBackward(tasks, dependencies, normalized) : scheduleForward(tasks, dependencies, normalized);
 }
 
