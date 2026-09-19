@@ -129,13 +129,16 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
     visiting.add(task.id);
-    for (const dependency of incoming.get(task.id) ?? []) {
+    const constraints = incoming.get(task.id) ?? [];
+    let dependencyStartDate: string | undefined;
+    for (const dependency of constraints) {
       const predecessor = byId.get(dependency.predecessorId);
       if (!predecessor) continue;
       visit(predecessor);
       const earliest = dependencyStart(predecessor, task, dependency, options);
-      if (earliest > task.start) task.start = earliest;
+      if (!dependencyStartDate || earliest > dependencyStartDate) dependencyStartDate = earliest;
     }
+    if (dependencyStartDate) task.start = dependencyStartDate;
     const projectStart = options.projectStart;
     if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
     task.finish = finishFromStart(task, calendarForTask(task, options));
