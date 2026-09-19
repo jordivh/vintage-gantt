@@ -1,55 +1,86 @@
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
-import { LayoutDashboard, LogOut } from "lucide-react";
+import { addWorkingDays, rollupSummary, scheduleTasks, type DependencyType, type ScheduleDependency, type ScheduleTask } from "@/lib/scheduling-engine";
+import { CalendarDays, ChevronDown, ChevronRight, ChevronsUpDown, CircleHelp, Columns3, Copy, Diamond, Download, GripVertical, History, LogOut, Plus, Redo2, Search, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2, UserRound, X } from "lucide-react";
 import { useNavigate } from "react-router";
+
+type Task = ScheduleTask & { name: string; predecessors: string; resource: string; percent: number; notes: string; collapsed?: boolean; color: string };
+type ColumnKey = "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes";
+const rowHeight = 42;
+const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
+  { key: "wbs", label: "WBS", width: 70 }, { key: "name", label: "Task name", width: 238 }, { key: "duration", label: "Duration", width: 105 }, { key: "start", label: "Start", width: 112 }, { key: "finish", label: "Finish", width: 112 }, { key: "predecessors", label: "Predecessors", width: 128 }, { key: "resource", label: "Resource", width: 118 }, { key: "percent", label: "% complete", width: 96 }, { key: "notes", label: "Notes", width: 160 },
+];
+const initialTasks: Task[] = [
+  { id: "1", parentId: null, name: "Riverside Arts Festival", duration: 18, durationUnit: "days", start: "2025-04-07", finish: "2025-04-30", isMilestone: false, predecessors: "", resource: "M. Alvarez", percent: 42, notes: "Main project brief and public opening.", color: "ochre" },
+  { id: "2", parentId: "1", name: "Site & permissions", duration: 5, durationUnit: "days", start: "2025-04-07", finish: "2025-04-11", isMilestone: false, predecessors: "", resource: "E. Shaw", percent: 100, notes: "", color: "sage" },
+  { id: "3", parentId: "1", name: "Artist lineup", duration: 8, durationUnit: "days", start: "2025-04-14", finish: "2025-04-23", isMilestone: false, predecessors: "2FS", resource: "M. Alvarez", percent: 66, notes: "Confirm three final commissions.", color: "clay" },
+  { id: "4", parentId: "1", name: "Install & opening", duration: 4, durationUnit: "days", start: "2025-04-25", finish: "2025-04-30", isMilestone: false, predecessors: "3FS+1d", resource: "J. Bell", percent: 18, notes: "Crew call at 07:30.", color: "ink" },
+  { id: "5", parentId: null, name: "Press & visitor materials", duration: 9, durationUnit: "days", start: "2025-04-10", finish: "2025-04-22", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 24, notes: "Printed guide, wayfinding, web copy.", color: "rust" },
+  { id: "6", parentId: "5", name: "Draft visitor guide", duration: 4, durationUnit: "days", start: "2025-04-10", finish: "2025-04-15", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 72, notes: "", color: "sage" },
+  { id: "7", parentId: "5", name: "Print & distribute", duration: 3, durationUnit: "days", start: "2025-04-17", finish: "2025-04-21", isMilestone: false, predecessors: "6FS+1d", resource: "R. Chen", percent: 0, notes: "", color: "clay" },
+  { id: "8", parentId: null, name: "Festival opens", duration: 1, durationUnit: "days", start: "2025-05-01", finish: "2025-05-01", isMilestone: true, predecessors: "4FS, 7FS", resource: "", percent: 0, notes: "Public opening day.", color: "rust" },
+];
+
+const parseDependency = (value: string, tasks: Task[]): ScheduleDependency[] => value.split(",").map((part) => part.trim()).filter(Boolean).map((part) => { const match = part.match(/^(\d+)(FS|SS|FF|SF)?([+-]\d+)?d?$/i); if (!match) return null; const predecessor = tasks.find((task) => task.id === match[1]); return predecessor ? { predecessorId: predecessor.id, successorId: "", type: (match[2]?.toUpperCase() ?? "FS") as DependencyType, lagDays: Number(match[3] ?? 0) } : null; }).filter((value): value is ScheduleDependency => Boolean(value));
+const formatDate = (date: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${date}T12:00:00`));
+const dateLabel = (date: Date) => date.toISOString().slice(0, 10);
 
 export default function Dashboard() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const [tasks, setTasks] = useState(initialTasks);
+  const [selected, setSelected] = useState<string[]>(["3"]);
+  const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
+  const [draft, setDraft] = useState("");
+  const [zoom, setZoom] = useState<"day" | "week" | "month" | "quarter">("week");
+  const [split, setSplit] = useState(58);
+  const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const [modalTask, setModalTask] = useState<Task | null>(null);
+  const [history, setHistory] = useState<Task[][]>([]);
+  const [future, setFuture] = useState<Task[][]>([]);
+  const [query, setQuery] = useState("");
+  const [hidden, setHidden] = useState<ColumnKey[]>([]);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const handleSignOut = async () => {
-    await signOut();
-    navigate("/");
-  };
+  const visibleTasks = useMemo(() => {
+    const visible: Task[] = [];
+    const walk = (parentId: string | null) => tasks.filter((task) => task.parentId === parentId).forEach((task) => { if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task); if (!task.collapsed) walk(task.id); });
+    walk(null);
+    return visible;
+  }, [tasks, query]);
+  const projectStart = new Date("2025-04-01T12:00:00");
+  const timelineDays = Array.from({ length: zoom === "month" ? 100 : zoom === "quarter" ? 180 : 62 }, (_, index) => { const day = new Date(projectStart); day.setDate(day.getDate() + index); return day; });
+  const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
+  const timelineWidth = timelineDays.length * dayWidth;
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
 
-  return (
-    <main className="min-h-screen bg-background px-6 py-10 text-foreground">
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm font-medium text-muted-foreground">
-              Authenticated workspace
-            </p>
-            <h1 className="mt-1 text-3xl font-bold tracking-tight">
-              Welcome{user?.name ? `, ${user.name}` : ""}
-            </h1>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="cursor-pointer gap-2 self-start"
-            onClick={handleSignOut}
-          >
-            <LogOut className="size-4" />
-            Sign out
-          </Button>
-        </header>
+  const commit = (next: Task[]) => { setHistory((items) => [...items.slice(-29), tasks]); setFuture([]); try { const dependencies = next.flatMap((task) => parseDependency(task.predecessors, next).map((dependency) => ({ ...dependency, successorId: task.id }))); const scheduled = scheduleTasks(next, dependencies); const rolled = rollupSummary(scheduled); setTasks(next.map((task) => ({ ...task, ...(rolled.find((item) => item.id === task.id) ?? {}) }))); } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to recalculate schedule"); setTasks(next); } };
+  const updateTask = (id: string, field: ColumnKey, value: string) => { const next = tasks.map((task) => { if (task.id !== id) return task; if (field === "duration") { const [amount, unit] = value.split(" "); const duration = Math.max(1, Number(amount) || 1); return { ...task, duration, durationUnit: (unit === "weeks" ? "weeks" : "days") as "days" | "weeks", finish: task.isMilestone ? task.start : addWorkingDays(task.start, unit === "weeks" ? duration * 5 - 1 : duration - 1) }; } if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) }; return { ...task, [field]: value }; }); commit(next); setEditing(null); };
+  const undo = () => { const previous = history[history.length - 1]; if (!previous) return; setFuture((items) => [tasks, ...items]); setTasks(previous); setHistory((items) => items.slice(0, -1)); };
+  const redo = () => { const next = future[0]; if (!next) return; setHistory((items) => [...items, tasks]); setTasks(next); setFuture((items) => items.slice(1)); };
+  const addTask = (parentId: string | null = null, afterId?: string) => { const id = String(Math.max(...tasks.map((task) => Number(task.id)), 0) + 1); const task: Task = { id, parentId, name: "New task", duration: 1, durationUnit: "days", start: "2025-05-02", finish: "2025-05-02", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "sage" }; const index = afterId ? tasks.findIndex((item) => item.id === afterId) + 1 : tasks.length; commit([...tasks.slice(0, index), task, ...tasks.slice(index)]); setSelected([id]); setEditing({ id, field: "name" }); setDraft(task.name); };
+  const deleteSelected = () => { if (!selected.length) return; commit(tasks.filter((task) => !selected.includes(task.id) && !selected.includes(task.parentId ?? ""))); setSelected([]); };
+  const indent = (id: string, outdent = false) => { const index = tasks.findIndex((task) => task.id === id); if (index < 0) return; const task = tasks[index]; if (outdent && task.parentId) { const parent = tasks.find((item) => item.id === task.parentId); commit(tasks.map((item) => item.id === id ? { ...item, parentId: parent?.parentId ?? null } : item)); } else if (!outdent && index > 0) { commit(tasks.map((item, itemIndex) => item.id === id ? { ...item, parentId: tasks[itemIndex - 1].id } : item)); } };
+  const toggleCollapse = (id: string) => setTasks((items) => items.map((task) => task.id === id ? { ...task, collapsed: !task.collapsed } : task));
 
-        <Card className="border-border/70 shadow-none">
-          <CardHeader>
-            <div className="mb-3 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <LayoutDashboard className="size-5" />
-            </div>
-            <CardTitle>Your dashboard is ready</CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm leading-6 text-muted-foreground">
-            Replace this starter content with the product&apos;s authenticated
-            experience. The route is protected and sign-in returns here by
-            default.
-          </CardContent>
-        </Card>
-      </div>
-    </main>
-  );
+  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redo() : undo(); } if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "y") redo(); if (event.key === "Delete" && !editing) deleteSelected(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); });
+  const handleKey = (event: ReactKeyboardEvent, task: Task, field: ColumnKey) => { if (event.key === "Escape") { setEditing(null); return; } if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); updateTask(task.id, field, draft); const columnIndex = columnDefs.findIndex((column) => column.key === field); const nextColumn = event.shiftKey ? columnDefs[Math.max(0, columnIndex - 1)] : columnDefs[Math.min(columnDefs.length - 1, columnIndex + 1)]; if (event.key === "Enter") { const rowIndex = visibleTasks.findIndex((item) => item.id === task.id); const nextRow = visibleTasks[rowIndex + 1]; if (nextRow) { setSelected([nextRow.id]); setEditing({ id: nextRow.id, field }); setDraft(String((nextRow as unknown as Record<string, unknown>)[field] ?? "")); } else addTask(task.parentId); } else if (nextColumn) { setEditing({ id: task.id, field: nextColumn.key }); setDraft(String((task as unknown as Record<string, unknown>)[nextColumn.key] ?? "")); } } };
+  const taskTop = (id: string) => visibleTasks.findIndex((task) => task.id === id) * rowHeight;
+  const dateOffset = (date: string) => Math.round((new Date(`${date}T12:00:00`).getTime() - projectStart.getTime()) / 86400000) * dayWidth;
+  const barWidth = (task: Task) => Math.max(task.isMilestone ? 14 : 22, (Math.round((new Date(`${task.finish}T12:00:00`).getTime() - new Date(`${task.start}T12:00:00`).getTime()) / 86400000) + 1) * dayWidth);
+
+  return <div className="planner-shell" onClick={() => setShowMenu(null)}>
+    <header className="planner-topbar"><div className="brand-lockup"><div className="brand-mark">⌁</div><div><div className="eyebrow">FIELD NOTES / 04</div><h1>Riverside schedule</h1></div></div><div className="top-actions"><div className="save-state"><span className="live-dot" /> Saved just now</div><button className="icon-button" title="Help"><CircleHelp size={17} /></button><button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button><button className="icon-button" onClick={() => { signOut(); navigate("/"); }} title="Sign out"><LogOut size={17} /></button></div></header>
+    <div className="project-toolbar"><div className="toolbar-left"><button className="tool-button primary" onClick={() => addTask()}><Plus size={16} /> New task</button><button className="tool-button" onClick={undo} disabled={!history.length}><Undo2 size={16} /></button><button className="tool-button" onClick={redo} disabled={!future.length}><Redo2 size={16} /></button><span className="toolbar-divider" /><button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button><button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button><button className="tool-button" onClick={deleteSelected}><Trash2 size={15} /> Delete</button></div><div className="toolbar-right"><div className="search-box"><Search size={15} /><input placeholder="Find a task" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button className="tool-button"><Download size={15} /> Export</button><button className="tool-button"><Settings2 size={15} /></button></div></div>
+    <div className="workbench"><section className="grid-pane" style={{ width: `${split}%` }}><div className="grid-scroll" ref={scrollRef}><div className="grid-header">{columnDefs.filter((column) => !hidden.includes(column.key)).map((column) => <div key={column.key} className="grid-head-cell" style={{ width: column.width }} onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}>{column.label}<ChevronsUpDown size={12} /></div>)}</div>{visibleTasks.map((task) => { const depth = (() => { let count = 0; let current = task; while (current.parentId) { count++; current = taskById.get(current.parentId) ?? current; } return count; })(); const summary = tasks.some((item) => item.parentId === task.id); return <div key={task.id} className={`grid-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={(event) => { setSelected(event.shiftKey || event.ctrlKey ? [...new Set([...selected, task.id])] : [task.id]); }} onContextMenu={(event) => { event.preventDefault(); setSelected([task.id]); setShowMenu({ x: event.clientX, y: event.clientY, id: task.id }); }} draggable onDragStart={() => setDragging(task.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragging && dragging !== task.id) { commit(tasks.map((item) => item.id === dragging ? { ...item, parentId: task.id } : item)); toast("Task nested under " + task.name); } setDragging(null); }}>
+      {columnDefs.filter((column) => !hidden.includes(column.key)).map((column) => { const value = column.key === "wbs" ? `${tasks.filter((item) => !item.parentId).findIndex((item) => item.id === task.id) + 1 || ""}.${task.id}`.replace(/^0\./, "") : column.key === "duration" ? `${task.duration} ${task.durationUnit === "days" ? "d" : "w"}` : column.key === "percent" ? `${task.percent}%` : String((task as unknown as Record<string, unknown>)[column.key] ?? ""); const isName = column.key === "name"; const canEdit = column.key !== "wbs" && !(summary && ["start", "finish", "duration"].includes(column.key)); return <div key={column.key} className={`grid-cell ${isName ? "name-cell" : ""} ${!canEdit ? "readonly" : ""}`} style={{ width: column.width }} onDoubleClick={() => { if (canEdit) { setEditing({ id: task.id, field: column.key }); setDraft(value); } }}>{isName && <span className="row-handle"><GripVertical size={13} /></span>}{isName && summary && <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>{task.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</button>}{isName && !summary && <span className="task-spacer" />}{editing?.id === task.id && editing.field === column.key ? <input autoFocus className="cell-input" type={column.key === "start" || column.key === "finish" ? "date" : "text"} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => handleKey(event, task, column.key)} onBlur={() => updateTask(task.id, column.key, draft)} /> : <span style={isName ? { paddingLeft: depth * 17 } : undefined} className={isName && summary ? "summary-name" : ""}>{value}</span>}</div>; })}</div>; })}</div></section>
+      <div className="splitter" onPointerDown={(event) => { const start = event.clientX; const original = split; const move = (moveEvent: PointerEvent) => setSplit(Math.max(35, Math.min(72, original + ((moveEvent.clientX - start) / window.innerWidth) * 100))); const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); }}><span /></div>
+      <section className="timeline-pane"><div className="timeline-scroll"><div className="timeline-header" style={{ width: timelineWidth }}><div className="month-row">{timelineDays.filter((day) => day.getDate() === 1 || day.getTime() === projectStart.getTime()).map((day) => <span key={day.toISOString()} style={{ left: dateOffset(dateLabel(day)) }}>{day.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>)}</div><div className="day-row">{timelineDays.map((day) => <span key={day.toISOString()} className={day.getDay() === 0 || day.getDay() === 6 ? "weekend" : ""} style={{ width: dayWidth }}>{zoom === "day" || day.getDay() === 1 ? day.getDate() : ""}</span>)}</div><div className="today-line" style={{ left: dateOffset("2025-04-17") }} /></div><div className="timeline-body" style={{ width: timelineWidth }}>{visibleTasks.map((task) => <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}><div className={`task-bar ${task.isMilestone ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`} title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}`} style={{ left: dateOffset(task.start), width: barWidth(task) }} onDoubleClick={() => setModalTask(task)}><span className="progress-fill" style={{ width: `${task.percent}%` }} />{!task.isMilestone && <><span className="bar-grip left" /><span className="bar-label">{task.name}</span><span className="bar-grip right" /></>}{task.isMilestone && <Diamond size={18} fill="currentColor" />}</div></div>)}<div className="today-line body-line" style={{ left: dateOffset("2025-04-17") }} /></div></div><div className="timeline-controls"><span className="control-label">Zoom</span>{(["day", "week", "month", "quarter"] as const).map((value) => <button key={value} className={zoom === value ? "active" : ""} onClick={() => setZoom(value)}>{value}</button>)}</div></section>
+    </div>
+    <footer className="statusbar"><span><span className="status-dot" /> {tasks.length} tasks</span><span>Working calendar: Mon–Fri</span><span className="footer-spacer" /><span>Drag a bar to reschedule · Enter to edit · ⌘Z to undo</span></footer>
+    {showMenu && <div className="context-menu" style={{ left: showMenu.x, top: showMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { setModalTask(taskById.get(showMenu.id) ?? null); setShowMenu(null); }}>Task information <span>↵</span></button><button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button><button onClick={() => { const source = taskById.get(showMenu.id); if (source) { commit([...tasks, { ...source, id: String(Date.now()), name: `${source.name} copy` }]); toast("Task duplicated"); } setShowMenu(null); }}><Copy size={14} /> Duplicate task</button><button onClick={() => { setSelected([showMenu.id]); deleteSelected(); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button><div className="menu-rule" /><button onClick={() => { const task = taskById.get(showMenu.id); if (task) commit(tasks.map((item) => item.id === task.id ? { ...item, isMilestone: true, duration: 1, finish: item.start } : item)); setShowMenu(null); }}>Convert to milestone</button><button onClick={() => setShowMenu(null)}>Columns & filters <Columns3 size={14} /></button></div>}
+    {modalTask && <div className="modal-backdrop" onClick={() => setModalTask(null)}><div className="task-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">TASK INFORMATION</div><h2>{modalTask.name}</h2></div><button className="icon-button" onClick={() => setModalTask(null)}><X size={18} /></button></div><div className="modal-grid">{(["name", "start", "finish", "duration", "predecessors", "resource", "percent", "notes"] as ColumnKey[]).map((field) => <label key={field}>{field === "percent" ? "% complete" : field}<input type={field === "start" || field === "finish" ? "date" : "text"} value={field === "duration" ? `${modalTask.duration} ${modalTask.durationUnit}` : String((modalTask as unknown as Record<string, unknown>)[field] ?? "")} onChange={(event) => setModalTask({ ...modalTask, [field]: event.target.value })} /></label>)}</div><div className="modal-actions"><button className="tool-button" onClick={() => setModalTask(null)}>Cancel</button><button className="tool-button primary" onClick={() => { updateTask(modalTask.id, "name", modalTask.name); setTasks((items) => items.map((item) => item.id === modalTask.id ? modalTask : item)); setModalTask(null); toast("Task updated"); }}>Save changes</button></div></div></div>}
+  </div>;
 }

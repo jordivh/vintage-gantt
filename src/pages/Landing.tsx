@@ -1,51 +1,7 @@
-// TODO: REPLACE THIS LANDING PAGE WITH AN ELEGANT, THEMATIC, AND WELL-DESIGNED LANDING PAGE RELEVANT TO THE PROJECT
 import { motion } from "framer-motion";
-import { Loader } from "lucide-react";
-import logo from "@/assets/logo.svg";
+import { ArrowRight, CalendarDays, Check, Layers3, MoveRight } from "lucide-react";
+import { Link } from "react-router";
 
 export default function Landing() {
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-      className="min-h-screen flex flex-col"
-    >
-
-      
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col items-center justify-center">
-        <div className="max-w-5xl mx-auto relative px-4">
-        {/* TODO: landing page goes here; replace with the landing page */}
-        <div className="flex justify-center">
-          <img
-            src={logo}
-            alt="Lock Icon"
-            width={64}
-            height={64}
-            className="rounded-lg mb-8 mt-24"
-          />
-        </div>
-        <div className="flex items-center justify-center text-foreground">
-          <Loader className="h-8 w-8 animate-spin mr-4 shrink-0" />
-          <span className="text-base">
-            <a
-              href="https://freebuff.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline hover:text-primary/80 transition-colors font-medium"
-            >
-              freebuff.com
-            </a>
-            {" "}is generating your project...
-          </span>
-        </div>
-        <p className="text-center text-muted-foreground py-6 text-sm mt-2">
-          Check progress on your project page.
-        </p>
-        
-        </div>
-      </div>
-    </motion.div>
-  );
+  return <main className="vintage-landing"><nav className="landing-nav"><div className="landing-brand"><span className="landing-seal">⌁</span><span>FIELD NOTES</span></div><Link to="/auth" className="landing-login">Open workspace <ArrowRight size={14} /></Link></nav><section className="landing-hero"><div className="hero-copy"><div className="eyebrow">A WORKING PLANNER FOR HUMAN-SCALE PROJECTS</div><h1>Make the moving parts<br /><em>fall into place.</em></h1><p>A calm, tactile project schedule for the work that deserves more than a list. Edit tasks like a spreadsheet, see the shape of the week, and keep every dependency in view.</p><div className="hero-actions"><Link to="/auth" className="hero-cta">Enter the planner <MoveRight size={17} /></Link><span className="hero-note"><Check size={14} /> Keyboard-first editing</span></div></div><div className="hero-art"><div className="paper-card"><div className="paper-top"><span>RIVERSIDE / 2025</span><span>04—30</span></div><h3>Festival schedule</h3><div className="mini-rule" />{["Site & permissions", "Artist lineup", "Install & opening", "Press materials"].map((item, index) => <div className="mini-task" key={item}><span className={`mini-dot dot-${index}`} /><span>{item}</span><i style={{ width: `${[87, 64, 38, 23][index]}%` }} /></div>)}<div className="paper-stamp">IN<br />ORDER</div></div><div className="hero-scribble">est. 2025</div></div></section><section className="landing-features"><div><CalendarDays size={20} /><h2>A view that reads at a glance.</h2><p>Grid and timeline stay locked together, so dates, duration, and progress never lose their place.</p></div><div><Layers3 size={20} /><h2>Structure without ceremony.</h2><p>Indent, group, collapse, and reorder work in the same gesture you already know from a spreadsheet.</p></div><div><Check size={20} /><h2>Dependencies that behave.</h2><p>A working-day calendar and forward scheduling keep downstream work honest as plans change.</p></div></section><footer className="landing-footer"><span>Riverside schedule / private workspace</span><Link to="/auth">Start a project <ArrowRight size={14} /></Link></footer></main>;
 }
