@@ -36,6 +36,7 @@ export interface ScheduleOptions {
   calendars?: Record<string, WorkingCalendar>;
   defaultCalendar?: WorkingCalendar;
   resetDates?: boolean;
+  lockedTaskIds?: string[];
 }
 
 const iso = (date: Date) => date.toISOString().slice(0, 10);
@@ -100,7 +101,7 @@ function dependencyStart(predecessor: ScheduleTask, successor: ScheduleTask, dep
   if (dependency.type === "SS") return addWorkingDays(predecessor.start, lag, calendar, successor.resourceId);
   if (dependency.type === "FF") return addWorkingDays(finishFromStart(predecessor, calendar), lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
   if (dependency.type === "SF") return addWorkingDays(predecessor.start, lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
-  return addWorkingDays(finishFromStart(predecessor, calendar), lag + 1, calendar, successor.resourceId);
+  return addWorkingDays(finishFromStart(predecessor, calendar), lag === 0 ? 1 : lag, calendar, successor.resourceId);
 }
 
 export function hasCircularDependency(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
@@ -138,9 +139,9 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
       const earliest = dependencyStart(predecessor, task, dependency, options);
       if (!dependencyStartDate || earliest > dependencyStartDate) dependencyStartDate = earliest;
     }
-    if (dependencyStartDate) task.start = dependencyStartDate;
+    if (dependencyStartDate && !options.lockedTaskIds?.includes(task.id)) task.start = dependencyStartDate;
     const projectStart = options.projectStart;
-    if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
+    if (projectStart && !task.parentId && task.start < projectStart && !options.lockedTaskIds?.includes(task.id)) task.start = projectStart;
     task.finish = finishFromStart(task, calendarForTask(task, options));
     visiting.delete(task.id);
   };
@@ -164,7 +165,7 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
       visit(successor);
       const successorCalendar = calendarForTask(successor, options);
       const lag = dependency.lagDays;
-      if (dependency.type === "FS") successorConstraints.push(addWorkingDays(successor.start, -lag - 1, successorCalendar, task.resourceId));
+      if (dependency.type === "FS") successorConstraints.push(addWorkingDays(successor.start, lag === 0 ? -1 : -lag, successorCalendar, task.resourceId));
       if (dependency.type === "SS") successorConstraints.push(addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
       if (dependency.type === "FF") successorConstraints.push(addWorkingDays(successor.finish, -lag, successorCalendar, task.resourceId));
       if (dependency.type === "SF") successorConstraints.push(addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
