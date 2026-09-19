@@ -139,9 +139,9 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
       const earliest = dependencyStart(predecessor, task, dependency, options);
       if (!dependencyStartDate || earliest > dependencyStartDate) dependencyStartDate = earliest;
     }
-    if (dependencyStartDate && !options.lockedTaskIds?.includes(task.id)) task.start = dependencyStartDate;
+    if (dependencyStartDate) { if (!options.lockedTaskIds?.includes(task.id) || task.start < dependencyStartDate) task.start = dependencyStartDate; }
     const projectStart = options.projectStart;
-    if (projectStart && !task.parentId && task.start < projectStart && !options.lockedTaskIds?.includes(task.id)) task.start = projectStart;
+    if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
     task.finish = finishFromStart(task, calendarForTask(task, options));
     visiting.delete(task.id);
   };
