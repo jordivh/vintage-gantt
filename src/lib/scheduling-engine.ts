@@ -120,7 +120,7 @@ export function hasCircularDependency(tasks: ScheduleTask[], dependencies: Sched
 }
 
 function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions) {
-  const result = tasks.map((task) => ({ ...task }));
+  const result = tasks.map((task) => ({ ...task, ...(options.projectStart ? { start: options.projectStart } : {}) }));
   const byId = new Map(result.map((task) => [task.id, task]));
   const incoming = new Map<string, ScheduleDependency[]>();
   dependencies.forEach((dependency) => incoming.set(dependency.successorId, [...(incoming.get(dependency.successorId) ?? []), dependency]));
@@ -145,7 +145,7 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
 }
 
 function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions) {
-  const result = tasks.map((task) => ({ ...task }));
+  const result = tasks.map((task) => ({ ...task, ...(options.projectFinish ? { finish: options.projectFinish } : {}) }));
   const byId = new Map(result.map((task) => [task.id, task]));
   const outgoing = new Map<string, ScheduleDependency[]>();
   dependencies.forEach((dependency) => outgoing.set(dependency.predecessorId, [...(outgoing.get(dependency.predecessorId) ?? []), dependency]));
