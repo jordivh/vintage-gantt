@@ -2,13 +2,240 @@ export type DependencyType = "FS" | "SS" | "FF" | "SF";
 export type DurationUnit = "days" | "weeks";
 export type PlanningDirection = "forward" | "backward";
 
-export interface WorkingCalendar {
-  id?: string;
-  name?: string;
-  holidays?: string[];
-  organizationClosures?: string[];
-  employeeLeave?: Record<string, string[]>;
+/* --------------------------------------------------------------------------
+ * Calendar model — three inheritance levels: base → project → person
+ * ------------------------------------------------------------------------ */
+
+export type CalendarType = "base" | "project" | "person";
+export type CalendarExceptionType = "holiday" | "shutdown" | "leave" | "extra-working";
+/** `source` lets us add leave synchronisation later without a migration. */
+export type CalendarExceptionSource = "manual" | "import" | "sync";
+
+/** Weekday numbers follow `Date#getDay()`: 0 = Sunday … 6 = Saturday. */
+export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+
+export const WEEKDAY_LABELS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+
+/** Monday-first ordering, which is how the working-pattern toggles are shown. */
+export const WEEK_ORDER: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
+
+export const EXCEPTION_TYPE_LABELS: Record<CalendarExceptionType, string> = {
+  holiday: "Holiday",
+  shutdown: "Shutdown",
+  leave: "Leave",
+  "extra-working": "Extra working day",
+};
+
+export interface PlannerCalendar {
+  id: string;
+  name: string;
+  type: CalendarType;
+  parentCalendarId: string | null;
+  isDefault: boolean;
+  /** Weekly working pattern. `undefined` means "inherit the parent's pattern". */
+  workingDays?: Weekday[];
 }
+
+export interface CalendarException {
+  id: string;
+  calendarId: string;
+  /** ISO date (yyyy-mm-dd), inclusive */
+  startDate: string;
+  /** ISO date (yyyy-mm-dd), inclusive */
+  endDate: string;
+  label: string;
+  type: CalendarExceptionType;
+  isWorkingDay: boolean;
+  source: CalendarExceptionSource;
+}
+
+export interface CalendarSystem {
+  calendars: PlannerCalendar[];
+  exceptions: CalendarException[];
+  defaultCalendarId: string;
+}
+
+/** Why a given date is (not) a working day, and where that decision came from. */
+export interface WorkingDayResolution {
+  date: string;
+  isWorkingDay: boolean;
+  reason: string;
+  sourceCalendarId: string | null;
+  sourceCalendarName: string | null;
+  /** True when the decision comes from an ancestor calendar instead of the requested one. */
+  inherited: boolean;
+  exception: CalendarException | null;
+}
+
+/* --------------------------------------------------------------------------
+ * Date plumbing (kept private — every calculation in the app goes through the
+ * resolver below, never through ad-hoc date logic).
+ * ------------------------------------------------------------------------ */
+
+export const isoDate = (date: Date) => date.toISOString().slice(0, 10);
+export const parseIsoDate = (value: string) => new Date(`${value}T12:00:00`);
+
+const shiftDays = (value: string, amount: number) => {
+  const date = parseIsoDate(value);
+  date.setDate(date.getDate() + amount);
+  return isoDate(date);
+};
+
+/* --------------------------------------------------------------------------
+ * Resolution
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Walks from the requested calendar up through its parents (person → project →
+ * base). The most specific calendar that has something to say wins.
+ */
+export function calendarChain(system: CalendarSystem, calendarId?: string): PlannerCalendar[] {
+  const byId = new Map(system.calendars.map((calendar) => [calendar.id, calendar]));
+  const chain: PlannerCalendar[] = [];
+  const seen = new Set<string>();
+  let currentId: string | null = calendarId ?? system.defaultCalendarId;
+  while (currentId && !seen.has(currentId)) {
+    const calendar = byId.get(currentId);
+    if (!calendar) break;
+    seen.add(currentId);
+    chain.push(calendar);
+    currentId = calendar.parentCalendarId;
+  }
+  if (!chain.length) {
+    const fallback = byId.get(system.defaultCalendarId);
+    if (fallback) chain.push(fallback);
+  }
+  return chain;
+}
+
+function exceptionPriority(exception: CalendarException) {
+  // An "extra working day" deliberately overrides an inherited shutdown/holiday.
+  return exception.type === "extra-working" && exception.isWorkingDay ? 2 : 1;
+}
+
+/** Every exception on a single calendar that covers a date, most specific first. */
+export function exceptionsOnDate(system: CalendarSystem, calendarId: string, date: string) {
+  return system.exceptions
+    .filter(
+      (exception) =>
+        exception.calendarId === calendarId &&
+        exception.startDate <= date &&
+        exception.endDate >= date,
+    )
+    .sort(
+      (a, b) =>
+        exceptionPriority(b) - exceptionPriority(a) ||
+        b.startDate.localeCompare(a.startDate) ||
+        a.endDate.localeCompare(b.endDate),
+    );
+}
+
+/**
+ * THE working-day resolver. Every date calculation in the app resolves through
+ * this function. Order: person exception > project exception > base exception >
+ * weekly pattern.
+ */
+export function resolveWorkingDay(
+  date: string,
+  calendarId: string | undefined,
+  system: CalendarSystem,
+): WorkingDayResolution {
+  const chain = calendarChain(system, calendarId);
+  const leafId = chain[0]?.id ?? null;
+
+  for (const calendar of chain) {
+    const [hit] = exceptionsOnDate(system, calendar.id, date);
+    if (hit) {
+      return {
+        date,
+        isWorkingDay: hit.isWorkingDay,
+        reason: hit.label || EXCEPTION_TYPE_LABELS[hit.type],
+        sourceCalendarId: calendar.id,
+        sourceCalendarName: calendar.name,
+        inherited: calendar.id !== leafId,
+        exception: hit,
+      };
+    }
+  }
+
+  const weekday = parseIsoDate(date).getDay() as Weekday;
+  const patternCalendar = chain.find((calendar) => calendar.workingDays && calendar.workingDays.length);
+  const workingDays = patternCalendar?.workingDays ?? ([1, 2, 3, 4, 5] as Weekday[]);
+  const isWorkingDay = workingDays.includes(weekday);
+  return {
+    date,
+    isWorkingDay,
+    reason: isWorkingDay
+      ? `Working ${WEEKDAY_LABELS[weekday]} (weekly pattern)`
+      : `${WEEKDAY_LABELS[weekday]} is not a working day (weekly pattern)`,
+    sourceCalendarId: patternCalendar?.id ?? null,
+    sourceCalendarName: patternCalendar?.name ?? null,
+    inherited: Boolean(patternCalendar && patternCalendar.id !== leafId),
+    exception: null,
+  };
+}
+
+export function isWorkingDay(date: string, calendarId: string | undefined, system: CalendarSystem) {
+  return resolveWorkingDay(date, calendarId, system).isWorkingDay;
+}
+
+/** Steps `amount` working days from `value` (negative steps backwards). */
+export function addWorkingDays(
+  value: string,
+  amount: number,
+  calendarId: string | undefined,
+  system: CalendarSystem,
+) {
+  let cursor = value;
+  const direction = amount < 0 ? -1 : 1;
+  let remaining = Math.abs(amount);
+  while (remaining > 0) {
+    cursor = shiftDays(cursor, direction);
+    if (isWorkingDay(cursor, calendarId, system)) remaining -= 1;
+  }
+  return cursor;
+}
+
+/** Snap a date onto a working day, moving forwards (or backwards) until it is one. */
+export function ensureWorkingDay(
+  value: string,
+  calendarId: string | undefined,
+  system: CalendarSystem,
+  direction: 1 | -1 = 1,
+) {
+  return isWorkingDay(value, calendarId, system)
+    ? value
+    : addWorkingDays(value, direction, calendarId, system);
+}
+
+/** Inclusive count of working days between two dates (at least 1). */
+export function workingDaysBetween(
+  start: string,
+  finish: string,
+  calendarId: string | undefined,
+  system: CalendarSystem,
+) {
+  if (parseIsoDate(start) > parseIsoDate(finish)) return 0;
+  let count = 0;
+  let cursor = start;
+  while (parseIsoDate(cursor) <= parseIsoDate(finish)) {
+    if (isWorkingDay(cursor, calendarId, system)) count += 1;
+    cursor = shiftDays(cursor, 1);
+  }
+  return Math.max(1, count);
+}
+
+/* --------------------------------------------------------------------------
+ * Scheduling
+ * ------------------------------------------------------------------------ */
 
 export interface ScheduleTask {
   id: string;
@@ -17,6 +244,7 @@ export interface ScheduleTask {
   durationUnit: DurationUnit;
   start: string;
   finish: string;
+  /** Task-level (person) calendar. Falls back to the project calendar. */
   calendarId?: string;
   resourceId?: string;
   isMilestone?: boolean;
@@ -33,76 +261,99 @@ export interface ScheduleOptions {
   direction?: PlanningDirection;
   projectStart?: string;
   projectFinish?: string;
-  calendars?: Record<string, WorkingCalendar>;
-  defaultCalendar?: WorkingCalendar;
+  calendarSystem?: CalendarSystem;
+  projectCalendarId?: string;
   resetDates?: boolean;
   /** Task ids whose manually edited dates must remain fixed during a non-reset pass. */
   anchoredTaskIds?: string[];
 }
 
-const iso = (date: Date) => date.toISOString().slice(0, 10);
-const parse = (value: string) => new Date(`${value}T12:00:00`);
-const unique = (values: string[]) => [...new Set(values)];
-
-export function calendarForTask(task: ScheduleTask, options: ScheduleOptions = {}) {
-  return task.calendarId && options.calendars?.[task.calendarId]
-    ? options.calendars[task.calendarId]
-    : options.defaultCalendar ?? {};
+interface ResolvedScheduleOptions extends ScheduleOptions {
+  calendarSystem: CalendarSystem;
 }
 
-export function isWorkingDay(date: Date, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const day = date.getDay();
-  const unavailable = unique([
-    ...(calendar.holidays ?? []),
-    ...(calendar.organizationClosures ?? []),
-    ...(resourceId ? calendar.employeeLeave?.[resourceId] ?? [] : []),
-  ]);
-  return day !== 0 && day !== 6 && !unavailable.includes(iso(date));
-}
-
-export function addWorkingDays(value: string, amount: number, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const date = parse(value);
-  const direction = amount < 0 ? -1 : 1;
-  let remaining = Math.abs(amount);
-  while (remaining > 0) {
-    date.setDate(date.getDate() + direction);
-    if (isWorkingDay(date, calendar, resourceId)) remaining -= 1;
-  }
-  return iso(date);
-}
-
-export function workingDaysBetween(start: string, finish: string, calendar: WorkingCalendar = {}, resourceId?: string) {
-  const from = parse(start);
-  const to = parse(finish);
-  if (from > to) return 0;
-  let count = 0;
-  for (const cursor = new Date(from); cursor <= to; cursor.setDate(cursor.getDate() + 1)) {
-    if (isWorkingDay(cursor, calendar, resourceId)) count += 1;
-  }
-  return Math.max(1, count);
+export function createDefaultCalendarSystem(): CalendarSystem {
+  return {
+    calendars: [
+      {
+        id: "base",
+        name: "Standard workweek",
+        type: "base",
+        parentCalendarId: null,
+        isDefault: true,
+        workingDays: [1, 2, 3, 4, 5],
+      },
+    ],
+    exceptions: [],
+    defaultCalendarId: "base",
+  };
 }
 
 export function durationInWorkingDays(task: ScheduleTask) {
-  return task.isMilestone ? 1 : task.durationUnit === "weeks" ? task.duration * 5 : task.duration;
+  if (task.isMilestone) return 1;
+  return task.durationUnit === "weeks" ? task.duration * 5 : task.duration;
 }
 
-function finishFromStart(task: ScheduleTask, calendar: WorkingCalendar) {
-  if (task.isMilestone || task.duration <= 1) return task.start;
-  return addWorkingDays(task.start, durationInWorkingDays(task) - 1, calendar, task.resourceId);
+/** The calendar a task is planned on: its own, else the project's, else the default. */
+export function calendarIdForTask(task: ScheduleTask, options: ResolvedScheduleOptions) {
+  return task.calendarId ?? options.projectCalendarId ?? options.calendarSystem.defaultCalendarId;
 }
 
-function startFromFinish(task: ScheduleTask, calendar: WorkingCalendar) {
-  if (task.isMilestone || task.duration <= 1) return task.finish;
-  return addWorkingDays(task.finish, -(durationInWorkingDays(task) - 1), calendar, task.resourceId);
+function finishFromStart(task: ScheduleTask, options: ResolvedScheduleOptions) {
+  const calendarId = calendarIdForTask(task, options);
+  if (task.isMilestone || durationInWorkingDays(task) <= 1) {
+    return ensureWorkingDay(task.start, calendarId, options.calendarSystem);
+  }
+  return addWorkingDays(
+    task.start,
+    durationInWorkingDays(task) - 1,
+    calendarId,
+    options.calendarSystem,
+  );
 }
 
-function dependencyStart(predecessor: ScheduleTask, successor: ScheduleTask, dependency: ScheduleDependency, options: ScheduleOptions) {
-  const calendar = calendarForTask(successor, options);
+function startFromFinish(task: ScheduleTask, options: ResolvedScheduleOptions) {
+  const calendarId = calendarIdForTask(task, options);
+  if (task.isMilestone || durationInWorkingDays(task) <= 1) {
+    return ensureWorkingDay(task.finish, calendarId, options.calendarSystem);
+  }
+  return addWorkingDays(
+    task.finish,
+    -(durationInWorkingDays(task) - 1),
+    calendarId,
+    options.calendarSystem,
+  );
+}
+
+function dependencyStart(
+  predecessor: ScheduleTask,
+  successor: ScheduleTask,
+  dependency: ScheduleDependency,
+  options: ResolvedScheduleOptions,
+) {
+  const calendarId = calendarIdForTask(successor, options);
+  const { calendarSystem } = options;
   const lag = dependency.lagDays;
-  if (dependency.type === "SS") return addWorkingDays(predecessor.start, lag, calendar, successor.resourceId);
-  if (dependency.type === "FF") return addWorkingDays(finishFromStart(predecessor, calendar), lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
-  if (dependency.type === "SF") return addWorkingDays(predecessor.start, lag - (durationInWorkingDays(successor) - 1), calendar, successor.resourceId);
-  return addWorkingDays(finishFromStart(predecessor, calendar), lag + 1, calendar, successor.resourceId);
+  if (dependency.type === "SS") {
+    return addWorkingDays(predecessor.start, lag, calendarId, calendarSystem);
+  }
+  if (dependency.type === "FF") {
+    return addWorkingDays(
+      finishFromStart(predecessor, options),
+      lag - (durationInWorkingDays(successor) - 1),
+      calendarId,
+      calendarSystem,
+    );
+  }
+  if (dependency.type === "SF") {
+    return addWorkingDays(
+      predecessor.start,
+      lag - (durationInWorkingDays(successor) - 1),
+      calendarId,
+      calendarSystem,
+    );
+  }
+  return addWorkingDays(finishFromStart(predecessor, options), lag + 1, calendarId, calendarSystem);
 }
 
 export function findDependencyCycle(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
@@ -110,7 +361,10 @@ export function findDependencyCycle(tasks: ScheduleTask[], dependencies: Schedul
   const edges = new Map<string, string[]>();
   dependencies.forEach((dependency) => {
     if (!taskIds.has(dependency.predecessorId) || !taskIds.has(dependency.successorId)) return;
-    edges.set(dependency.predecessorId, [...(edges.get(dependency.predecessorId) ?? []), dependency.successorId]);
+    edges.set(dependency.predecessorId, [
+      ...(edges.get(dependency.predecessorId) ?? []),
+      dependency.successorId,
+    ]);
   });
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -143,11 +397,22 @@ export function hasCircularDependency(tasks: ScheduleTask[], dependencies: Sched
   return Boolean(findDependencyCycle(tasks, dependencies));
 }
 
-function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions) {
-  const result = tasks.map((task) => ({ ...task, ...(options.resetDates && options.projectStart ? { start: options.projectStart } : {}) }));
+function scheduleForward(
+  tasks: ScheduleTask[],
+  dependencies: ScheduleDependency[],
+  options: ResolvedScheduleOptions,
+) {
+  const result = tasks.map((task) => {
+    if (options.resetDates && options.projectStart) {
+      return { ...task, start: ensureWorkingDay(options.projectStart, calendarIdForTask(task, options), options.calendarSystem) };
+    }
+    return { ...task };
+  });
   const byId = new Map(result.map((task) => [task.id, task]));
   const incoming = new Map<string, ScheduleDependency[]>();
-  dependencies.forEach((dependency) => incoming.set(dependency.successorId, [...(incoming.get(dependency.successorId) ?? []), dependency]));
+  dependencies.forEach((dependency) =>
+    incoming.set(dependency.successorId, [...(incoming.get(dependency.successorId) ?? []), dependency]),
+  );
   const visiting = new Set<string>();
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
@@ -159,20 +424,35 @@ function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency
       const earliest = dependencyStart(predecessor, task, dependency, options);
       if (earliest > task.start) task.start = earliest;
     }
-    const projectStart = options.projectStart;
+    const { projectStart } = options;
     if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
-    task.finish = finishFromStart(task, calendarForTask(task, options));
+    task.start = ensureWorkingDay(task.start, calendarIdForTask(task, options), options.calendarSystem);
+    task.finish = finishFromStart(task, options);
     visiting.delete(task.id);
   };
   result.forEach(visit);
   return result;
 }
 
-function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions) {
-  const result = tasks.map((task) => ({ ...task, ...(options.resetDates && options.projectFinish ? { finish: options.projectFinish } : {}) }));
+function scheduleBackward(
+  tasks: ScheduleTask[],
+  dependencies: ScheduleDependency[],
+  options: ResolvedScheduleOptions,
+) {
+  const result = tasks.map((task) => {
+    if (options.resetDates && options.projectFinish) {
+      return { ...task, finish: ensureWorkingDay(options.projectFinish, calendarIdForTask(task, options), options.calendarSystem, -1) };
+    }
+    return { ...task };
+  });
   const byId = new Map(result.map((task) => [task.id, task]));
   const outgoing = new Map<string, ScheduleDependency[]>();
-  dependencies.forEach((dependency) => outgoing.set(dependency.predecessorId, [...(outgoing.get(dependency.predecessorId) ?? []), dependency]));
+  dependencies.forEach((dependency) =>
+    outgoing.set(dependency.predecessorId, [
+      ...(outgoing.get(dependency.predecessorId) ?? []),
+      dependency,
+    ]),
+  );
   const visiting = new Set<string>();
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
@@ -182,17 +462,38 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
       const successor = byId.get(dependency.successorId);
       if (!successor) continue;
       visit(successor);
-      const successorCalendar = calendarForTask(successor, options);
+      const successorCalendar = calendarIdForTask(successor, options);
+      const { calendarSystem } = options;
       const lag = dependency.lagDays;
-      if (dependency.type === "FS") successorConstraints.push(addWorkingDays(successor.start, -lag - 1, successorCalendar, task.resourceId));
-      if (dependency.type === "SS") successorConstraints.push(addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
-      if (dependency.type === "FF") successorConstraints.push(addWorkingDays(successor.finish, -lag, successorCalendar, task.resourceId));
-      if (dependency.type === "SF") successorConstraints.push(addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
+      if (dependency.type === "FS") {
+        successorConstraints.push(
+          addWorkingDays(successor.start, -lag - 1, successorCalendar, calendarSystem),
+        );
+      }
+      if (dependency.type === "SS") {
+        successorConstraints.push(
+          addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, successorCalendar, calendarSystem),
+        );
+      }
+      if (dependency.type === "FF") {
+        successorConstraints.push(
+          addWorkingDays(successor.finish, -lag, successorCalendar, calendarSystem),
+        );
+      }
+      if (dependency.type === "SF") {
+        successorConstraints.push(
+          addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, calendarSystem),
+        );
+      }
     }
     const isAnchored = options.anchoredTaskIds?.includes(task.id) ?? false;
     if (!isAnchored) {
-      task.finish = successorConstraints.length ? successorConstraints.reduce((latest, date) => date < latest ? date : latest) : options.projectFinish ?? task.finish;
-      task.start = startFromFinish(task, calendarForTask(task, options));
+      const calendarId = calendarIdForTask(task, options);
+      const latest = successorConstraints.length
+        ? successorConstraints.reduce((min, date) => (date < min ? date : min))
+        : options.projectFinish ?? task.finish;
+      task.finish = ensureWorkingDay(latest, calendarId, options.calendarSystem, -1);
+      task.start = startFromFinish(task, options);
     }
     visiting.delete(task.id);
   };
@@ -200,14 +501,32 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
   return result;
 }
 
-export function scheduleTasks(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions | WorkingCalendar = {}) {
+export function scheduleTasks(
+  tasks: ScheduleTask[],
+  dependencies: ScheduleDependency[],
+  options: ScheduleOptions = {},
+) {
   const cycle = findDependencyCycle(tasks, dependencies);
-  if (cycle) throw new Error(`Circular dependency detected: ${cycle.join(" → ")}. Please remove one of the links and try again.`);
-  const normalized: ScheduleOptions = "holidays" in options || "organizationClosures" in options || "employeeLeave" in options ? { defaultCalendar: options as WorkingCalendar } : options as ScheduleOptions;
-  return normalized.direction === "backward" ? scheduleBackward(tasks, dependencies, normalized) : scheduleForward(tasks, dependencies, normalized);
+  if (cycle) {
+    throw new Error(
+      `Circular dependency detected: ${cycle.join(" → ")}. Please remove one of the links and try again.`,
+    );
+  }
+  const resolved: ResolvedScheduleOptions = {
+    ...options,
+    calendarSystem: options.calendarSystem ?? createDefaultCalendarSystem(),
+  };
+  return resolved.direction === "backward"
+    ? scheduleBackward(tasks, dependencies, resolved)
+    : scheduleForward(tasks, dependencies, resolved);
 }
 
-export function rollupSummary(tasks: ScheduleTask[], calendar: WorkingCalendar = {}) {
+/** Rolls summary-task dates up from their children (inclusively, in working days). */
+export function rollupSummary(
+  tasks: ScheduleTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+) {
   const result = tasks.map((task) => ({ ...task }));
   const byId = new Map(result.map((task) => [task.id, task]));
   [...result].reverse().forEach((task) => {
@@ -216,10 +535,56 @@ export function rollupSummary(tasks: ScheduleTask[], calendar: WorkingCalendar =
     if (!parent) return;
     const children = result.filter((candidate) => candidate.parentId === parent.id);
     if (!children.length) return;
-    parent.start = children.reduce((min, child) => child.start < min ? child.start : min, children[0].start);
-    parent.finish = children.reduce((max, child) => child.finish > max ? child.finish : max, children[0].finish);
-    parent.duration = workingDaysBetween(parent.start, parent.finish, calendar, parent.resourceId);
+    parent.start = children.reduce((min, child) => (child.start < min ? child.start : min), children[0].start);
+    parent.finish = children.reduce((max, child) => (child.finish > max ? child.finish : max), children[0].finish);
+    const calendarId = parent.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+    parent.duration = workingDaysBetween(parent.start, parent.finish, calendarId, system);
     parent.durationUnit = "days";
   });
   return result;
+}
+
+/* --------------------------------------------------------------------------
+ * Belgian public holidays (used by "Import Belgian public holidays for year X")
+ * ------------------------------------------------------------------------ */
+
+const addDaysToDate = (date: Date, amount: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+};
+
+/** Anonymous Gregorian algorithm (Meeus/Jones/Butcher). */
+export function easterSunday(year: number): Date {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day, 12);
+}
+
+export function belgianPublicHolidays(year: number): { date: string; label: string }[] {
+  const easter = easterSunday(year);
+  return [
+    { date: `${year}-01-01`, label: "New Year's Day" },
+    { date: isoDate(addDaysToDate(easter, 1)), label: "Easter Monday" },
+    { date: `${year}-05-01`, label: "Labour Day" },
+    { date: isoDate(addDaysToDate(easter, 39)), label: "Ascension Day" },
+    { date: isoDate(addDaysToDate(easter, 50)), label: "Whit Monday" },
+    { date: `${year}-07-21`, label: "Belgian National Day" },
+    { date: `${year}-08-15`, label: "Assumption of Mary" },
+    { date: `${year}-11-01`, label: "All Saints' Day" },
+    { date: `${year}-11-11`, label: "Armistice Day" },
+    { date: `${year}-12-25`, label: "Christmas Day" },
+  ];
 }

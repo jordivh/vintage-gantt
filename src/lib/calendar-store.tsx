@@ -1,0 +1,444 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  belgianPublicHolidays,
+  calendarChain,
+  type CalendarException,
+  type CalendarExceptionSource,
+  type CalendarExceptionType,
+  type CalendarSystem,
+  type CalendarType,
+  type PlannerCalendar,
+  type Weekday,
+} from "./scheduling-engine";
+import { recalculateTasks, type PlannerTask } from "./planner-model";
+
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  /** Required: every project is planned on a calendar. */
+  calendarId: string;
+}
+
+export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
+  base: "Base",
+  project: "Project",
+  person: "Person",
+};
+
+export const EXCEPTION_TYPE_ORDER: CalendarExceptionType[] = [
+  "holiday",
+  "shutdown",
+  "leave",
+  "extra-working",
+];
+
+export const EXCEPTION_IS_WORKING: Record<CalendarExceptionType, boolean> = {
+  holiday: false,
+  shutdown: false,
+  leave: false,
+  "extra-working": true,
+};
+
+const uid = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2, 10);
+
+/* ------------------------------------------------------------------ seeds */
+
+export const BASE_CALENDAR_ID = "cal-base-belgium";
+export const RIVERSIDE_CALENDAR_ID = "cal-proj-riverside";
+export const RIVERSIDE_PROJECT_ID = "proj-riverside";
+
+const seedTasks: PlannerTask[] = [
+  { id: "1", parentId: null, name: "Riverside Arts Festival", duration: 18, durationUnit: "days", start: "2025-04-07", finish: "2025-04-30", isMilestone: false, predecessors: "", resource: "M. Alvarez", percent: 42, notes: "Main project brief and public opening.", color: "ochre" },
+  { id: "2", parentId: "1", name: "Site & permissions", duration: 5, durationUnit: "days", start: "2025-04-07", finish: "2025-04-11", isMilestone: false, predecessors: "", resource: "E. Shaw", percent: 100, notes: "", color: "sage" },
+  { id: "3", parentId: "1", name: "Artist lineup", duration: 8, durationUnit: "days", start: "2025-04-14", finish: "2025-04-23", isMilestone: false, predecessors: "2FS", resource: "M. Alvarez", percent: 66, notes: "Confirm three final commissions.", color: "clay" },
+  { id: "4", parentId: "1", name: "Install & opening", duration: 4, durationUnit: "days", start: "2025-04-25", finish: "2025-04-30", isMilestone: false, predecessors: "3FS+1d", resource: "J. Bell", percent: 18, notes: "Crew call at 07:30.", color: "ink" },
+  { id: "5", parentId: null, name: "Press & visitor materials", duration: 9, durationUnit: "days", start: "2025-04-10", finish: "2025-04-22", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 24, notes: "Printed guide, wayfinding, web copy.", color: "rust" },
+  { id: "6", parentId: "5", name: "Draft visitor guide", duration: 4, durationUnit: "days", start: "2025-04-10", finish: "2025-04-15", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 72, notes: "", color: "sage" },
+  { id: "7", parentId: "5", name: "Print & distribute", duration: 3, durationUnit: "days", start: "2025-04-17", finish: "2025-04-21", isMilestone: false, predecessors: "6FS+1d", resource: "R. Chen", percent: 0, notes: "", color: "clay" },
+  { id: "8", parentId: null, name: "Festival opens", duration: 1, durationUnit: "days", start: "2025-05-01", finish: "2025-05-01", isMilestone: true, predecessors: "4FS, 7FS", resource: "", percent: 0, notes: "Public opening day.", color: "rust" },
+];
+
+function seedSystem(): CalendarSystem {
+  const holidays: CalendarException[] = [2024, 2025, 2026].flatMap((year) =>
+    belgianPublicHolidays(year).map((holiday) => ({
+      id: `import-${holiday.date}`,
+      calendarId: BASE_CALENDAR_ID,
+      startDate: holiday.date,
+      endDate: holiday.date,
+      label: holiday.label,
+      type: "holiday" as CalendarExceptionType,
+      isWorkingDay: false,
+      source: "import" as CalendarExceptionSource,
+    })),
+  );
+  const calendars: PlannerCalendar[] = [
+    { id: BASE_CALENDAR_ID, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] },
+    { id: RIVERSIDE_CALENDAR_ID, name: "Riverside Arts Festival", type: "project", parentCalendarId: BASE_CALENDAR_ID, isDefault: false },
+    { id: "cal-person-alvarez", name: "M. Alvarez — leave", type: "person", parentCalendarId: RIVERSIDE_CALENDAR_ID, isDefault: false },
+  ];
+  return {
+    calendars,
+    exceptions: [
+      ...holidays,
+      { id: "exc-install-shutdown", calendarId: RIVERSIDE_CALENDAR_ID, startDate: "2025-04-28", endDate: "2025-04-30", label: "Install shutdown", type: "shutdown", isWorkingDay: false, source: "manual" },
+      { id: "exc-alvarez-leave", calendarId: "cal-person-alvarez", startDate: "2025-04-24", endDate: "2025-04-24", label: "Annual leave", type: "leave", isWorkingDay: false, source: "manual" },
+    ],
+    defaultCalendarId: BASE_CALENDAR_ID,
+  };
+}
+
+const seedProjects: ProjectRecord[] = [
+  { id: RIVERSIDE_PROJECT_ID, name: "Riverside Arts Festival", calendarId: RIVERSIDE_CALENDAR_ID },
+  { id: "proj-press", name: "Press & visitor materials", calendarId: BASE_CALENDAR_ID },
+];
+
+/* ------------------------------------------- pure calendar-system builders */
+
+export function makeException(input: {
+  calendarId: string;
+  startDate: string;
+  endDate: string;
+  label: string;
+  type: CalendarExceptionType;
+  source?: CalendarExceptionSource;
+}): CalendarException {
+  const [from, to] =
+    input.startDate <= input.endDate ? [input.startDate, input.endDate] : [input.endDate, input.startDate];
+  return {
+    id: `exc-${uid()}`,
+    calendarId: input.calendarId,
+    startDate: from,
+    endDate: to,
+    label: input.label.trim(),
+    type: input.type,
+    isWorkingDay: EXCEPTION_IS_WORKING[input.type],
+    source: input.source ?? "manual",
+  };
+}
+
+export function withExceptionAdded(system: CalendarSystem, exception: CalendarException): CalendarSystem {
+  return { ...system, exceptions: [...system.exceptions, exception] };
+}
+
+export function withExceptionRemoved(system: CalendarSystem, id: string): CalendarSystem {
+  return { ...system, exceptions: system.exceptions.filter((exception) => exception.id !== id) };
+}
+
+export function withWorkingDays(system: CalendarSystem, calendarId: string, workingDays: Weekday[]): CalendarSystem {
+  return {
+    ...system,
+    calendars: system.calendars.map((calendar) =>
+      calendar.id === calendarId ? { ...calendar, workingDays } : calendar,
+    ),
+  };
+}
+
+export function withBelgianHolidays(system: CalendarSystem, year: number, calendarId = BASE_CALENDAR_ID): CalendarSystem {
+  const existing = new Set(
+    system.exceptions.filter((exception) => exception.calendarId === calendarId).map((exception) => exception.startDate),
+  );
+  const additions = belgianPublicHolidays(year)
+    .filter((holiday) => !existing.has(holiday.date))
+    .map((holiday) =>
+      makeException({
+        calendarId,
+        startDate: holiday.date,
+        endDate: holiday.date,
+        label: holiday.label,
+        type: "holiday",
+        source: "import",
+      }),
+    );
+  if (!additions.length) return system;
+  return { ...system, exceptions: [...system.exceptions, ...additions] };
+}
+
+export function missingBelgianHolidays(system: CalendarSystem, year: number, calendarId = BASE_CALENDAR_ID) {
+  const existing = new Set(
+    system.exceptions.filter((exception) => exception.calendarId === calendarId).map((exception) => exception.startDate),
+  );
+  return belgianPublicHolidays(year).filter((holiday) => !existing.has(holiday.date)).length;
+}
+
+/* ------------------------------------------------------------------ store */
+
+export interface ImpactCount {
+  projects: number;
+  tasks: number;
+}
+
+interface CalendarStoreValue {
+  system: CalendarSystem;
+  projects: ProjectRecord[];
+  activeProject: ProjectRecord;
+  tasks: PlannerTask[];
+  /** `useState`-compatible setter for the active project's tasks. */
+  setTasks: (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => void;
+  setProjectCalendar: (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => void;
+  calendarsUsingProjects: (calendarId: string) => ProjectRecord[];
+  projectsAffectedBy: (calendarId: string) => ProjectRecord[];
+  previewCalendarChange: (nextSystem: CalendarSystem, changedCalendarId: string) => ImpactCount;
+  previewProjectRelink: (projectId: string, calendarId: string) => ImpactCount;
+  /** Applies a new calendar system and immediately re-plans every affected project. */
+  applyCalendarSystem: (nextSystem: CalendarSystem) => void;
+  createCalendar: (input: { name: string; type: CalendarType; parentCalendarId: string | null; workingDays?: Weekday[] }) => string | null;
+  duplicateCalendar: (id: string) => string;
+  renameCalendar: (id: string, name: string) => void;
+  deleteCalendar: (id: string) => { ok: boolean; message?: string };
+}
+
+const CalendarStoreContext = createContext<CalendarStoreValue | null>(null);
+
+function recalculateProjects(
+  current: Record<string, PlannerTask[]>,
+  projectList: ProjectRecord[],
+  system: CalendarSystem,
+): Record<string, PlannerTask[]> {
+  const next: Record<string, PlannerTask[]> = { ...current };
+  for (const project of projectList) {
+    const tasks = current[project.id];
+    if (!tasks?.length) continue;
+    const result = recalculateTasks(tasks, {
+      direction: "forward",
+      calendarSystem: system,
+      projectCalendarId: project.calendarId,
+    });
+    if (!result.error) next[project.id] = result.tasks;
+  }
+  return next;
+}
+
+export function CalendarStoreProvider({ children }: { children: ReactNode }) {
+  const [system, setSystem] = useState<CalendarSystem>(seedSystem);
+  const [projects, setProjects] = useState<ProjectRecord[]>(seedProjects);
+  const [tasksByProject, setTasksByProject] = useState<Record<string, PlannerTask[]>>({
+    [RIVERSIDE_PROJECT_ID]: seedTasks,
+    "proj-press": [],
+  });
+  const activeProjectId = RIVERSIDE_PROJECT_ID;
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
+    [projects, activeProjectId],
+  );
+  const tasks = tasksByProject[activeProjectId] ?? [];
+
+  const setTasks = useCallback(
+    (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => {
+      setTasksByProject((current) => {
+        const previous = current[activeProjectId] ?? [];
+        const next = typeof updater === "function" ? updater(previous) : updater;
+        return { ...current, [activeProjectId]: next };
+      });
+    },
+    [activeProjectId],
+  );
+
+  /** Applies a new calendar system and re-plans every project that depends on it. */
+  const applyCalendarSystem = useCallback(
+    (nextSystem: CalendarSystem) => {
+      setSystem(nextSystem);
+      setTasksByProject((current) => recalculateProjects(current, projects, nextSystem));
+    },
+    [projects],
+  );
+
+  const calendarsUsingProjects = useCallback(
+    (calendarId: string) => projects.filter((project) => project.calendarId === calendarId),
+    [projects],
+  );
+
+  const projectsAffectedBy = useCallback(
+    (calendarId: string) =>
+      projects.filter((project) =>
+        calendarChain(system, project.calendarId).some((calendar) => calendar.id === calendarId),
+      ),
+    [projects, system],
+  );
+
+  const previewCalendarChange = useCallback(
+    (nextSystem: CalendarSystem, changedCalendarId: string): ImpactCount => {
+      const affected = projectsAffectedBy(changedCalendarId);
+      let moved = 0;
+      for (const project of affected) {
+        const projectTasks = tasksByProject[project.id];
+        if (!projectTasks?.length) continue;
+        const result = recalculateTasks(projectTasks, {
+          direction: "forward",
+          calendarSystem: nextSystem,
+          projectCalendarId: project.calendarId,
+        });
+        if (!result.error) moved += result.moved;
+      }
+      return { projects: affected.length, tasks: moved };
+    },
+    [projectsAffectedBy, tasksByProject],
+  );
+
+  const previewProjectRelink = useCallback(
+    (projectId: string, calendarId: string): ImpactCount => {
+      const projectTasks = tasksByProject[projectId];
+      if (!projectTasks?.length) return { projects: 1, tasks: 0 };
+      const result = recalculateTasks(projectTasks, {
+        direction: "forward",
+        calendarSystem: system,
+        projectCalendarId: calendarId,
+      });
+      return { projects: 1, tasks: result.error ? 0 : result.moved };
+    },
+    [tasksByProject, system],
+  );
+
+  const setProjectCalendar = useCallback(
+    (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => {
+      const effectiveSystem = nextSystem ?? system;
+      setSystem(effectiveSystem);
+      setProjects((current) =>
+        current.map((project) => (project.id === projectId ? { ...project, calendarId } : project)),
+      );
+      setTasksByProject((current) => {
+        const projectTasks = current[projectId];
+        if (!projectTasks?.length) return current;
+        const result = recalculateTasks(projectTasks, {
+          direction: "forward",
+          calendarSystem: effectiveSystem,
+          projectCalendarId: calendarId,
+        });
+        return result.error ? current : { ...current, [projectId]: result.tasks };
+      });
+    },
+    [system],
+  );
+
+  const createCalendar = useCallback<CalendarStoreValue["createCalendar"]>(
+    ({ name, type, parentCalendarId, workingDays }) => {
+      const trimmed = name.trim();
+      // The model allows exactly one base calendar.
+      if (!trimmed || type === "base") return null;
+      const id = `cal-${uid()}`;
+      const calendar: PlannerCalendar = {
+        id,
+        name: trimmed,
+        type,
+        parentCalendarId,
+        isDefault: false,
+        ...(workingDays ? { workingDays } : {}),
+      };
+      setSystem((current) => ({ ...current, calendars: [...current.calendars, calendar] }));
+      return id;
+    },
+    [],
+  );
+
+  const duplicateCalendar = useCallback(
+    (id: string) => {
+      const source = system.calendars.find((calendar) => calendar.id === id);
+      const newId = `cal-${uid()}`;
+      if (!source) return newId;
+      // A duplicate of the base becomes a project calendar inheriting from it.
+      const copy: PlannerCalendar = source.isDefault
+        ? { ...source, id: newId, name: `${source.name} (copy)`, type: "project", parentCalendarId: source.id, isDefault: false }
+        : { ...source, id: newId, name: `${source.name} (copy)`, isDefault: false };
+      const copiedExceptions = source.isDefault
+        ? []
+        : system.exceptions
+            .filter((exception) => exception.calendarId === source.id)
+            .map((exception) => ({ ...exception, id: `exc-${uid()}`, calendarId: newId }));
+      setSystem((current) => ({
+        ...current,
+        calendars: [...current.calendars, copy],
+        exceptions: [...current.exceptions, ...copiedExceptions],
+      }));
+      return newId;
+    },
+    [system],
+  );
+
+  const renameCalendar = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setSystem((current) => ({
+      ...current,
+      calendars: current.calendars.map((calendar) =>
+        calendar.id === id ? { ...calendar, name: trimmed } : calendar,
+      ),
+    }));
+  }, []);
+
+  const deleteCalendar = useCallback<CalendarStoreValue["deleteCalendar"]>(
+    (id) => {
+      const calendar = system.calendars.find((item) => item.id === id);
+      if (!calendar) return { ok: false, message: "Calendar not found." };
+      if (calendar.isDefault) {
+        return { ok: false, message: "The base calendar cannot be deleted." };
+      }
+      const usedBy = projects.filter((project) => project.calendarId === id);
+      if (usedBy.length) {
+        return {
+          ok: false,
+          message: `${usedBy.length} project${usedBy.length === 1 ? "" : "s"} still use this calendar (${usedBy
+            .map((project) => project.name)
+            .join(", ")}). Re-link them first.`,
+        };
+      }
+      const children = system.calendars.filter((item) => item.parentCalendarId === id);
+      if (children.length) {
+        return {
+          ok: false,
+          message: `${children.length} calendar${children.length === 1 ? "" : "s"} inherit from this one (${children
+            .map((item) => item.name)
+            .join(", ")}). Delete or re-parent them first.`,
+        };
+      }
+      setSystem((current) => ({
+        ...current,
+        calendars: current.calendars.filter((item) => item.id !== id),
+        exceptions: current.exceptions.filter((exception) => exception.calendarId !== id),
+      }));
+      return { ok: true };
+    },
+    [projects, system],
+  );
+
+  const value = useMemo<CalendarStoreValue>(
+    () => ({
+      system,
+      projects,
+      activeProject,
+      tasks,
+      setTasks,
+      setProjectCalendar,
+      calendarsUsingProjects,
+      projectsAffectedBy,
+      previewCalendarChange,
+      previewProjectRelink,
+      applyCalendarSystem,
+      createCalendar,
+      duplicateCalendar,
+      renameCalendar,
+      deleteCalendar,
+    }),
+    [
+      system, projects, activeProject, tasks, setTasks, setProjectCalendar, calendarsUsingProjects,
+      projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
+      createCalendar, duplicateCalendar, renameCalendar, deleteCalendar,
+    ],
+  );
+
+  return <CalendarStoreContext.Provider value={value}>{children}</CalendarStoreContext.Provider>;
+}
+
+export function useCalendarStore() {
+  const value = useContext(CalendarStoreContext);
+  if (!value) throw new Error("useCalendarStore must be used inside CalendarStoreProvider");
+  return value;
+}

@@ -1,40 +1,90 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { toast } from "sonner";
+import { useNavigate } from "react-router";
+import {
+  CalendarDays,
+  ChevronDown,
+  ChevronRight,
+  ChevronsUpDown,
+  CircleHelp,
+  Columns3,
+  Copy,
+  Diamond,
+  Download,
+  GripVertical,
+  LogOut,
+  Plus,
+  Redo2,
+  Search,
+  Settings2,
+  Sparkles,
+  Trash2,
+  Undo2,
+  UserRound,
+  X,
+} from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
-import { addWorkingDays, findDependencyCycle, rollupSummary, scheduleTasks, workingDaysBetween, type DependencyType, type ScheduleDependency, type ScheduleTask, type PlanningDirection, type WorkingCalendar } from "@/lib/scheduling-engine";
-import { CalendarDays, ChevronDown, ChevronRight, ChevronsUpDown, CircleHelp, Columns3, Copy, Diamond, Download, GripVertical, History, LogOut, Plus, Redo2, Search, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2, UserRound, X } from "lucide-react";
+import {
+  addWorkingDays,
+  findDependencyCycle,
+  isoDate,
+  resolveWorkingDay,
+  workingDaysBetween,
+  type PlanningDirection,
+} from "@/lib/scheduling-engine";
+import { dependenciesForTasks, recalculateTasks, type PlannerTask } from "@/lib/planner-model";
+import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { useNavigate } from "react-router";
 
-type Task = ScheduleTask & { name: string; predecessors: string; resource: string; percent: number; notes: string; collapsed?: boolean; color: string };
+type Task = PlannerTask;
 type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes";
+
 const rowHeight = 42;
 const todayLineDate = "2025-04-17";
 const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
-  { key: "id", label: "ID", width: 58 }, { key: "wbs", label: "WBS", width: 70 }, { key: "name", label: "Task name", width: 238 }, { key: "duration", label: "Duration", width: 105 }, { key: "start", label: "Start", width: 112 }, { key: "finish", label: "Finish", width: 112 }, { key: "predecessors", label: "Predecessors", width: 128 }, { key: "resource", label: "Resource", width: 118 }, { key: "percent", label: "% complete", width: 96 }, { key: "notes", label: "Notes", width: 160 },
-];
-const initialTasks: Task[] = [
-  { id: "1", parentId: null, name: "Riverside Arts Festival", duration: 18, durationUnit: "days", start: "2025-04-07", finish: "2025-04-30", isMilestone: false, predecessors: "", resource: "M. Alvarez", percent: 42, notes: "Main project brief and public opening.", color: "ochre" },
-  { id: "2", parentId: "1", name: "Site & permissions", duration: 5, durationUnit: "days", start: "2025-04-07", finish: "2025-04-11", isMilestone: false, predecessors: "", resource: "E. Shaw", percent: 100, notes: "", color: "sage" },
-  { id: "3", parentId: "1", name: "Artist lineup", duration: 8, durationUnit: "days", start: "2025-04-14", finish: "2025-04-23", isMilestone: false, predecessors: "2FS", resource: "M. Alvarez", percent: 66, notes: "Confirm three final commissions.", color: "clay" },
-  { id: "4", parentId: "1", name: "Install & opening", duration: 4, durationUnit: "days", start: "2025-04-25", finish: "2025-04-30", isMilestone: false, predecessors: "3FS+1d", resource: "J. Bell", percent: 18, notes: "Crew call at 07:30.", color: "ink" },
-  { id: "5", parentId: null, name: "Press & visitor materials", duration: 9, durationUnit: "days", start: "2025-04-10", finish: "2025-04-22", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 24, notes: "Printed guide, wayfinding, web copy.", color: "rust" },
-  { id: "6", parentId: "5", name: "Draft visitor guide", duration: 4, durationUnit: "days", start: "2025-04-10", finish: "2025-04-15", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 72, notes: "", color: "sage" },
-  { id: "7", parentId: "5", name: "Print & distribute", duration: 3, durationUnit: "days", start: "2025-04-17", finish: "2025-04-21", isMilestone: false, predecessors: "6FS+1d", resource: "R. Chen", percent: 0, notes: "", color: "clay" },
-  { id: "8", parentId: null, name: "Festival opens", duration: 1, durationUnit: "days", start: "2025-05-01", finish: "2025-05-01", isMilestone: true, predecessors: "4FS, 7FS", resource: "", percent: 0, notes: "Public opening day.", color: "rust" },
+  { key: "id", label: "ID", width: 58 },
+  { key: "wbs", label: "WBS", width: 70 },
+  { key: "name", label: "Task name", width: 238 },
+  { key: "duration", label: "Duration", width: 105 },
+  { key: "start", label: "Start", width: 112 },
+  { key: "finish", label: "Finish", width: 112 },
+  { key: "predecessors", label: "Predecessors", width: 128 },
+  { key: "resource", label: "Resource", width: 118 },
+  { key: "percent", label: "% complete", width: 96 },
+  { key: "notes", label: "Notes", width: 160 },
 ];
 
-const parseDependency = (value: string, tasks: Task[]): ScheduleDependency[] => value.split(",").map((part) => part.trim()).filter(Boolean).map((part) => { const match = part.match(/^(\d+)(FS|SS|FF|SF)?([+-]\d+)?d?$/i); if (!match) return null; const predecessor = tasks.find((task) => task.id === match[1]); return predecessor ? { predecessorId: predecessor.id, successorId: "", type: (match[2]?.toUpperCase() ?? "FS") as DependencyType, lagDays: Number(match[3] ?? 0) } : null; }).filter((value): value is ScheduleDependency => Boolean(value));
-const dependenciesForTasks = (items: Task[]) => items.flatMap((task) => parseDependency(task.predecessors, items).map((dependency) => ({ ...dependency, successorId: task.id })));
-const formatDate = (date: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${date}T12:00:00`));
-const dateLabel = (date: Date) => date.toISOString().slice(0, 10);
-const getWbs = (task: Task, tasks: Task[]) => { const parts: number[] = []; let current: Task | undefined = task; while (current) { const siblings = tasks.filter((candidate) => candidate.parentId === current?.parentId); parts.unshift(siblings.findIndex((candidate) => candidate.id === current?.id) + 1); current = current.parentId ? tasks.find((candidate) => candidate.id === current?.parentId) : undefined; } return parts.join("."); };
+const formatDate = (date: string) =>
+  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${date}T12:00:00`));
+
+const dateLabel = (date: Date) => isoDate(date);
+
+const getWbs = (task: Task, tasks: Task[]) => {
+  const parts: number[] = [];
+  let current: Task | undefined = task;
+  while (current) {
+    const siblings = tasks.filter((candidate) => candidate.parentId === current?.parentId);
+    parts.unshift(siblings.findIndex((candidate) => candidate.id === current?.id) + 1);
+    current = current.parentId ? tasks.find((candidate) => candidate.id === current?.parentId) : undefined;
+  }
+  return parts.join(".");
+};
 
 export default function Dashboard() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState(initialTasks);
+  const {
+    system,
+    activeProject,
+    tasks,
+    setTasks,
+    setProjectCalendar,
+    previewProjectRelink,
+  } = useCalendarStore();
+  const calendarId = activeProject.calendarId;
+  const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
+
   const [selected, setSelected] = useState<string[]>(["3"]);
   const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
   const [draft, setDraft] = useState("");
@@ -48,28 +98,34 @@ export default function Dashboard() {
   const [hidden, setHidden] = useState<ColumnKey[]>([]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
-  const [timelineResize, setTimelineResize] = useState<{ id: string; edge: "start" | "finish"; days: number } | null>(null);
+  const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
   const [recalcDialog, setRecalcDialog] = useState(false);
   const [recalcDirection, setRecalcDirection] = useState<PlanningDirection>("forward");
   const [recalcDate, setRecalcDate] = useState("2025-04-01");
   const [planningDirection, setPlanningDirection] = useState<PlanningDirection>("forward");
-  const [calendarPanel, setCalendarPanel] = useState(false);
-  const [calendarDate, setCalendarDate] = useState("2025-04-18");
-  const [calendarKind, setCalendarKind] = useState<"holiday" | "closure" | "leave">("holiday");
-  const [calendars, setCalendars] = useState<Record<string, WorkingCalendar>>({
-    standard: { id: "standard", name: "Standard workweek", holidays: ["2025-04-18"], organizationClosures: ["2025-04-21"], employeeLeave: { "M. Alvarez": ["2025-04-24"] } },
-    studio: { id: "studio", name: "Studio calendar", holidays: [], organizationClosures: ["2025-04-21"], employeeLeave: {} },
-  });
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [pendingCalendarId, setPendingCalendarId] = useState(calendarId);
+  const [relinkConfirm, setRelinkConfirm] = useState<{ calendarId: string; projects: number; tasks: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const visibleTasks = useMemo(() => {
     const visible: Task[] = [];
-    const walk = (parentId: string | null) => tasks.filter((task) => task.parentId === parentId).forEach((task) => { if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task); if (!task.collapsed) walk(task.id); });
+    const walk = (parentId: string | null) =>
+      tasks
+        .filter((task) => task.parentId === parentId)
+        .forEach((task) => {
+          if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task);
+          if (!task.collapsed) walk(task.id);
+        });
     walk(null);
     return visible;
   }, [tasks, query]);
+
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
-  const taskTimestamps = tasks.flatMap((task) => [new Date(`${task.start}T12:00:00`).getTime(), new Date(`${task.finish}T12:00:00`).getTime()]);
+  const taskTimestamps = tasks.flatMap((task) => [
+    new Date(`${task.start}T12:00:00`).getTime(),
+    new Date(`${task.finish}T12:00:00`).getTime(),
+  ]);
   const earliestTaskDate = taskTimestamps.length ? new Date(Math.min(...taskTimestamps)) : planningAnchor;
   const latestTaskDate = taskTimestamps.length ? new Date(Math.max(...taskTimestamps)) : planningAnchor;
   const timelineStart = new Date(Math.min(earliestTaskDate.getTime(), planningAnchor.getTime()));
@@ -78,54 +134,774 @@ export default function Dashboard() {
   timelineEnd.setDate(timelineEnd.getDate() + 14);
   const requiredTimelineDays = Math.max(1, Math.ceil((timelineEnd.getTime() - timelineStart.getTime()) / 86400000) + 1);
   const minimumTimelineDays = zoom === "month" ? 100 : zoom === "quarter" ? 180 : 62;
-  const timelineDays = Array.from({ length: Math.max(requiredTimelineDays, minimumTimelineDays) }, (_, index) => { const day = new Date(timelineStart); day.setDate(day.getDate() + index); return day; });
+  const timelineDays = Array.from({ length: Math.max(requiredTimelineDays, minimumTimelineDays) }, (_, index) => {
+    const day = new Date(timelineStart);
+    day.setDate(day.getDate() + index);
+    return day;
+  });
   const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
   const timelineWidth = timelineDays.length * dayWidth;
   const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
 
-  const recalculate = (next: Task[], direction: PlanningDirection = "forward", calendarSet = calendars, resetDates = false, anchorDate = "2025-04-01", anchoredTaskIds: string[] = []) => { try { const dependencies = dependenciesForTasks(next); // The chosen planning direction is a one-shot operation: it only applies to the
-    // explicit "Recalculate" action (resetDates). Every later edit — cell edit, drag,
-    // dependency change, calendar change — re-runs a plain forward pass so the board
-    // keeps behaving exactly like forward planning.
-    const effectiveDirection: PlanningDirection = resetDates ? direction : "forward"; const scheduled = scheduleTasks(next.map((task) => ({ ...task, resourceId: task.resource })), dependencies, { direction: effectiveDirection, projectStart: resetDates && effectiveDirection === "forward" ? anchorDate : undefined, projectFinish: resetDates && effectiveDirection === "backward" ? anchorDate : undefined, calendars: calendarSet, defaultCalendar: calendarSet.standard, resetDates, anchoredTaskIds: resetDates ? [] : anchoredTaskIds }); const rolled = rollupSummary(scheduled, calendarSet.standard); setTasks(next.map((task) => ({ ...task, ...(rolled.find((item) => item.id === task.id) ?? {}) }))); } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to recalculate schedule"); setTasks(next); } };
-  const commit = (next: Task[], manuallyAnchoredId?: string) => { const cycle = findDependencyCycle(next, dependenciesForTasks(next)); if (cycle) { toast.error(`Dependency rejected: circular chain ${cycle.join(" → ")} would freeze the schedule.`); return false; } setHistory((items) => [...items.slice(-29), tasks]); setFuture([]); recalculate(next, "forward", calendars, false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []); return true; };
-  const updateTask = (id: string, field: ColumnKey, value: string) => { const next = tasks.map((task) => { if (task.id !== id) return task; if (field === "duration") { const [amount, unit] = value.split(" "); const duration = Math.max(1, Number(amount) || 1); return { ...task, duration, durationUnit: (unit === "weeks" ? "weeks" : "days") as "days" | "weeks", finish: task.isMilestone ? task.start : addWorkingDays(task.start, unit === "weeks" ? duration * 5 - 1 : duration - 1) }; } if (field === "start") { const start = value || task.start; return { ...task, start, finish: task.isMilestone ? start : addWorkingDays(start, task.durationUnit === "weeks" ? task.duration * 5 - 1 : task.duration - 1) }; } if (field === "finish") { const finish = value || task.finish; if (task.isMilestone) return { ...task, start: finish, finish }; const duration = workingDaysBetween(task.start, finish, calendars.standard, task.resource); const start = addWorkingDays(finish, -(duration - 1), calendars.standard, task.resource); return { ...task, start, finish, duration, durationUnit: "days" as const }; } if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) }; return { ...task, [field]: value }; }); commit(next); setEditing(null); };
-  const undo = () => { const previous = history[history.length - 1]; if (!previous) return; setFuture((items) => [tasks, ...items]); setTasks(previous); setHistory((items) => items.slice(0, -1)); };
-  const redo = () => { const next = future[0]; if (!next) return; setHistory((items) => [...items, tasks]); setTasks(next); setFuture((items) => items.slice(1)); };
-  const addTask = (parentId: string | null = null, afterId?: string) => { const id = String(Math.max(...tasks.map((task) => Number(task.id)), 0) + 1); const task: Task = { id, parentId, name: "New task", duration: 1, durationUnit: "days", start: "2025-05-02", finish: "2025-05-02", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "sage" }; const index = afterId ? tasks.findIndex((item) => item.id === afterId) + 1 : tasks.length; commit([...tasks.slice(0, index), task, ...tasks.slice(index)]); setSelected([id]); setEditing({ id, field: "name" }); setDraft(task.name); };
-  const deleteSelected = () => { if (!selected.length) return; commit(tasks.filter((task) => !selected.includes(task.id) && !selected.includes(task.parentId ?? ""))); setSelected([]); };
-  const indent = (id: string, outdent = false) => { const index = tasks.findIndex((task) => task.id === id); if (index < 0) return; const task = tasks[index]; if (outdent && task.parentId) { const parent = tasks.find((item) => item.id === task.parentId); commit(tasks.map((item) => item.id === id ? { ...item, parentId: parent?.parentId ?? null } : item)); } else if (!outdent && index > 0) { commit(tasks.map((item, itemIndex) => item.id === id ? { ...item, parentId: tasks[itemIndex - 1].id } : item)); } };
-  const toggleCollapse = (id: string) => setTasks((items) => items.map((task) => task.id === id ? { ...task, collapsed: !task.collapsed } : task));
+  const recalculate = (
+    next: Task[],
+    direction: PlanningDirection = "forward",
+    resetDates = false,
+    anchorDate = "",
+    anchoredTaskIds: string[] = [],
+  ) => {
+    const result = recalculateTasks(next, {
+      direction: resetDates ? direction : "forward",
+      projectStart: resetDates && direction === "forward" ? anchorDate : undefined,
+      projectFinish: resetDates && direction === "backward" ? anchorDate : undefined,
+      calendarSystem: system,
+      projectCalendarId: calendarId,
+      resetDates,
+      anchoredTaskIds: resetDates ? [] : anchoredTaskIds,
+    });
+    if (result.error) {
+      toast.error(result.error);
+      setTasks(next);
+      return;
+    }
+    setTasks(result.tasks);
+  };
 
-  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redo() : undo(); } if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "y") redo(); if (event.key === "Delete" && !editing) deleteSelected(); }; window.addEventListener("keydown", listener); return () => window.removeEventListener("keydown", listener); });
-  const handleKey = (event: ReactKeyboardEvent, task: Task, field: ColumnKey) => { if (event.key === "Escape") { setEditing(null); return; } if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); updateTask(task.id, field, draft); const columnIndex = columnDefs.findIndex((column) => column.key === field); const nextColumn = event.shiftKey ? columnDefs[Math.max(0, columnIndex - 1)] : columnDefs[Math.min(columnDefs.length - 1, columnIndex + 1)]; if (event.key === "Enter") { const rowIndex = visibleTasks.findIndex((item) => item.id === task.id); const nextRow = visibleTasks[rowIndex + 1]; if (nextRow) { setSelected([nextRow.id]); setEditing({ id: nextRow.id, field }); setDraft(String((nextRow as unknown as Record<string, unknown>)[field] ?? "")); } else addTask(task.parentId); } else if (nextColumn) { setEditing({ id: task.id, field: nextColumn.key }); setDraft(String((task as unknown as Record<string, unknown>)[nextColumn.key] ?? "")); } } };
+  const commit = (next: Task[], manuallyAnchoredId?: string) => {
+    const cycle = findDependencyCycle(next, dependenciesForTasks(next));
+    if (cycle) {
+      toast.error(`Dependency rejected: circular chain ${cycle.join(" → ")} would freeze the schedule.`);
+      return false;
+    }
+    setHistory((items) => [...items.slice(-29), tasks]);
+    setFuture([]);
+    recalculate(next, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
+    return true;
+  };
+
+  const updateTask = (id: string, field: ColumnKey, value: string) => {
+    const next = tasks.map((task) => {
+      if (task.id !== id) return task;
+      if (field === "duration") {
+        const [amount, unit] = value.split(" ");
+        const duration = Math.max(1, Number(amount) || 1);
+        const weeks = unit === "weeks";
+        return {
+          ...task,
+          duration,
+          durationUnit: (weeks ? "weeks" : "days") as "days" | "weeks",
+          finish: task.isMilestone
+            ? task.start
+            : addWorkingDays(task.start, weeks ? duration * 5 - 1 : duration - 1, calendarId, system),
+        };
+      }
+      if (field === "start") {
+        const start = value || task.start;
+        return {
+          ...task,
+          start,
+          finish: task.isMilestone
+            ? start
+            : addWorkingDays(start, task.durationUnit === "weeks" ? task.duration * 5 - 1 : task.duration - 1, calendarId, system),
+        };
+      }
+      if (field === "finish") {
+        const finish = value || task.finish;
+        if (task.isMilestone) return { ...task, start: finish, finish };
+        const duration = workingDaysBetween(task.start, finish, calendarId, system);
+        const start = addWorkingDays(finish, -(duration - 1), calendarId, system);
+        return { ...task, start, finish, duration, durationUnit: "days" as const };
+      }
+      if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
+      return { ...task, [field]: value };
+    });
+    commit(next);
+    setEditing(null);
+  };
+
+  const undo = () => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setFuture((items) => [tasks, ...items]);
+    setTasks(previous);
+    setHistory((items) => items.slice(0, -1));
+  };
+
+  const redo = () => {
+    const next = future[0];
+    if (!next) return;
+    setHistory((items) => [...items, tasks]);
+    setTasks(next);
+    setFuture((items) => items.slice(1));
+  };
+
+  const addTask = (parentId: string | null = null, afterId?: string) => {
+    const id = String(Math.max(...tasks.map((task) => Number(task.id)), 0) + 1);
+    const task: Task = {
+      id,
+      parentId,
+      name: "New task",
+      duration: 1,
+      durationUnit: "days",
+      start: "2025-05-02",
+      finish: "2025-05-02",
+      isMilestone: false,
+      predecessors: "",
+      resource: "",
+      percent: 0,
+      notes: "",
+      color: "sage",
+    };
+    const index = afterId ? tasks.findIndex((item) => item.id === afterId) + 1 : tasks.length;
+    commit([...tasks.slice(0, index), task, ...tasks.slice(index)]);
+    setSelected([id]);
+    setEditing({ id, field: "name" });
+    setDraft(task.name);
+  };
+
+  const deleteSelected = () => {
+    if (!selected.length) return;
+    commit(tasks.filter((task) => !selected.includes(task.id) && !selected.includes(task.parentId ?? "")));
+    setSelected([]);
+  };
+
+  const indent = (id: string, outdent = false) => {
+    const index = tasks.findIndex((task) => task.id === id);
+    if (index < 0) return;
+    const task = tasks[index];
+    if (outdent && task.parentId) {
+      const parent = tasks.find((item) => item.id === task.parentId);
+      commit(tasks.map((item) => (item.id === id ? { ...item, parentId: parent?.parentId ?? null } : item)));
+    } else if (!outdent && index > 0) {
+      commit(tasks.map((item, itemIndex) => (item.id === id ? { ...item, parentId: tasks[itemIndex - 1].id } : item)));
+    }
+  };
+
+  const toggleCollapse = (id: string) =>
+    setTasks((items) => items.map((task) => (task.id === id ? { ...task, collapsed: !task.collapsed } : task)));
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "y") redo();
+      if (event.key === "Delete" && !editing) deleteSelected();
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  });
+
+  const handleKey = (event: ReactKeyboardEvent, task: Task, field: ColumnKey) => {
+    if (event.key === "Escape") {
+      setEditing(null);
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      updateTask(task.id, field, draft);
+      const columnIndex = columnDefs.findIndex((column) => column.key === field);
+      const nextColumn = event.shiftKey
+        ? columnDefs[Math.max(0, columnIndex - 1)]
+        : columnDefs[Math.min(columnDefs.length - 1, columnIndex + 1)];
+      if (event.key === "Enter") {
+        const rowIndex = visibleTasks.findIndex((item) => item.id === task.id);
+        const nextRow = visibleTasks[rowIndex + 1];
+        if (nextRow) {
+          setSelected([nextRow.id]);
+          setEditing({ id: nextRow.id, field });
+          setDraft(String((nextRow as unknown as Record<string, unknown>)[field] ?? ""));
+        } else addTask(task.parentId);
+      } else if (nextColumn) {
+        setEditing({ id: task.id, field: nextColumn.key });
+        setDraft(String((task as unknown as Record<string, unknown>)[nextColumn.key] ?? ""));
+      }
+    }
+  };
+
   const taskTop = (id: string) => visibleTasks.findIndex((task) => task.id === id) * rowHeight;
-  const dateOffset = (date: string) => Math.round((new Date(`${date}T12:00:00`).getTime() - timelineStart.getTime()) / 86400000) * dayWidth;
-  const barWidth = (task: Task) => Math.max(task.isMilestone ? 14 : 22, (Math.round((new Date(`${task.finish}T12:00:00`).getTime() - new Date(`${task.start}T12:00:00`).getTime()) / 86400000) + 1) * dayWidth);
-  const beginBarDrag = (event: ReactPointerEvent, task: Task) => { if (task.isMilestone) return; event.stopPropagation(); const originX = event.clientX; let movedDays = 0; const move = (moveEvent: PointerEvent) => { movedDays = Math.round((moveEvent.clientX - originX) / dayWidth); setTimelineDrag({ id: task.id, days: movedDays }); }; const up = () => { if (movedDays !== 0) { const start = addWorkingDays(task.start, movedDays, calendars.standard, task.resource); const finish = addWorkingDays(task.finish, movedDays, calendars.standard, task.resource); commit(tasks.map((item) => item.id === task.id ? { ...item, start, finish } : item), task.id); toast(`${task.name} moved to ${formatDate(start)}`); } setTimelineDrag(null); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); };
-  const beginBarResize = (event: ReactPointerEvent, task: Task, edge: "start" | "finish") => { event.stopPropagation(); const originX = event.clientX; let movedDays = 0; const move = (moveEvent: PointerEvent) => { movedDays = Math.round((moveEvent.clientX - originX) / dayWidth); setTimelineResize({ id: task.id, edge, days: movedDays }); }; const up = () => { if (movedDays !== 0) { const calendar = calendars.standard; let start = task.start; let finish = task.finish; if (edge === "start") start = addWorkingDays(task.start, movedDays, calendar, task.resource); else finish = addWorkingDays(task.finish, movedDays, calendar, task.resource); if (start >= finish) { if (edge === "start") start = addWorkingDays(finish, -1, calendar, task.resource); else finish = addWorkingDays(start, 1, calendar, task.resource); } const duration = workingDaysBetween(start, finish, calendar, task.resource); commit(tasks.map((item) => item.id === task.id ? { ...item, start, finish, duration, durationUnit: "days" as const } : item), task.id); toast(`${task.name} duration set to ${duration} working days`); } setTimelineResize(null); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); };
-  const dependencyLinks = visibleTasks.flatMap((successor) => parseDependency(successor.predecessors, tasks).flatMap((dependency) => { const predecessor = taskById.get(dependency.predecessorId); if (!predecessor || !visibleTasks.some((task) => task.id === predecessor.id)) return []; const x1 = dateOffset(predecessor.start) + barWidth(predecessor); const x2 = dateOffset(successor.start); const y1 = taskTop(predecessor.id) + rowHeight / 2; const y2 = taskTop(successor.id) + rowHeight / 2; const elbowX = x2 >= x1 ? x1 + Math.max(18, (x2 - x1) * 0.55) : x1 + 18; return [{ ...dependency, predecessor, successor, x1, x2, y1, y2, path: x2 >= x1 ? `M ${x1} ${y1} H ${elbowX} V ${y2} H ${x2}` : `M ${x1} ${y1} H ${x1 + 18} V ${y2} H ${x2 - 12} V ${y2}` }]; }));
-  const activeCalendar = calendars.standard;
-  const addCalendarException = () => { if (!calendarDate) return; setCalendars((current) => { const standard = current.standard; const key = calendarKind === "holiday" ? "holidays" : calendarKind === "closure" ? "organizationClosures" : "holidays"; const nextStandard = calendarKind === "leave" ? { ...standard, employeeLeave: { ...(standard.employeeLeave ?? {}), "M. Alvarez": [...new Set([...(standard.employeeLeave?.["M. Alvarez"] ?? []), calendarDate])] } } : { ...standard, [key]: [...new Set([...(standard[key] ?? []), calendarDate])] }; const next = { ...current, standard: nextStandard }; recalculate(tasks, "forward", next, false); return next; }); };
+  const dateOffset = (date: string) =>
+    Math.round((new Date(`${date}T12:00:00`).getTime() - timelineStart.getTime()) / 86400000) * dayWidth;
+  const barWidth = (task: Task) =>
+    Math.max(
+      task.isMilestone ? 14 : 22,
+      (Math.round((new Date(`${task.finish}T12:00:00`).getTime() - new Date(`${task.start}T12:00:00`).getTime()) / 86400000) + 1) *
+        dayWidth,
+    );
+
+  const beginBarDrag = (event: ReactPointerEvent, task: Task) => {
+    if (task.isMilestone) return;
+    event.stopPropagation();
+    const originX = event.clientX;
+    let movedDays = 0;
+    const move = (moveEvent: PointerEvent) => {
+      movedDays = Math.round((moveEvent.clientX - originX) / dayWidth);
+      setTimelineDrag({ id: task.id, days: movedDays });
+    };
+    const up = () => {
+      if (movedDays !== 0) {
+        const start = addWorkingDays(task.start, movedDays, calendarId, system);
+        const finish = addWorkingDays(task.finish, movedDays, calendarId, system);
+        commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish } : item)), task.id);
+        toast(`${task.name} moved to ${formatDate(start)}`);
+      }
+      setTimelineDrag(null);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const beginBarResize = (event: ReactPointerEvent, task: Task, edge: "start" | "finish") => {
+    event.stopPropagation();
+    const originX = event.clientX;
+    let movedDays = 0;
+    const move = (moveEvent: PointerEvent) => {
+      movedDays = Math.round((moveEvent.clientX - originX) / dayWidth);
+      setTimelineResize({ id: task.id, edge, days: movedDays });
+    };
+    const up = () => {
+      if (movedDays !== 0) {
+        let start = task.start;
+        let finish = task.finish;
+        if (edge === "start") start = addWorkingDays(task.start, movedDays, calendarId, system);
+        else finish = addWorkingDays(task.finish, movedDays, calendarId, system);
+        if (start >= finish) {
+          if (edge === "start") start = addWorkingDays(finish, -1, calendarId, system);
+          else finish = addWorkingDays(start, 1, calendarId, system);
+        }
+        const duration = workingDaysBetween(start, finish, calendarId, system);
+        commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish, duration, durationUnit: "days" as const } : item)), task.id);
+        toast(`${task.name} duration set to ${duration} working days`);
+      }
+      setTimelineResize(null);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const dependencyLinks = visibleTasks.flatMap((successor) =>
+    dependenciesForTasks(tasks)
+      .filter((dependency) => dependency.successorId === successor.id)
+      .flatMap((dependency) => {
+        const predecessor = taskById.get(dependency.predecessorId);
+        if (!predecessor || !visibleTasks.some((task) => task.id === predecessor.id)) return [];
+        const x1 = dateOffset(predecessor.start) + barWidth(predecessor);
+        const x2 = dateOffset(successor.start);
+        const y1 = taskTop(predecessor.id) + rowHeight / 2;
+        const y2 = taskTop(successor.id) + rowHeight / 2;
+        const elbowX = x2 >= x1 ? x1 + Math.max(18, (x2 - x1) * 0.55) : x1 + 18;
+        return [{
+          ...dependency,
+          predecessor,
+          successor,
+          x1,
+          x2,
+          y1,
+          y2,
+          path: x2 >= x1 ? `M ${x1} ${y1} H ${elbowX} V ${y2} H ${x2}` : `M ${x1} ${y1} H ${x1 + 18} V ${y2} H ${x2 - 12} V ${y2}`,
+        }];
+      }),
+  );
 
   const projectStartIso = dateLabel(earliestTaskDate);
   const projectFinishIso = dateLabel(latestTaskDate);
-  const referenceDateFor = (direction: PlanningDirection) => direction === "forward" ? projectStartIso : projectFinishIso;
-  const openRecalculate = () => { setRecalcDirection(planningDirection); setRecalcDate(referenceDateFor(planningDirection)); setRecalcDialog(true); };
-  const choosePlanningDirection = (direction: PlanningDirection) => { setRecalcDirection(direction); setRecalcDate(referenceDateFor(direction)); };
+  const referenceDateFor = (direction: PlanningDirection) => (direction === "forward" ? projectStartIso : projectFinishIso);
+  const openRecalculate = () => {
+    setRecalcDirection(planningDirection);
+    setRecalcDate(referenceDateFor(planningDirection));
+    setRecalcDialog(true);
+  };
+  const choosePlanningDirection = (direction: PlanningDirection) => {
+    setRecalcDirection(direction);
+    setRecalcDate(referenceDateFor(direction));
+  };
+  const openProjectSettings = () => {
+    setPendingCalendarId(calendarId);
+    setProjectDialog(true);
+  };
+  const requestCalendarChange = () => {
+    if (pendingCalendarId === calendarId) {
+      setProjectDialog(false);
+      return;
+    }
+    const impact = previewProjectRelink(activeProject.id, pendingCalendarId);
+    setProjectDialog(false);
+    setRelinkConfirm({ calendarId: pendingCalendarId, projects: impact.projects, tasks: impact.tasks });
+  };
 
-  return <div className="planner-shell" onClick={() => setShowMenu(null)}>
-    <header className="planner-topbar"><div className="brand-lockup"><div className="brand-mark">⌁</div><div><div className="eyebrow">MY DASHBOARD / PROJECT CATALOG</div><h1>Vintage GANTT</h1></div></div><div className="top-actions"><div className="save-state"><span className="live-dot" /> Saved just now</div><button className="icon-button" title="Help"><CircleHelp size={17} /></button><button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button><button className="icon-button" onClick={() => { signOut(); navigate("/"); }} title="Sign out"><LogOut size={17} /></button></div></header>
-    <div className="project-toolbar"><div className="toolbar-left"><button className="tool-button primary" onClick={() => addTask()}><Plus size={16} /> New task</button><button className="tool-button" onClick={undo} disabled={!history.length}><Undo2 size={16} /></button><button className="tool-button" onClick={redo} disabled={!future.length}><Redo2 size={16} /></button><button className="tool-button" onClick={openRecalculate}><Sparkles size={15} /> Recalculate</button><span className="toolbar-divider" /><button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button><button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button><button className="tool-button" onClick={deleteSelected}><Trash2 size={15} /> Delete</button></div><div className="toolbar-right"><div className="search-box"><Search size={15} /><input placeholder="Search projects and tasks" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button className="tool-button"><Download size={15} /> Export</button><button className="tool-button" onClick={() => toast("You are viewing your team dashboard") }><UserRound size={15} /> My dashboard</button><button className="tool-button" onClick={() => setCalendarPanel((open) => !open)}><CalendarDays size={15} /> Calendars</button><button className="tool-button"><Settings2 size={15} /></button></div></div>
-    {calendarPanel && <aside className="calendar-panel"><div className="calendar-panel-head"><div><div className="eyebrow">PROJECT CALENDARS</div><h2>Working time</h2></div><button className="icon-button" onClick={() => setCalendarPanel(false)}><X size={16} /></button></div><p className="calendar-copy">Calendars only define working time — weekends, national holidays, organization closures, and employee leave are skipped while planning. Planning direction and the reference start/finish date are chosen when you recalculate.</p><div className="calendar-list">{Object.values(calendars).map((calendar) => <div className="calendar-item" key={calendar.id}><span className="calendar-check">✓</span><div><strong>{calendar.name}</strong><small>{(calendar.holidays?.length ?? 0) + (calendar.organizationClosures?.length ?? 0)} closure dates · {Object.keys(calendar.employeeLeave ?? {}).length} people with leave</small></div></div>)}</div><div className="calendar-entry"><label>Configure exception<select value={calendarKind} onChange={(event) => setCalendarKind(event.target.value as "holiday" | "closure" | "leave")}><option value="holiday">National holiday</option><option value="closure">Organization closure</option><option value="leave">Employee leave · M. Alvarez</option></select></label><label>Date<input type="date" value={calendarDate} onChange={(event) => setCalendarDate(event.target.value)} /></label><button className="tool-button primary" onClick={addCalendarException}>Add date</button></div><div className="calendar-summary"><span><b>{activeCalendar.holidays?.length ?? 0}</b> holidays</span><span><b>{activeCalendar.organizationClosures?.length ?? 0}</b> organization closures</span><span><b>{Object.values(activeCalendar.employeeLeave ?? {}).flat().length}</b> leave days</span></div></aside>}
-    {recalcDialog && <div className="modal-backdrop" onClick={() => setRecalcDialog(false)}><div className="task-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">RECALCULATE PLANNING</div><h2>Recalculate the schedule</h2></div><button className="icon-button" onClick={() => setRecalcDialog(false)}><X size={18} /></button></div><p className="calendar-copy">Pick a planning direction and the reference date for this recalculation. The reference date is only used while recalculating — afterwards you can keep moving bars and they stay where you put them.</p><div className="planning-mode"><span>Planning direction</span><div>{(["forward", "backward"] as const).map((direction) => <button key={direction} className={recalcDirection === direction ? "selected" : ""} onClick={() => choosePlanningDirection(direction)}>{direction === "forward" ? "Forward planning" : "Backward planning"}</button>)}</div></div><div className="planning-anchor"><span className="planning-anchor-label">{recalcDirection === "forward" ? "Reference start date" : "Reference finish date"}</span><Popover><PopoverTrigger asChild><button type="button" className="planning-date-trigger"><span>{formatDate(recalcDate)}</span><CalendarDays size={16} /></button></PopoverTrigger><PopoverContent align="start" className="planning-calendar-popover"><Calendar mode="single" selected={new Date(`${recalcDate}T12:00:00`)} onSelect={(date) => { if (date) setRecalcDate(dateLabel(date)); }} initialFocus /></PopoverContent></Popover><p>{recalcDirection === "forward" ? `Every task is planned forward in working days from ${formatDate(recalcDate)}.` : `Every task is planned backward in working days from ${formatDate(recalcDate)}.`}</p></div><div className="modal-actions"><button className="tool-button" onClick={() => setRecalcDialog(false)}>Cancel</button><button className="tool-button primary" onClick={() => { recalculate(tasks, recalcDirection, calendars, true, recalcDate); setPlanningDirection(recalcDirection); setRecalcDialog(false); toast.success(recalcDirection === "forward" ? `Schedule planned forward from ${formatDate(recalcDate)}` : `Schedule planned backward from ${formatDate(recalcDate)}`); }}>Recalculate</button></div></div></div>}
-    <div className="workbench"><section className="grid-pane" style={{ width: `${split}%` }}><div className="grid-scroll" ref={scrollRef}><div className="grid-header">{columnDefs.filter((column) => column.key === "id" || !hidden.includes(column.key)).map((column) => <div key={column.key} className="grid-head-cell" style={{ width: column.width }} onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}>{column.label}<ChevronsUpDown size={12} /></div>)}</div>{visibleTasks.map((task) => { const depth = (() => { let count = 0; let current = task; while (current.parentId) { count++; current = taskById.get(current.parentId) ?? current; } return count; })(); const summary = tasks.some((item) => item.parentId === task.id); return <div key={task.id} className={`grid-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={(event) => { setSelected(event.shiftKey || event.ctrlKey ? [...new Set([...selected, task.id])] : [task.id]); }} onContextMenu={(event) => { event.preventDefault(); setSelected([task.id]); setShowMenu({ x: event.clientX, y: event.clientY, id: task.id }); }} draggable onDragStart={() => setDragging(task.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (dragging && dragging !== task.id) { commit(tasks.map((item) => item.id === dragging ? { ...item, parentId: task.id } : item)); toast("Task nested under " + task.name); } setDragging(null); }}>
-      {columnDefs.filter((column) => column.key === "id" || !hidden.includes(column.key)).map((column) => { const value = column.key === "id" ? task.id : column.key === "wbs" ? getWbs(task, tasks) : column.key === "duration" ? `${task.duration} ${task.durationUnit === "days" ? "d" : "w"}` : column.key === "percent" ? `${task.percent}%` : String((task as unknown as Record<string, unknown>)[column.key] ?? ""); const isName = column.key === "name"; const canEdit = !["id", "wbs"].includes(column.key) && !(summary && ["start", "finish", "duration"].includes(column.key)); return <div key={column.key} className={`grid-cell ${isName ? "name-cell" : ""} ${!canEdit ? "readonly" : ""}`} style={{ width: column.width }} onClick={() => { if (canEdit && (column.key === "start" || column.key === "finish")) { setEditing({ id: task.id, field: column.key }); setDraft(value); } }} onDoubleClick={() => { if (canEdit) { setEditing({ id: task.id, field: column.key }); setDraft(value); } }}>{isName && <span className="row-handle"><GripVertical size={13} /></span>}{isName && summary && <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>{task.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</button>}{isName && !summary && <span className="task-spacer" />}{editing?.id === task.id && editing.field === column.key ? <input autoFocus className="cell-input" type={column.key === "start" || column.key === "finish" ? "date" : "text"} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => handleKey(event, task, column.key)} onBlur={() => updateTask(task.id, column.key, draft)} /> : <span style={isName ? { paddingLeft: depth * 17 } : undefined} className={isName && summary ? "summary-name" : ""}>{value}</span>}</div>; })}</div>; })}</div></section>
-      <div className="splitter" onPointerDown={(event) => { const start = event.clientX; const original = split; const move = (moveEvent: PointerEvent) => setSplit(Math.max(35, Math.min(72, original + ((moveEvent.clientX - start) / window.innerWidth) * 100))); const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); }}><span /></div>
-      <section className="timeline-pane"><div className="timeline-scroll"><div className="timeline-header" style={{ width: timelineWidth }}><div className="month-row">{timelineDays.filter((day) => day.getDate() === 1 || day.getTime() === timelineStart.getTime()).map((day) => <span key={day.toISOString()} style={{ left: dateOffset(dateLabel(day)) }}>{day.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span>)}</div><div className="day-row">{timelineDays.map((day) => <span key={day.toISOString()} className={day.getDay() === 0 || day.getDay() === 6 ? "weekend" : ""} style={{ width: dayWidth }}>{zoom === "day" || day.getDay() === 1 ? day.getDate() : ""}</span>)}</div><div className="today-line" style={{ left: dateOffset(todayLineDate) }} /></div><div className="timeline-body" style={{ width: timelineWidth }}><svg className="dependency-layer" width={timelineWidth} height={visibleTasks.length * rowHeight} aria-label="Task dependencies"><defs><marker id="dependency-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#1468c4" /></marker></defs>{dependencyLinks.map((link) => <path key={`${link.predecessorId}-${link.successor.id}-${link.type}`} d={link.path} className="dependency-line" markerEnd="url(#dependency-arrow)"><title>{`${link.predecessor.name} → ${link.successor.name} · ${link.type}${link.lagDays ? `${link.lagDays > 0 ? "+" : ""}${link.lagDays}d` : ""}`}</title></path>)}</svg>{visibleTasks.map((task) => <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}><div className={`task-bar ${task.isMilestone ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`} title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}`} style={{ left: dateOffset(timelineResize?.id === task.id && timelineResize.edge === "start" ? addWorkingDays(task.start, timelineResize.days, calendars.standard, task.resource) : task.start) + (timelineDrag?.id === task.id ? timelineDrag.days * dayWidth : 0), width: barWidth(timelineResize?.id === task.id ? { ...task, start: timelineResize.edge === "start" ? addWorkingDays(task.start, timelineResize.days, calendars.standard, task.resource) : task.start, finish: timelineResize.edge === "finish" ? addWorkingDays(task.finish, timelineResize.days, calendars.standard, task.resource) : task.finish } : task) }} onPointerDown={(event) => beginBarDrag(event, task)} onDoubleClick={() => setModalTask(task)}><span className="progress-fill" style={{ width: `${task.percent}%` }} />{!task.isMilestone && <><span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} /><span className="bar-label">{task.name}</span><span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} /></>}{task.isMilestone && <Diamond size={18} fill="currentColor" />}</div></div>)}<div className="today-line body-line" style={{ left: dateOffset(todayLineDate) }} /></div></div><div className="timeline-controls"><span className="control-label">Zoom</span>{(["day", "week", "month", "quarter"] as const).map((value) => <button key={value} className={zoom === value ? "active" : ""} onClick={() => setZoom(value)}>{value}</button>)}</div></section>
+  return (
+    <div className="planner-shell" onClick={() => setShowMenu(null)}>
+      <header className="planner-topbar">
+        <div className="brand-lockup">
+          <div className="brand-mark">⌁</div>
+          <div>
+            <div className="eyebrow">MY DASHBOARD / PROJECT CATALOG</div>
+            <h1>Vintage GANTT</h1>
+          </div>
+        </div>
+        <nav className="topnav">
+          <button className="tool-button primary" onClick={() => navigate("/dashboard")}>Planner</button>
+          <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
+        </nav>
+        <div className="top-actions">
+          <div className="save-state"><span className="live-dot" /> Saved just now</div>
+          <button className="icon-button" title="Help"><CircleHelp size={17} /></button>
+          <button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button>
+          <button className="icon-button" onClick={() => { signOut(); navigate("/"); }} title="Sign out"><LogOut size={17} /></button>
+        </div>
+      </header>
+
+      <div className="project-toolbar">
+        <div className="toolbar-left">
+          <button className="tool-button primary" onClick={() => addTask()}><Plus size={16} /> New task</button>
+          <button className="tool-button" onClick={undo} disabled={!history.length}><Undo2 size={16} /></button>
+          <button className="tool-button" onClick={redo} disabled={!future.length}><Redo2 size={16} /></button>
+          <button className="tool-button" onClick={openRecalculate}><Sparkles size={15} /> Recalculate</button>
+          <span className="toolbar-divider" />
+          <button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button>
+          <button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button>
+          <button className="tool-button" onClick={deleteSelected}><Trash2 size={15} /> Delete</button>
+        </div>
+        <div className="toolbar-right">
+          <div className="search-box"><Search size={15} /><input placeholder="Search projects and tasks" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+          <button className="tool-button"><Download size={15} /> Export</button>
+          <button className="tool-button" onClick={() => toast("You are viewing your team dashboard")}><UserRound size={15} /> My dashboard</button>
+          <button className="tool-button" onClick={openProjectSettings}><CalendarDays size={15} /> Project calendar</button>
+          <button className="tool-button" onClick={() => navigate("/calendars")}><Settings2 size={15} /></button>
+        </div>
+      </div>
+
+      {recalcDialog && (
+        <div className="modal-backdrop" onClick={() => setRecalcDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">RECALCULATE PLANNING</div><h2>Recalculate the schedule</h2></div>
+              <button className="icon-button" onClick={() => setRecalcDialog(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              Pick a planning direction and the reference date for this recalculation. The reference date is only used
+              while recalculating — afterwards you can keep moving bars and they stay where you put them.
+            </p>
+            <div className="planning-mode">
+              <span>Planning direction</span>
+              <div>
+                {(["forward", "backward"] as const).map((direction) => (
+                  <button key={direction} className={recalcDirection === direction ? "selected" : ""} onClick={() => choosePlanningDirection(direction)}>
+                    {direction === "forward" ? "Forward planning" : "Backward planning"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="planning-anchor">
+              <span className="planning-anchor-label">{recalcDirection === "forward" ? "Reference start date" : "Reference finish date"}</span>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button type="button" className="planning-date-trigger">
+                    <span>{formatDate(recalcDate)}</span>
+                    <CalendarDays size={16} />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="planning-calendar-popover">
+                  <Calendar mode="single" selected={new Date(`${recalcDate}T12:00:00`)} onSelect={(date) => { if (date) setRecalcDate(dateLabel(date)); }} initialFocus />
+                </PopoverContent>
+              </Popover>
+              <p>
+                {recalcDirection === "forward"
+                  ? `Every task is planned forward in working days from ${formatDate(recalcDate)} on the ${calendarName} calendar.`
+                  : `Every task is planned backward in working days from ${formatDate(recalcDate)} on the ${calendarName} calendar.`}
+              </p>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setRecalcDialog(false)}>Cancel</button>
+              <button
+                className="tool-button primary"
+                onClick={() => {
+                  recalculate(tasks, recalcDirection, true, recalcDate);
+                  setPlanningDirection(recalcDirection);
+                  setRecalcDialog(false);
+                  toast.success(
+                    recalcDirection === "forward"
+                      ? `Schedule planned forward from ${formatDate(recalcDate)}`
+                      : `Schedule planned backward from ${formatDate(recalcDate)}`,
+                  );
+                }}
+              >
+                Recalculate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {projectDialog && (
+        <div className="modal-backdrop" onClick={() => setProjectDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">PROJECT SETTINGS</div><h2>{activeProject.name}</h2></div>
+              <button className="icon-button" onClick={() => setProjectDialog(false)}><X size={18} /></button>
+            </div>
+            <div className="modal-grid">
+              <label>
+                Calendar
+                <select value={pendingCalendarId} onChange={(event) => setPendingCalendarId(event.target.value)}>
+                  {system.calendars.map((calendar) => (
+                    <option key={calendar.id} value={calendar.id}>
+                      {calendar.name} · {CALENDAR_TYPE_LABELS[calendar.type]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="calendar-copy">
+              Every project is planned on one calendar. Working days, holidays and shutdowns are resolved from it, and
+              changing it reschedules this project immediately.{" "}
+              <button className="link-button" onClick={() => navigate("/calendars")}>Manage calendars →</button>
+            </p>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setProjectDialog(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={requestCalendarChange}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {relinkConfirm && (
+        <div className="modal-backdrop" onClick={() => setRelinkConfirm(null)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">CONFIRM RECALCULATION</div><h2>Change the project calendar?</h2></div>
+              <button className="icon-button" onClick={() => setRelinkConfirm(null)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              This affects <b>{relinkConfirm.projects}</b> project{relinkConfirm.projects === 1 ? "" : "s"} and will move{" "}
+              <b>{relinkConfirm.tasks}</b> task{relinkConfirm.tasks === 1 ? "" : "s"}.
+            </p>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setRelinkConfirm(null)}>Cancel</button>
+              <button
+                className="tool-button primary"
+                onClick={() => {
+                  setProjectCalendar(activeProject.id, relinkConfirm.calendarId);
+                  setRelinkConfirm(null);
+                  toast.success("Project calendar updated");
+                }}
+              >
+                Apply and recalculate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="workbench">
+        <section className="grid-pane" style={{ width: `${split}%` }}>
+          <div className="grid-scroll" ref={scrollRef}>
+            <div className="grid-header">
+              {columnDefs
+                .filter((column) => column.key === "id" || !hidden.includes(column.key))
+                .map((column) => (
+                  <div
+                    key={column.key}
+                    className="grid-head-cell"
+                    style={{ width: column.width }}
+                    onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}
+                  >
+                    {column.label}
+                    <ChevronsUpDown size={12} />
+                  </div>
+                ))}
+            </div>
+            {visibleTasks.map((task) => {
+              const depth = (() => {
+                let count = 0;
+                let current = task;
+                while (current.parentId) {
+                  count++;
+                  current = taskById.get(current.parentId) ?? current;
+                }
+                return count;
+              })();
+              const summary = tasks.some((item) => item.parentId === task.id);
+              return (
+                <div
+                  key={task.id}
+                  className={`grid-row ${selected.includes(task.id) ? "selected" : ""}`}
+                  style={{ height: rowHeight }}
+                  onClick={(event) => setSelected(event.shiftKey || event.ctrlKey ? [...new Set([...selected, task.id])] : [task.id])}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setSelected([task.id]);
+                    setShowMenu({ x: event.clientX, y: event.clientY, id: task.id });
+                  }}
+                  draggable
+                  onDragStart={() => setDragging(task.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (dragging && dragging !== task.id) {
+                      commit(tasks.map((item) => (item.id === dragging ? { ...item, parentId: task.id } : item)));
+                      toast("Task nested under " + task.name);
+                    }
+                    setDragging(null);
+                  }}
+                >
+                  {columnDefs
+                    .filter((column) => column.key === "id" || !hidden.includes(column.key))
+                    .map((column) => {
+                      const value =
+                        column.key === "id"
+                          ? task.id
+                          : column.key === "wbs"
+                            ? getWbs(task, tasks)
+                            : column.key === "duration"
+                              ? `${task.duration} ${task.durationUnit === "days" ? "d" : "w"}`
+                              : column.key === "percent"
+                                ? `${task.percent}%`
+                                : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
+                      const isName = column.key === "name";
+                      const canEdit = !["id", "wbs"].includes(column.key) && !(summary && ["start", "finish", "duration"].includes(column.key));
+                      return (
+                        <div
+                          key={column.key}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${!canEdit ? "readonly" : ""}`}
+                          style={{ width: column.width }}
+                          onClick={() => {
+                            if (canEdit && (column.key === "start" || column.key === "finish")) {
+                              setEditing({ id: task.id, field: column.key });
+                              setDraft(value);
+                            }
+                          }}
+                          onDoubleClick={() => {
+                            if (canEdit) {
+                              setEditing({ id: task.id, field: column.key });
+                              setDraft(value);
+                            }
+                          }}
+                        >
+                          {isName && <span className="row-handle"><GripVertical size={13} /></span>}
+                          {isName && summary && (
+                            <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>
+                              {task.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                            </button>
+                          )}
+                          {isName && !summary && <span className="task-spacer" />}
+                          {editing?.id === task.id && editing.field === column.key ? (
+                            <input
+                              autoFocus
+                              className="cell-input"
+                              type={column.key === "start" || column.key === "finish" ? "date" : "text"}
+                              value={draft}
+                              onChange={(event) => setDraft(event.target.value)}
+                              onKeyDown={(event) => handleKey(event, task, column.key)}
+                              onBlur={() => updateTask(task.id, column.key, draft)}
+                            />
+                          ) : (
+                            <span style={isName ? { paddingLeft: depth * 17 } : undefined} className={isName && summary ? "summary-name" : ""}>
+                              {value}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <div
+          className="splitter"
+          onPointerDown={(event) => {
+            const start = event.clientX;
+            const original = split;
+            const move = (moveEvent: PointerEvent) =>
+              setSplit(Math.max(35, Math.min(72, original + ((moveEvent.clientX - start) / window.innerWidth) * 100)));
+            const up = () => {
+              window.removeEventListener("pointermove", move);
+              window.removeEventListener("pointerup", up);
+            };
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up);
+          }}
+        >
+          <span />
+        </div>
+
+        <section className="timeline-pane">
+          <div className="timeline-scroll">
+            <div className="timeline-header" style={{ width: timelineWidth }}>
+              <div className="month-row">
+                {timelineDays
+                  .filter((day) => day.getDate() === 1 || day.getTime() === timelineStart.getTime())
+                  .map((day) => (
+                    <span key={day.toISOString()} style={{ left: dateOffset(dateLabel(day)) }}>
+                      {day.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                    </span>
+                  ))}
+              </div>
+              <div className="day-row">
+                {timelineDays.map((day) => {
+                  const iso = dateLabel(day);
+                  const resolution = dayIsWorking(iso);
+                  const classes = resolution.isWorkingDay ? "" : resolution.exception ? "holiday" : "weekend";
+                  return (
+                    <span key={day.toISOString()} className={classes} style={{ width: dayWidth }} title={`${formatDate(iso)} · ${resolution.reason}`}>
+                      {zoom === "day" || day.getDay() === 1 ? day.getDate() : ""}
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="today-line" style={{ left: dateOffset(todayLineDate) }} />
+            </div>
+            <div className="timeline-body" style={{ width: timelineWidth }}>
+              <div className="nonworking-layer">
+                {timelineDays
+                  .filter((day) => !dayIsWorking(dateLabel(day)).isWorkingDay)
+                  .map((day) => (
+                    <span key={`off-${day.toISOString()}`} className="nonworking-day" style={{ left: dateOffset(dateLabel(day)), width: dayWidth }} />
+                  ))}
+              </div>
+              <svg className="dependency-layer" width={timelineWidth} height={visibleTasks.length * rowHeight} aria-label="Task dependencies">
+                <defs>
+                  <marker id="dependency-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                    <path d="M0,0 L8,4 L0,8 z" fill="#1468c4" />
+                  </marker>
+                </defs>
+                {dependencyLinks.map((link) => (
+                  <path key={`${link.predecessorId}-${link.successor.id}-${link.type}`} d={link.path} className="dependency-line" markerEnd="url(#dependency-arrow)">
+                    <title>{`${link.predecessor.name} → ${link.successor.name} · ${link.type}${link.lagDays ? `${link.lagDays > 0 ? "+" : ""}${link.lagDays}d` : ""}`}</title>
+                  </path>
+                ))}
+              </svg>
+              {visibleTasks.map((task) => (
+                <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}>
+                  <div
+                    className={`task-bar ${task.isMilestone ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
+                    title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}`}
+                    style={{
+                      left:
+                        dateOffset(
+                          timelineResize?.id === task.id && timelineResize.edge === "start"
+                            ? addWorkingDays(task.start, timelineResize.days, calendarId, system)
+                            : task.start,
+                        ) + (timelineDrag?.id === task.id ? timelineDrag.days * dayWidth : 0),
+                      width: barWidth(
+                        timelineResize?.id === task.id
+                          ? {
+                              ...task,
+                              start: timelineResize.edge === "start" ? addWorkingDays(task.start, timelineResize.days, calendarId, system) : task.start,
+                              finish: timelineResize.edge === "finish" ? addWorkingDays(task.finish, timelineResize.days, calendarId, system) : task.finish,
+                            }
+                          : task,
+                      ),
+                    }}
+                    onPointerDown={(event) => beginBarDrag(event, task)}
+                    onDoubleClick={() => setModalTask(task)}
+                  >
+                    <span className="progress-fill" style={{ width: `${task.percent}%` }} />
+                    {!task.isMilestone && (
+                      <>
+                        <span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} />
+                        <span className="bar-label">{task.name}</span>
+                        <span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} />
+                      </>
+                    )}
+                    {task.isMilestone && <Diamond size={18} fill="currentColor" />}
+                  </div>
+                </div>
+              ))}
+              <div className="today-line body-line" style={{ left: dateOffset(todayLineDate) }} />
+            </div>
+          </div>
+          <div className="timeline-controls">
+            <span className="control-label">Zoom</span>
+            {(["day", "week", "month", "quarter"] as const).map((value) => (
+              <button key={value} className={zoom === value ? "active" : ""} onClick={() => setZoom(value)}>{value}</button>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <footer className="statusbar">
+        <span><span className="status-dot" /> {tasks.length} tasks in this project</span>
+        <span>Calendar: {calendarName}</span>
+        <span>{planningDirection === "forward" ? "Forward planning" : "Backward planning"}</span>
+        <span className="footer-spacer" />
+        <span>Internal workspace · Drag to reschedule · Enter to edit · ⌘Z to undo</span>
+      </footer>
+
+      {showMenu && (
+        <div className="context-menu" style={{ left: showMenu.x, top: showMenu.y }} onClick={(event) => event.stopPropagation()}>
+          <button onClick={() => { setModalTask(taskById.get(showMenu.id) ?? null); setShowMenu(null); }}>Task information <span>↵</span></button>
+          <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button>
+          <button
+            onClick={() => {
+              const source = taskById.get(showMenu.id);
+              if (source) {
+                commit([...tasks, { ...source, id: String(Date.now()), name: `${source.name} copy` }]);
+                toast("Task duplicated");
+              }
+              setShowMenu(null);
+            }}
+          >
+            <Copy size={14} /> Duplicate task
+          </button>
+          <button onClick={() => { setSelected([showMenu.id]); deleteSelected(); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button>
+          <div className="menu-rule" />
+          <button
+            onClick={() => {
+              const task = taskById.get(showMenu.id);
+              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, isMilestone: true, duration: 1, finish: item.start } : item)));
+              setShowMenu(null);
+            }}
+          >
+            Convert to milestone
+          </button>
+          <button onClick={() => setShowMenu(null)}>Columns & filters <Columns3 size={14} /></button>
+        </div>
+      )}
+
+      {modalTask && (
+        <div className="modal-backdrop" onClick={() => setModalTask(null)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">TASK INFORMATION</div><h2>{modalTask.name}</h2></div>
+              <button className="icon-button" onClick={() => setModalTask(null)}><X size={18} /></button>
+            </div>
+            <div className="modal-grid">
+              {(["name", "start", "finish", "duration", "predecessors", "resource", "percent", "notes"] as ColumnKey[]).map((field) => (
+                <label key={field}>
+                  {field === "percent" ? "% complete" : field}
+                  <input
+                    type={field === "start" || field === "finish" ? "date" : "text"}
+                    value={field === "duration" ? `${modalTask.duration} ${modalTask.durationUnit}` : String((modalTask as unknown as Record<string, unknown>)[field] ?? "")}
+                    onChange={(event) => setModalTask({ ...modalTask, [field]: event.target.value })}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setModalTask(null)}>Cancel</button>
+              <button
+                className="tool-button primary"
+                onClick={() => {
+                  updateTask(modalTask.id, "name", modalTask.name);
+                  setTasks((items) => items.map((item) => (item.id === modalTask.id ? modalTask : item)));
+                  setModalTask(null);
+                  toast("Task updated");
+                }}
+              >
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
-    <footer className="statusbar"><span><span className="status-dot" /> {tasks.length} tasks in this project</span><span>Working calendar: Mon–Fri</span><span>{planningDirection === "forward" ? "Forward planning" : "Backward planning"}</span><span className="footer-spacer" /><span>Internal workspace · Drag to reschedule · Enter to edit · ⌘Z to undo</span></footer>
-    {showMenu && <div className="context-menu" style={{ left: showMenu.x, top: showMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { setModalTask(taskById.get(showMenu.id) ?? null); setShowMenu(null); }}>Task information <span>↵</span></button><button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button><button onClick={() => { const source = taskById.get(showMenu.id); if (source) { commit([...tasks, { ...source, id: String(Date.now()), name: `${source.name} copy` }]); toast("Task duplicated"); } setShowMenu(null); }}><Copy size={14} /> Duplicate task</button><button onClick={() => { setSelected([showMenu.id]); deleteSelected(); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button><div className="menu-rule" /><button onClick={() => { const task = taskById.get(showMenu.id); if (task) commit(tasks.map((item) => item.id === task.id ? { ...item, isMilestone: true, duration: 1, finish: item.start } : item)); setShowMenu(null); }}>Convert to milestone</button><button onClick={() => setShowMenu(null)}>Columns & filters <Columns3 size={14} /></button></div>}
-    {modalTask && <div className="modal-backdrop" onClick={() => setModalTask(null)}><div className="task-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">TASK INFORMATION</div><h2>{modalTask.name}</h2></div><button className="icon-button" onClick={() => setModalTask(null)}><X size={18} /></button></div><div className="modal-grid">{(["name", "start", "finish", "duration", "predecessors", "resource", "percent", "notes"] as ColumnKey[]).map((field) => <label key={field}>{field === "percent" ? "% complete" : field}<input type={field === "start" || field === "finish" ? "date" : "text"} value={field === "duration" ? `${modalTask.duration} ${modalTask.durationUnit}` : String((modalTask as unknown as Record<string, unknown>)[field] ?? "")} onChange={(event) => setModalTask({ ...modalTask, [field]: event.target.value })} /></label>)}</div><div className="modal-actions"><button className="tool-button" onClick={() => setModalTask(null)}>Cancel</button><button className="tool-button primary" onClick={() => { updateTask(modalTask.id, "name", modalTask.name); setTasks((items) => items.map((item) => item.id === modalTask.id ? modalTask : item)); setModalTask(null); toast("Task updated"); }}>Save changes</button></div></div></div>}
-  </div>;
+  );
 }
