@@ -36,6 +36,8 @@ export interface ScheduleOptions {
   calendars?: Record<string, WorkingCalendar>;
   defaultCalendar?: WorkingCalendar;
   resetDates?: boolean;
+  /** Task ids whose manually edited dates must remain fixed during a non-reset pass. */
+  anchoredTaskIds?: string[];
 }
 
 const iso = (date: Date) => date.toISOString().slice(0, 10);
@@ -187,8 +189,11 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
       if (dependency.type === "FF") successorConstraints.push(addWorkingDays(successor.finish, -lag, successorCalendar, task.resourceId));
       if (dependency.type === "SF") successorConstraints.push(addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, task.resourceId));
     }
-    task.finish = successorConstraints.length ? successorConstraints.reduce((latest, date) => date < latest ? date : latest) : options.projectFinish ?? task.finish;
-    task.start = startFromFinish(task, calendarForTask(task, options));
+    const isAnchored = options.anchoredTaskIds?.includes(task.id) ?? false;
+    if (!isAnchored) {
+      task.finish = successorConstraints.length ? successorConstraints.reduce((latest, date) => date < latest ? date : latest) : options.projectFinish ?? task.finish;
+      task.start = startFromFinish(task, calendarForTask(task, options));
+    }
     visiting.delete(task.id);
   };
   result.forEach(visit);
