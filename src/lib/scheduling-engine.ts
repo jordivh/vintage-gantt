@@ -103,21 +103,42 @@ function dependencyStart(predecessor: ScheduleTask, successor: ScheduleTask, dep
   return addWorkingDays(finishFromStart(predecessor, calendar), lag + 1, calendar, successor.resourceId);
 }
 
-export function hasCircularDependency(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
+export function findDependencyCycle(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
+  const taskIds = new Set(tasks.map((task) => task.id));
   const edges = new Map<string, string[]>();
-  dependencies.forEach((dependency) => edges.set(dependency.predecessorId, [...(edges.get(dependency.predecessorId) ?? []), dependency.successorId]));
+  dependencies.forEach((dependency) => {
+    if (!taskIds.has(dependency.predecessorId) || !taskIds.has(dependency.successorId)) return;
+    edges.set(dependency.predecessorId, [...(edges.get(dependency.predecessorId) ?? []), dependency.successorId]);
+  });
   const visiting = new Set<string>();
   const visited = new Set<string>();
-  const visit = (id: string): boolean => {
-    if (visiting.has(id)) return true;
-    if (visited.has(id)) return false;
+  const stack: string[] = [];
+  const visit = (id: string): string[] | null => {
+    if (visiting.has(id)) {
+      const cycleStart = stack.indexOf(id);
+      return [...stack.slice(cycleStart), id];
+    }
+    if (visited.has(id)) return null;
     visiting.add(id);
-    if ((edges.get(id) ?? []).some(visit)) return true;
+    stack.push(id);
+    for (const nextId of edges.get(id) ?? []) {
+      const cycle = visit(nextId);
+      if (cycle) return cycle;
+    }
+    stack.pop();
     visiting.delete(id);
     visited.add(id);
-    return false;
+    return null;
   };
-  return tasks.some((task) => visit(task.id));
+  for (const task of tasks) {
+    const cycle = visit(task.id);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
+export function hasCircularDependency(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
+  return Boolean(findDependencyCycle(tasks, dependencies));
 }
 
 function scheduleForward(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions) {
@@ -175,7 +196,8 @@ function scheduleBackward(tasks: ScheduleTask[], dependencies: ScheduleDependenc
 }
 
 export function scheduleTasks(tasks: ScheduleTask[], dependencies: ScheduleDependency[], options: ScheduleOptions | WorkingCalendar = {}) {
-  if (hasCircularDependency(tasks, dependencies)) throw new Error("Circular dependency detected. Please remove one of the links and try again.");
+  const cycle = findDependencyCycle(tasks, dependencies);
+  if (cycle) throw new Error(`Circular dependency detected: ${cycle.join(" → ")}. Please remove one of the links and try again.`);
   const normalized: ScheduleOptions = "holidays" in options || "organizationClosures" in options || "employeeLeave" in options ? { defaultCalendar: options as WorkingCalendar } : options as ScheduleOptions;
   return normalized.direction === "backward" ? scheduleBackward(tasks, dependencies, normalized) : scheduleForward(tasks, dependencies, normalized);
 }
