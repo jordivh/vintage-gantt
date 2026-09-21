@@ -80,7 +80,8 @@ export interface WorkingDayResolution {
  * resolver below, never through ad-hoc date logic).
  * ------------------------------------------------------------------------ */
 
-export const isoDate = (date: Date) => date.toISOString().slice(0, 10);
+export const isoDate = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 export const parseIsoDate = (value: string) => new Date(`${value}T12:00:00`);
 
 const shiftDays = (value: string, amount: number) => {

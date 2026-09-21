@@ -9,7 +9,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 const leaveTypes: LeaveType[] = ["holiday leave", "sick leave", "training", "other"];
-const iso = (date: Date) => date.toISOString().slice(0, 10);
+const iso = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const dayCount = (start: string, end: string) => Math.floor((parseIsoDate(end).getTime() - parseIsoDate(start).getTime()) / 86400000) + 1;
 const scheduleLabel = (days: Weekday[]) => {
   if (days.length === 5 && days.every((day) => [1, 2, 3, 4, 5].includes(day))) return "Mon–Fri";
