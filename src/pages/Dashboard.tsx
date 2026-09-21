@@ -106,6 +106,16 @@ export default function Dashboard() {
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
   const [recalcDialog, setRecalcDialog] = useState(false);
+
+  useEffect(() => {
+    if (!resourceEditor) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest(".resource-combobox")) setResourceEditor(null);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [resourceEditor]);
   const [recalcDirection, setRecalcDirection] = useState<PlanningDirection>("forward");
   const [recalcDate, setRecalcDate] = useState("2025-04-01");
   const [planningDirection, setPlanningDirection] = useState<PlanningDirection>("forward");
