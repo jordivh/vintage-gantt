@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, Check, ChevronLeft, ChevronRight, LogOut, Pencil, Plus, Trash2, UserRound, X } from "lucide-react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -34,6 +34,10 @@ export default function Resources() {
   const selectedCalendar = system.calendars.find((calendar) => calendar.id === selected?.calendarId);
   const workingDays = selectedCalendar?.workingDays ?? ([1, 2, 3, 4, 5] as Weekday[]);
   const leaves = selected ? system.exceptions.filter((exception) => exception.calendarId === selected.calendarId && exception.type === "leave") : [];
+
+  useEffect(() => {
+    if (resources.length && !resources.some((resource) => resource.id === selectedId)) setSelectedId(resources[0].id);
+  }, [resources, selectedId]);
   const leaveDays = useMemo(() => new Set(leaves.flatMap((leave) => {
     const dates: string[] = [];
     for (let cursor = parseIsoDate(leave.startDate); cursor <= parseIsoDate(leave.endDate); cursor.setDate(cursor.getDate() + 1)) dates.push(iso(cursor));
