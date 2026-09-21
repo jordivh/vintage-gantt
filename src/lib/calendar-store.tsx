@@ -19,12 +19,19 @@ import {
   type Weekday,
 } from "./scheduling-engine";
 import { recalculateTasks, type PlannerTask } from "./planner-model";
+import type { PlanningDirection } from "./scheduling-engine";
 
+export type ProjectStatus = "active" | "archived" | "template";
 export interface ProjectRecord {
   id: string;
   name: string;
   /** Required: every project is planned on a calendar. */
   calendarId: string;
+  status: ProjectStatus;
+  startDate: string;
+  schedulingDirection: PlanningDirection;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type LeaveType = "holiday leave" | "sick leave" | "training" | "other";
@@ -124,8 +131,8 @@ const seedAssignments: TaskAssignment[] = [
 ];
 
 const seedProjects: ProjectRecord[] = [
-  { id: RIVERSIDE_PROJECT_ID, name: "Riverside Arts Festival", calendarId: RIVERSIDE_CALENDAR_ID },
-  { id: "proj-press", name: "Press & visitor materials", calendarId: BASE_CALENDAR_ID },
+  { id: RIVERSIDE_PROJECT_ID, name: "Riverside Arts Festival", calendarId: RIVERSIDE_CALENDAR_ID, status: "active", startDate: "2025-04-01", schedulingDirection: "forward", createdAt: "2025-01-01T09:00:00.000Z", updatedAt: "2025-04-17T09:00:00.000Z" },
+  { id: "proj-press", name: "Press & visitor materials", calendarId: BASE_CALENDAR_ID, status: "active", startDate: "2025-04-10", schedulingDirection: "forward", createdAt: "2025-01-02T09:00:00.000Z", updatedAt: "2025-04-17T09:00:00.000Z" },
 ];
 
 /* ------------------------------------------- pure calendar-system builders */
@@ -207,10 +214,18 @@ interface CalendarStoreValue {
   system: CalendarSystem;
   projects: ProjectRecord[];
   activeProject: ProjectRecord;
+  activeProjectId: string;
+  setActiveProject: (projectId: string) => void;
   tasks: PlannerTask[];
+  projectTasks: (projectId: string) => PlannerTask[];
   /** `useState`-compatible setter for the active project's tasks. */
   setTasks: (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => void;
   setProjectCalendar: (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => void;
+  createProject: (input: { name: string; startDate: string; schedulingDirection: PlanningDirection; calendarId: string }) => string;
+  renameProject: (projectId: string, name: string) => void;
+  duplicateProject: (projectId: string, name: string) => string;
+  archiveProject: (projectId: string) => void;
+  deleteProject: (projectId: string) => { ok: boolean; taskCount: number };
   calendarsUsingProjects: (calendarId: string) => ProjectRecord[];
   projectsAffectedBy: (calendarId: string) => ProjectRecord[];
   previewCalendarChange: (nextSystem: CalendarSystem, changedCalendarId: string) => ImpactCount;
@@ -262,7 +277,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [RIVERSIDE_PROJECT_ID]: seedTasks,
     "proj-press": [],
   });
-  const activeProjectId = RIVERSIDE_PROJECT_ID;
+  const [activeProjectId, setActiveProjectId] = useState(RIVERSIDE_PROJECT_ID);
 
   // Local persistence is the current backing store until the database adapter is added.
   useEffect(() => {
@@ -271,7 +286,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       if (saved) {
         const parsed = JSON.parse(saved) as Partial<{ system: CalendarSystem; projects: ProjectRecord[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; tasksByProject: Record<string, PlannerTask[]> }>;
         if (parsed.system) setSystem(parsed.system);
-        if (parsed.projects) setProjects(parsed.projects);
+        if (parsed.projects) setProjects(parsed.projects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          calendarId: project.calendarId,
+          status: project.status ?? "active",
+          startDate: project.startDate ?? "2025-04-01",
+          schedulingDirection: project.schedulingDirection ?? "forward",
+          createdAt: project.createdAt ?? new Date().toISOString(),
+          updatedAt: project.updatedAt ?? new Date().toISOString(),
+        })));
+        if (parsed.projects && !parsed.projects.some((project) => project.id === activeProjectId)) setActiveProjectId(parsed.projects[0]?.id ?? RIVERSIDE_PROJECT_ID);
         if (parsed.resources) setResources(parsed.resources);
         if (parsed.assignments) setAssignments(parsed.assignments);
         if (parsed.tasksByProject) setTasksByProject(parsed.tasksByProject);
@@ -286,6 +311,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [projects, activeProjectId],
   );
   const tasks = tasksByProject[activeProjectId] ?? [];
+  const projectTasks = useCallback((projectId: string) => tasksByProject[projectId] ?? [], [tasksByProject]);
 
   const resourceLeave = useCallback((resourceId: string) => {
     const resource = resources.find((item) => item.id === resourceId);
@@ -322,6 +348,59 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setAssignments((current) => [...current.filter((assignment) => assignment.taskId !== taskId), ...resourceIds.map((resourceId) => ({ id: `as-${uid()}`, taskId, resourceId }))]);
   }, []);
 
+  const setActiveProject = useCallback((projectId: string) => {
+    if (projects.some((project) => project.id === projectId && project.status !== "archived")) setActiveProjectId(projectId);
+  }, [projects]);
+
+  const createProject = useCallback<CalendarStoreValue["createProject"]>((input) => {
+    const id = `proj-${uid()}`;
+    const now = new Date().toISOString();
+    const project: ProjectRecord = { id, name: input.name.trim() || "Untitled project", status: "active", startDate: input.startDate, schedulingDirection: input.schedulingDirection, calendarId: input.calendarId, createdAt: now, updatedAt: now };
+    setProjects((current) => [...current, project]);
+    setTasksByProject((current) => ({ ...current, [id]: [] }));
+    setActiveProjectId(id);
+    return id;
+  }, []);
+
+  const renameProject = useCallback((projectId: string, name: string) => {
+    if (!name.trim()) return;
+    setProjects((current) => current.map((project) => project.id === projectId ? { ...project, name: name.trim(), updatedAt: new Date().toISOString() } : project));
+  }, []);
+
+  const duplicateProject = useCallback<CalendarStoreValue["duplicateProject"]>((projectId, name) => {
+    const source = projects.find((project) => project.id === projectId);
+    const id = `proj-${uid()}`;
+    const now = new Date().toISOString();
+    if (!source) return id;
+    const sourceTasks = tasksByProject[projectId] ?? [];
+    const allTaskIds = Object.values(tasksByProject).flat().map((task) => Number(task.id)).filter(Number.isFinite);
+    const idOffset = Math.max(0, ...allTaskIds) + 1;
+    const idMap = new Map(sourceTasks.map((task, index) => [task.id, String(idOffset + index)]));
+    const copiedTasks = sourceTasks.map((task) => ({ ...task, id: idMap.get(task.id) ?? task.id, predecessors: task.predecessors.replace(/\d+/g, (value) => idMap.get(value) ?? value) }));
+    const copiedAssignments = assignments.filter((assignment) => sourceTasks.some((task) => task.id === assignment.taskId)).map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
+    const copy: ProjectRecord = { ...source, id, name: name.trim() || `${source.name} copy`, status: "template", createdAt: now, updatedAt: now };
+    setProjects((current) => [...current, copy]);
+    setTasksByProject((current) => ({ ...current, [id]: copiedTasks }));
+    setAssignments((current) => [...current, ...copiedAssignments]);
+    return id;
+  }, [projects, tasksByProject, assignments]);
+
+  const archiveProject = useCallback((projectId: string) => {
+    setProjects((current) => current.map((project) => project.id === projectId ? { ...project, status: "archived", updatedAt: new Date().toISOString() } : project));
+    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active")?.id ?? RIVERSIDE_PROJECT_ID);
+  }, [activeProjectId, projects]);
+
+  const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>((projectId) => {
+    const taskCount = (tasksByProject[projectId] ?? []).length;
+    if (projects.length <= 1) return { ok: false, taskCount };
+    setProjects((current) => current.filter((project) => project.id !== projectId));
+    setTasksByProject((current) => { const next = { ...current }; delete next[projectId]; return next; });
+    const taskIds = new Set((tasksByProject[projectId] ?? []).map((task) => task.id));
+    setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
+    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId)?.id ?? RIVERSIDE_PROJECT_ID);
+    return { ok: true, taskCount };
+  }, [activeProjectId, projects, tasksByProject]);
+
   const addResourceLeave = useCallback<CalendarStoreValue["addResourceLeave"]>((resourceId, input) => {
     const resource = resources.find((item) => item.id === resourceId);
     if (!resource) return;
@@ -338,6 +417,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setTasksByProject((current) => {
         const previous = current[activeProjectId] ?? [];
         const next = typeof updater === "function" ? updater(previous) : updater;
+        setProjects((projectList) => projectList.map((project) => project.id === activeProjectId ? { ...project, updatedAt: new Date().toISOString() } : project));
         return { ...current, [activeProjectId]: next };
       });
     },
@@ -515,9 +595,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       system,
       projects,
       activeProject,
+      activeProjectId,
+      setActiveProject,
       tasks,
+      projectTasks,
       setTasks,
       setProjectCalendar,
+      createProject,
+      renameProject,
+      duplicateProject,
+      archiveProject,
+      deleteProject,
       calendarsUsingProjects,
       projectsAffectedBy,
       previewCalendarChange,
@@ -538,7 +626,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       resourceLeave,
     }),
     [
-      system, projects, activeProject, tasks, setTasks, setProjectCalendar, calendarsUsingProjects,
+      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,

@@ -82,6 +82,9 @@ export default function Dashboard() {
     setTasks,
     setProjectCalendar,
     previewProjectRelink,
+    projects,
+    activeProjectId,
+    setActiveProject,
     resources,
     assignments,
     setTaskAssignments,
@@ -89,6 +92,9 @@ export default function Dashboard() {
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
+  useEffect(() => {
+    setPlanningDirection(activeProject.schedulingDirection);
+  }, [activeProjectId, activeProject.schedulingDirection]);
 
   const [selected, setSelected] = useState<string[]>(["3"]);
   const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
@@ -254,7 +260,7 @@ export default function Dashboard() {
   };
 
   const addTask = (parentId: string | null = null, afterId?: string) => {
-    const id = String(Math.max(...tasks.map((task) => Number(task.id)), 0) + 1);
+    const id = String(Date.now());
     const task: Task = {
       id,
       parentId,
@@ -458,12 +464,14 @@ export default function Dashboard() {
         <div className="brand-lockup">
           <div className="brand-mark">⌁</div>
           <div>
-            <div className="eyebrow">MY DASHBOARD / PROJECT CATALOG</div>
+            <button className="eyebrow breadcrumb-button" onClick={() => navigate("/projects")}>MY DASHBOARD / PROJECT CATALOG</button>
             <h1>Vintage GANTT</h1>
           </div>
         </div>
+        <div className="project-switcher"><span>PROJECT</span><select value={activeProjectId} onChange={(event) => setActiveProject(event.target.value)}>{projects.filter((project) => project.status === "active").map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div>
         <nav className="topnav">
           <button className="tool-button primary" onClick={() => navigate("/dashboard")}>Planner</button>
+          <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
           <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
           <button className="tool-button" onClick={() => navigate("/resources")}>Resources</button>
         </nav>

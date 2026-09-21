@@ -255,6 +255,9 @@ export default function Calendars() {
           <button className="tool-button" onClick={() => navigate("/dashboard")}>
             Planner
           </button>
+          <button className="tool-button" onClick={() => navigate("/projects")}>
+            Projects
+          </button>
           <button className="tool-button primary" onClick={() => navigate("/calendars")}>
             Calendars
           </button>
