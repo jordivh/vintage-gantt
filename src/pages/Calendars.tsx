@@ -258,6 +258,9 @@ export default function Calendars() {
           <button className="tool-button primary" onClick={() => navigate("/calendars")}>
             Calendars
           </button>
+          <button className="tool-button" onClick={() => navigate("/resources")}>
+            Resources
+          </button>
         </nav>
         <div className="top-actions">
           <button className="avatar" title={user?.name ?? "Account"}>

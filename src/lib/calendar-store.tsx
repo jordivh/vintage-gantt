@@ -218,9 +218,11 @@ interface CalendarStoreValue {
   resources: ResourceRecord[];
   assignments: TaskAssignment[];
   updateResource: (id: string, patch: Partial<ResourceRecord>) => void;
+  updateResourceSchedule: (id: string, workingDays: Weekday[]) => void;
   createResource: (input: Omit<ResourceRecord, "id" | "calendarId">) => ResourceRecord;
   setTaskAssignments: (taskId: string, resourceIds: string[]) => void;
   addResourceLeave: (resourceId: string, input: { startDate: string; endDate: string; type: LeaveType; note?: string }) => void;
+  removeResourceLeave: (exceptionId: string) => void;
   resourceLeave: (resourceId: string) => CalendarException[];
   /** Applies a new calendar system and immediately re-plans every affected project. */
   applyCalendarSystem: (nextSystem: CalendarSystem) => void;
@@ -305,6 +307,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setResources((current) => current.map((resource) => resource.id === id ? { ...resource, ...patch } : resource));
   }, []);
 
+  const updateResourceSchedule = useCallback((id: string, workingDays: Weekday[]) => {
+    const resource = resources.find((item) => item.id === id);
+    if (!resource) return;
+    setSystem((current) => ({
+      ...current,
+      calendars: current.calendars.map((calendar) =>
+        calendar.id === resource.calendarId ? { ...calendar, workingDays } : calendar,
+      ),
+    }));
+  }, [resources]);
+
   const setTaskAssignments = useCallback((taskId: string, resourceIds: string[]) => {
     setAssignments((current) => [...current.filter((assignment) => assignment.taskId !== taskId), ...resourceIds.map((resourceId) => ({ id: `as-${uid()}`, taskId, resourceId }))]);
   }, []);
@@ -315,6 +328,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const exception = makeException({ calendarId: resource.calendarId, startDate: input.startDate, endDate: input.endDate, label: `${input.type}${input.note ? ` · ${input.note}` : ""}`, type: "leave", source: "manual" });
     setSystem((current) => ({ ...current, exceptions: [...current.exceptions, exception] }));
   }, [resources]);
+
+  const removeResourceLeave = useCallback((exceptionId: string) => {
+    setSystem((current) => ({ ...current, exceptions: current.exceptions.filter((exception) => exception.id !== exceptionId) }));
+  }, []);
 
   const setTasks = useCallback(
     (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => {
@@ -513,16 +530,18 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       resources,
       assignments,
       updateResource,
+      updateResourceSchedule,
       createResource,
       setTaskAssignments,
       addResourceLeave,
+      removeResourceLeave,
       resourceLeave,
     }),
     [
       system, projects, activeProject, tasks, setTasks, setProjectCalendar, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
-      updateResource, createResource, setTaskAssignments, addResourceLeave, resourceLeave,
+      updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
     ],
   );
 

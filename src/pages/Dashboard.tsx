@@ -55,8 +55,9 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "notes", label: "Notes", width: 160 },
 ];
 
+const parseDate = (date: string) => new Date(`${date}T12:00:00`);
 const formatDate = (date: string) =>
-  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${date}T12:00:00`));
+  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parseDate(date));
 
 const dateLabel = (date: Date) => isoDate(date);
 
@@ -81,6 +82,10 @@ export default function Dashboard() {
     setTasks,
     setProjectCalendar,
     previewProjectRelink,
+    resources,
+    assignments,
+    setTaskAssignments,
+    resourceLeave,
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
@@ -142,6 +147,7 @@ export default function Dashboard() {
   const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
   const timelineWidth = timelineDays.length * dayWidth;
   const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
   const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
 
   const recalculate = (
@@ -448,6 +454,7 @@ export default function Dashboard() {
         <nav className="topnav">
           <button className="tool-button primary" onClick={() => navigate("/dashboard")}>Planner</button>
           <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
+          <button className="tool-button" onClick={() => navigate("/resources")}>Resources</button>
         </nav>
         <div className="top-actions">
           <div className="save-state"><span className="live-dot" /> Saved just now</div>
@@ -662,7 +669,9 @@ export default function Dashboard() {
                               ? `${task.duration} ${task.durationUnit === "days" ? "d" : "w"}`
                               : column.key === "percent"
                                 ? `${task.percent}%`
-                                : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
+                                : column.key === "resource"
+                                  ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
+                                  : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
                       const isName = column.key === "name";
                       const canEdit = !["id", "wbs"].includes(column.key) && !(summary && ["start", "finish", "duration"].includes(column.key));
                       return (
@@ -690,7 +699,18 @@ export default function Dashboard() {
                             </button>
                           )}
                           {isName && !summary && <span className="task-spacer" />}
-                          {editing?.id === task.id && editing.field === column.key ? (
+                          {column.key === "resource" ? (
+                            <select
+                              className="resource-cell-picker"
+                              multiple
+                              value={assignments.filter((assignment) => assignment.taskId === task.id).map((assignment) => assignment.resourceId)}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) => setTaskAssignments(task.id, Array.from(event.target.selectedOptions, (option) => option.value))}
+                              title="Hold Ctrl/Cmd to assign multiple employees"
+                            >
+                              {resources.filter((resource) => resource.isActive || assignments.some((assignment) => assignment.taskId === task.id && assignment.resourceId === resource.id)).map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
+                            </select>
+                          ) : editing?.id === task.id && editing.field === column.key ? (
                             <input
                               autoFocus
                               className="cell-input"
@@ -807,7 +827,12 @@ export default function Dashboard() {
                     {!task.isMilestone && (
                       <>
                         <span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} />
-                        <span className="bar-label">{task.name}</span>
+                        <span className="bar-label">{task.name}{assignedResources(task.id).length > 0 && <small className="bar-resources"> · {assignedResources(task.id).map((resource) => resource?.name).join(", ")}</small>}</span>
+                        {assignedResources(task.id).flatMap((resource) => resource ? resourceLeave(resource.id).filter((leave) => leave.endDate >= task.start && leave.startDate <= task.finish).map((leave) => {
+                          const from = Math.max(0, (parseDate(leave.startDate).getTime() - parseDate(task.start).getTime()) / 86400000);
+                          const to = Math.min((parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1, (parseDate(leave.endDate).getTime() - parseDate(task.start).getTime()) / 86400000 + 1);
+                          return <span key={`${resource.id}-${leave.id}`} className="leave-shade" title={`${resource.name}: ${leave.label}`} style={{ left: `${(from / Math.max(1, (parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1)) * 100}%`, width: `${((to - from) / Math.max(1, (parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1)) * 100}%`, background: resource.colour }} />;
+                        }) : [])}
                         <span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} />
                       </>
                     )}
