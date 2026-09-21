@@ -678,7 +678,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
@@ -720,6 +720,7 @@ export default function Dashboard() {
                                   <span className="resource-chip-dot" style={{ background: resource.colour }} />{resource.name}<button type="button" onClick={() => removeResource(resource.id)}><X size={10} /></button>
                                 </span>)}
                                 <input
+                                  autoFocus={resourceEditor?.taskId === task.id}
                                   value={resourceQuery}
                                   placeholder={selectedResources.length ? "Add…" : "Assign resource…"}
                                   onFocus={() => setResourceEditor({ taskId: task.id, query: resourceQuery })}
