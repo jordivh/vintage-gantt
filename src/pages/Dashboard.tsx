@@ -85,6 +85,7 @@ export default function Dashboard() {
     projects,
     activeProjectId,
     setActiveProject,
+    projectTasks,
     resources,
     assignments,
     setTaskAssignments,
@@ -107,6 +108,12 @@ export default function Dashboard() {
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
   const [query, setQuery] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectHighlight, setProjectHighlight] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("vintage-gantt-project-sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
   const [hidden, setHidden] = useState<ColumnKey[]>([]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
@@ -129,6 +136,25 @@ export default function Dashboard() {
   const [pendingCalendarId, setPendingCalendarId] = useState(calendarId);
   const [relinkConfirm, setRelinkConfirm] = useState<{ calendarId: string; projects: number; tasks: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem("vintage-gantt-project-sidebar-collapsed", String(sidebarCollapsed)); } catch { /* storage is optional */ }
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarCollapsed((collapsed) => !collapsed);
+      }
+    };
+    window.addEventListener("keydown", onShortcut);
+    return () => window.removeEventListener("keydown", onShortcut);
+  }, []);
+
+  useEffect(() => {
+    setProjectHighlight(0);
+  }, [projectSearch, expandedGroups]);
 
   const visibleTasks = useMemo(() => {
     const visible: Task[] = [];
@@ -166,6 +192,23 @@ export default function Dashboard() {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
   const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
+  const filteredProjectGroups = useMemo(() => {
+    const matching = projects.filter((project) => project.name.toLowerCase().includes(projectSearch.toLowerCase()));
+    return {
+      active: matching.filter((project) => project.status === "active"),
+      archived: matching.filter((project) => project.status === "archived"),
+    };
+  }, [projects, projectSearch]);
+  const projectResults = [...filteredProjectGroups.active, ...filteredProjectGroups.archived];
+  const selectProject = (projectId: string) => {
+    if (projectId === activeProjectId) return;
+    if (editing) updateTask(editing.id, editing.field, draft);
+    setEditing(null);
+    setResourceEditor(null);
+    setHistory([]);
+    setFuture([]);
+    setActiveProject(projectId);
+  };
 
   const recalculate = (
     next: Task[],
@@ -465,10 +508,9 @@ export default function Dashboard() {
           <div className="brand-mark">⌁</div>
           <div>
             <button className="eyebrow breadcrumb-button" onClick={() => navigate("/projects")}>MY DASHBOARD / PROJECT CATALOG</button>
-            <h1>Vintage GANTT</h1>
+            <h1 className="planner-project-heading" title={activeProject.name}>{activeProject.name}</h1>
           </div>
         </div>
-        <div className="project-switcher"><span>PROJECT</span><select value={activeProjectId} onChange={(event) => setActiveProject(event.target.value)}>{projects.filter((project) => project.status === "active").map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div>
         <nav className="topnav">
           <button className="tool-button primary" onClick={() => navigate("/dashboard")}>Planner</button>
           <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
@@ -625,7 +667,19 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="workbench">
+      <div className={`planner-body ${sidebarCollapsed ? "sidebar-is-collapsed" : ""}`}>
+        <aside className={`project-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+          <button className="sidebar-toggle" title={sidebarCollapsed ? "Show projects (Ctrl/Cmd+B)" : "Hide projects (Ctrl/Cmd+B)"} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}>{sidebarCollapsed ? "›" : "‹"}</button>
+          {!sidebarCollapsed && <>
+            <div className="sidebar-search"><Search size={14} /><input autoComplete="off" placeholder="Search projects" value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); setProjectHighlight((index) => Math.min(projectResults.length - 1, index + 1)); } if (event.key === "ArrowUp") { event.preventDefault(); setProjectHighlight((index) => Math.max(0, index - 1)); } if (event.key === "Enter" && projectResults[projectHighlight]) { event.preventDefault(); selectProject(projectResults[projectHighlight].id); } if (event.key === "Escape") setProjectSearch(""); }} /></div>
+            <div className="sidebar-projects">
+              {(["active", "archived"] as const).map((group) => { const list = filteredProjectGroups[group]; const expanded = expandedGroups[group]; return <div className="sidebar-group" key={group}><button className="sidebar-group-header" onClick={() => setExpandedGroups((current) => ({ ...current, [group]: !current[group] }))}><span>{expanded ? "⌄" : "›"} {group === "active" ? "Active" : "Archived"} <small>{list.length}</small></span></button>{expanded && <div className="sidebar-project-list">{list.map((project, index) => { const projectTaskList = projectTasks(project.id); const first = projectTaskList[0]; const finish = projectTaskList.length ? projectTaskList.reduce((latest, task) => task.finish > latest ? task.finish : latest, first.finish) : project.startDate; return <button key={project.id} title={project.name} className={`sidebar-project ${project.id === activeProjectId ? "current" : ""} ${index === projectHighlight && projectSearch ? "highlighted" : ""}`} onClick={() => selectProject(project.id)}><b>{project.name}</b><small>{new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(new Date(`${project.startDate}T12:00:00`))} - {new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${finish}T12:00:00`))} · {projectTaskList.length} tasks</small></button>; })}{!list.length && <span className="sidebar-empty">No projects match</span>}</div>}</div>; })}
+              {!filteredProjectGroups.active.length && !filteredProjectGroups.archived.length && <div className="sidebar-no-results">No projects match<button onClick={() => setProjectSearch("")}>Clear search</button></div>}
+            </div>
+            <div className="sidebar-actions"><button className="tool-button primary" onClick={() => navigate("/projects?new=1")}><Plus size={14} /> New project</button><button className="sidebar-all-projects" onClick={() => navigate("/projects")}>All projects →</button></div>
+          </>}
+        </aside>
+        <div className="workbench">
         <section className="grid-pane" style={{ width: `${split}%` }}>
           <div className="grid-scroll" ref={scrollRef}>
             <div className="grid-header">
@@ -894,6 +948,7 @@ export default function Dashboard() {
             ))}
           </div>
         </section>
+        </div>
       </div>
 
       <footer className="statusbar">

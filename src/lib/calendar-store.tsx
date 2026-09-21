@@ -277,7 +277,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [RIVERSIDE_PROJECT_ID]: seedTasks,
     "proj-press": [],
   });
-  const [activeProjectId, setActiveProjectId] = useState(RIVERSIDE_PROJECT_ID);
+  const [activeProjectId, setActiveProjectId] = useState(() => {
+    try { return localStorage.getItem("vintage-gantt-active-project") ?? RIVERSIDE_PROJECT_ID; } catch { return RIVERSIDE_PROJECT_ID; }
+  });
 
   // Local persistence is the current backing store until the database adapter is added.
   useEffect(() => {
@@ -286,17 +288,22 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       if (saved) {
         const parsed = JSON.parse(saved) as Partial<{ system: CalendarSystem; projects: ProjectRecord[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; tasksByProject: Record<string, PlannerTask[]> }>;
         if (parsed.system) setSystem(parsed.system);
-        if (parsed.projects) setProjects(parsed.projects.map((project) => ({
-          id: project.id,
-          name: project.name,
-          calendarId: project.calendarId,
-          status: project.status ?? "active",
-          startDate: project.startDate ?? "2025-04-01",
-          schedulingDirection: project.schedulingDirection ?? "forward",
-          createdAt: project.createdAt ?? new Date().toISOString(),
-          updatedAt: project.updatedAt ?? new Date().toISOString(),
-        })));
-        if (parsed.projects && !parsed.projects.some((project) => project.id === activeProjectId)) setActiveProjectId(parsed.projects[0]?.id ?? RIVERSIDE_PROJECT_ID);
+        if (parsed.projects) {
+          const migratedProjects = parsed.projects.map((project) => ({
+            id: project.id,
+            name: project.name,
+            calendarId: project.calendarId,
+            status: project.status ?? "active",
+            startDate: project.startDate ?? "2025-04-01",
+            schedulingDirection: project.schedulingDirection ?? "forward",
+            createdAt: project.createdAt ?? new Date().toISOString(),
+            updatedAt: project.updatedAt ?? new Date().toISOString(),
+          }));
+          setProjects(migratedProjects);
+          const persisted = migratedProjects.find((project) => project.id === activeProjectId && project.status !== "archived");
+          const fallback = migratedProjects.filter((project) => project.status === "active").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? migratedProjects[0];
+          setActiveProjectId(persisted?.id ?? fallback?.id ?? RIVERSIDE_PROJECT_ID);
+        }
         if (parsed.resources) setResources(parsed.resources);
         if (parsed.assignments) setAssignments(parsed.assignments);
         if (parsed.tasksByProject) setTasksByProject(parsed.tasksByProject);
@@ -306,6 +313,12 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try { localStorage.setItem("vintage-gantt-calendar-state", JSON.stringify({ system, projects, resources, assignments, tasksByProject })); } catch { /* storage is optional */ }
   }, [system, projects, resources, assignments, tasksByProject]);
+  useEffect(() => {
+    try { localStorage.setItem("vintage-gantt-active-project", activeProjectId); } catch { /* storage is optional */ }
+  }, [activeProjectId]);
+  useEffect(() => {
+    try { localStorage.setItem("vintage-gantt-active-project", activeProjectId); } catch { /* storage is optional */ }
+  }, [activeProjectId]);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
     [projects, activeProjectId],

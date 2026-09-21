@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Archive, Copy, FolderOpen, LogOut, Pencil, Plus, Trash2, X } from "lucide-react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
 import { useCalendarStore, type ProjectRecord } from "@/lib/calendar-store";
@@ -12,8 +12,9 @@ const today = new Date().toISOString().slice(0, 10);
 export default function Projects() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { projects, system, projectTasks, activeProjectId, setActiveProject, createProject, renameProject, duplicateProject, archiveProject, deleteProject } = useCalendarStore();
-  const [showNew, setShowNew] = useState(false);
+  const [showNew, setShowNew] = useState(() => searchParams.get("new") === "1");
   const [newProject, setNewProject] = useState({ name: "", startDate: today, schedulingDirection: "forward" as PlanningDirection, calendarId: system.defaultCalendarId });
   const [rename, setRename] = useState<{ id: string; value: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectRecord | null>(null);
