@@ -190,6 +190,7 @@ export default function Dashboard() {
   const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
   const timelineWidth = timelineDays.length * dayWidth;
   const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const isMilestone = (task: Task) => task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id);
   const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
   const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
   const filteredProjectGroups = useMemo(() => {
@@ -217,7 +218,8 @@ export default function Dashboard() {
     anchorDate = "",
     anchoredTaskIds: string[] = [],
   ) => {
-    const result = recalculateTasks(next, {
+    const normalized = normalizeMilestones(next);
+    const result = recalculateTasks(normalized, {
       direction: resetDates ? direction : "forward",
       projectStart: resetDates && direction === "forward" ? anchorDate : undefined,
       projectFinish: resetDates && direction === "backward" ? anchorDate : undefined,
@@ -234,15 +236,21 @@ export default function Dashboard() {
     setTasks(result.tasks);
   };
 
+  const normalizeMilestones = (items: Task[]) => items.map((task) => ({
+    ...task,
+    isMilestone: task.duration === 0 && !items.some((candidate) => candidate.parentId === task.id),
+  }));
+
   const commit = (next: Task[], manuallyAnchoredId?: string) => {
-    const cycle = findDependencyCycle(next, dependenciesForTasks(next));
+    const normalized = normalizeMilestones(next);
+    const cycle = findDependencyCycle(normalized, dependenciesForTasks(normalized));
     if (cycle) {
       toast.error(`Dependency rejected: circular chain ${cycle.join(" → ")} would freeze the schedule.`);
       return false;
     }
     setHistory((items) => [...items.slice(-29), tasks]);
     setFuture([]);
-    recalculate(next, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
+    recalculate(normalized, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
     return true;
   };
 
@@ -250,36 +258,43 @@ export default function Dashboard() {
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
-        const [amount, unit] = value.split(" ");
-        const duration = Math.max(1, Number(amount) || 1);
-        const weeks = unit === "weeks";
+        const [amount, unit] = value.trim().split(/\s+/);
+        const parsed = Number(amount);
+        const duration = Number.isFinite(parsed) ? Math.max(0, parsed) : task.duration;
+        const weeks = unit === "weeks" || unit === "w";
+        const summary = tasks.some((candidate) => candidate.parentId === task.id);
+        const milestone = duration === 0 && !summary;
         return {
           ...task,
           duration,
           durationUnit: (weeks ? "weeks" : "days") as "days" | "weeks",
-          finish: task.isMilestone
+          isMilestone: milestone,
+          finish: milestone
             ? task.start
-            : addWorkingDays(task.start, weeks ? duration * 5 - 1 : duration - 1, calendarId, system),
+            : addWorkingDays(task.start, weeks ? duration * 5 - 1 : Math.max(0, duration - 1), calendarId, system),
         };
       }
       if (field === "start") {
         const start = value || task.start;
+        const milestone = task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id);
         return {
           ...task,
           start,
-          finish: task.isMilestone
+          isMilestone: milestone,
+          finish: milestone
             ? start
-            : addWorkingDays(start, task.durationUnit === "weeks" ? task.duration * 5 - 1 : task.duration - 1, calendarId, system),
+            : addWorkingDays(start, task.durationUnit === "weeks" ? task.duration * 5 - 1 : Math.max(0, task.duration - 1), calendarId, system),
         };
       }
       if (field === "finish") {
         const finish = value || task.finish;
-        if (task.isMilestone) return { ...task, start: finish, finish };
+        if (task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id)) return { ...task, start: finish, finish, isMilestone: true };
         const duration = workingDaysBetween(task.start, finish, calendarId, system);
         const start = addWorkingDays(finish, -(duration - 1), calendarId, system);
         return { ...task, start, finish, duration, durationUnit: "days" as const };
       }
       if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
+      if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
     });
     commit(next);
@@ -332,16 +347,58 @@ export default function Dashboard() {
     setSelected([]);
   };
 
+  const taskDepth = (task: Task, items: Task[] = tasks) => {
+    let depth = 0;
+    let parentId = task.parentId;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      depth += 1;
+      parentId = items.find((item) => item.id === parentId)?.parentId ?? null;
+    }
+    return depth;
+  };
+
+  const taskSubtreeIds = (id: string, items: Task[]) => {
+    const ids = new Set([id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const item of items) {
+        if (item.parentId && ids.has(item.parentId) && !ids.has(item.id)) { ids.add(item.id); changed = true; }
+      }
+    }
+    return ids;
+  };
+
   const indent = (id: string, outdent = false) => {
     const index = tasks.findIndex((task) => task.id === id);
     if (index < 0) return;
     const task = tasks[index];
-    if (outdent && task.parentId) {
-      const parent = tasks.find((item) => item.id === task.parentId);
-      commit(tasks.map((item) => (item.id === id ? { ...item, parentId: parent?.parentId ?? null } : item)));
-    } else if (!outdent && index > 0) {
-      commit(tasks.map((item, itemIndex) => (item.id === id ? { ...item, parentId: tasks[itemIndex - 1].id } : item)));
+    const currentDepth = taskDepth(task);
+    const subtree = taskSubtreeIds(id, tasks);
+    if (outdent) {
+      if (!task.parentId) return;
+      const formerParent = tasks.find((item) => item.id === task.parentId);
+      if (!formerParent) return;
+      const nextParentId = formerParent.parentId ?? null;
+      const moved = tasks.filter((item) => subtree.has(item.id));
+      const remaining = tasks.filter((item) => !subtree.has(item.id));
+      const parentSubtree = taskSubtreeIds(formerParent.id, remaining);
+      let insertAt = 0;
+      remaining.forEach((item, itemIndex) => { if (parentSubtree.has(item.id)) insertAt = Math.max(insertAt, itemIndex + 1); });
+      const next = [...remaining.slice(0, insertAt), ...moved.map((item) => ({ ...item, parentId: item.id === id ? nextParentId : item.parentId })), ...remaining.slice(insertAt)];
+      commit(next);
+      return;
     }
+    const visibleIndex = visibleTasks.findIndex((item) => item.id === id);
+    if (visibleIndex <= 0) return;
+    const preceding = visibleTasks[visibleIndex - 1];
+    const newDepth = currentDepth + 1;
+    if (newDepth > taskDepth(preceding) + 1) return;
+    const target = [...visibleTasks].slice(0, visibleIndex).reverse().find((item) => taskDepth(item) === newDepth - 1);
+    if (!target || task.parentId === target.id) return;
+    commit(tasks.map((item) => item.id === id ? { ...item, parentId: target.id } : item));
   };
 
   const toggleCollapse = (id: string) =>
@@ -392,13 +449,13 @@ export default function Dashboard() {
     Math.round((new Date(`${date}T12:00:00`).getTime() - timelineStart.getTime()) / 86400000) * dayWidth;
   const barWidth = (task: Task) =>
     Math.max(
-      task.isMilestone ? 14 : 22,
+      isMilestone(task) ? 14 : 22,
       (Math.round((new Date(`${task.finish}T12:00:00`).getTime() - new Date(`${task.start}T12:00:00`).getTime()) / 86400000) + 1) *
         dayWidth,
     );
 
   const beginBarDrag = (event: ReactPointerEvent, task: Task) => {
-    if (task.isMilestone) return;
+    if (isMilestone(task)) return;
     event.stopPropagation();
     const originX = event.clientX;
     let movedDays = 0;
@@ -815,6 +872,7 @@ export default function Dashboard() {
                               type={column.key === "start" || column.key === "finish" ? "date" : "text"}
                               value={draft}
                               onChange={(event) => setDraft(event.target.value)}
+                              onFocus={(event) => { if (isName && (task.name === "New task" || task.name === "Nieuwe taak")) event.currentTarget.select(); }}
                               onKeyDown={(event) => handleKey(event, task, column.key)}
                               onBlur={() => updateTask(task.id, column.key, draft)}
                             />
@@ -899,7 +957,7 @@ export default function Dashboard() {
               {visibleTasks.map((task) => (
                 <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}>
                   <div
-                    className={`task-bar ${task.isMilestone ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
+                    className={`task-bar ${isMilestone(task) ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
                     title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}`}
                     style={{
                       left:
@@ -922,7 +980,7 @@ export default function Dashboard() {
                     onDoubleClick={() => setModalTask(task)}
                   >
                     <span className="progress-fill" style={{ width: `${task.percent}%` }} />
-                    {!task.isMilestone && (
+                    {!isMilestone(task) && (
                       <>
                         <span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} />
                         <span className="bar-label">{task.name}{assignedResources(task.id).length > 0 && <small className="bar-resources"> · {assignedResources(task.id).map((resource) => resource?.name).join(", ")}</small>}</span>
@@ -934,7 +992,7 @@ export default function Dashboard() {
                         <span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} />
                       </>
                     )}
-                    {task.isMilestone && <Diamond size={18} fill="currentColor" />}
+                    {isMilestone(task) && <Diamond size={18} fill="currentColor" />}
                   </div>
                 </div>
               ))}
@@ -980,11 +1038,20 @@ export default function Dashboard() {
           <button
             onClick={() => {
               const task = taskById.get(showMenu.id);
-              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, isMilestone: true, duration: 1, finish: item.start } : item)));
+              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, duration: 0, isMilestone: true, finish: item.start } : item)));
               setShowMenu(null);
             }}
           >
             Convert to milestone
+          </button>
+          <button
+            onClick={() => {
+              const task = taskById.get(showMenu.id);
+              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, duration: 1, durationUnit: "days", isMilestone: false } : item)));
+              setShowMenu(null);
+            }}
+          >
+            Convert to task
           </button>
           <button onClick={() => setShowMenu(null)}>Columns & filters <Columns3 size={14} /></button>
         </div>
