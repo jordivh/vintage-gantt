@@ -92,6 +92,7 @@ export default function Dashboard() {
 
   const [selected, setSelected] = useState<string[]>(["3"]);
   const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
+  const [resourceEditor, setResourceEditor] = useState<{ taskId: string; query: string } | null>(null);
   const [draft, setDraft] = useState("");
   const [zoom, setZoom] = useState<"day" | "week" | "month" | "quarter">("week");
   const [split, setSplit] = useState(58);
@@ -699,18 +700,42 @@ export default function Dashboard() {
                             </button>
                           )}
                           {isName && !summary && <span className="task-spacer" />}
-                          {column.key === "resource" ? (
-                            <select
-                              className="resource-cell-picker"
-                              multiple
-                              value={assignments.filter((assignment) => assignment.taskId === task.id).map((assignment) => assignment.resourceId)}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={(event) => setTaskAssignments(task.id, Array.from(event.target.selectedOptions, (option) => option.value))}
-                              title="Hold Ctrl/Cmd to assign multiple employees"
-                            >
-                              {resources.filter((resource) => resource.isActive || assignments.some((assignment) => assignment.taskId === task.id && assignment.resourceId === resource.id)).map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
-                            </select>
-                          ) : editing?.id === task.id && editing.field === column.key ? (
+                          {column.key === "resource" ? (() => {
+                            const selectedResourceIds = assignments.filter((assignment) => assignment.taskId === task.id).map((assignment) => assignment.resourceId);
+                            const selectedResources = selectedResourceIds.map((id) => resources.find((resource) => resource.id === id)).filter(Boolean);
+                            const resourceQuery = resourceEditor?.taskId === task.id ? resourceEditor.query : "";
+                            const suggestions = resources.filter((resource) =>
+                              (resource.isActive || selectedResourceIds.includes(resource.id)) &&
+                              !selectedResourceIds.includes(resource.id) &&
+                              resource.name.toLowerCase().includes(resourceQuery.toLowerCase()),
+                            );
+                            const selectResource = (resourceId: string) => {
+                              setTaskAssignments(task.id, [...selectedResourceIds, resourceId]);
+                              setResourceEditor({ taskId: task.id, query: "" });
+                            };
+                            const removeResource = (resourceId: string) => setTaskAssignments(task.id, selectedResourceIds.filter((id) => id !== resourceId));
+                            return <div className={`resource-combobox ${resourceEditor?.taskId === task.id ? "open" : ""}`} onClick={(event) => event.stopPropagation()}>
+                              <div className="resource-combobox-input" onClick={() => setResourceEditor({ taskId: task.id, query: "" })}>
+                                {selectedResources.map((resource) => resource && <span className="resource-chip" key={resource.id} style={{ borderColor: resource.colour }}>
+                                  <span className="resource-chip-dot" style={{ background: resource.colour }} />{resource.name}<button type="button" onClick={() => removeResource(resource.id)}><X size={10} /></button>
+                                </span>)}
+                                <input
+                                  value={resourceQuery}
+                                  placeholder={selectedResources.length ? "Add…" : "Assign resource…"}
+                                  onFocus={() => setResourceEditor({ taskId: task.id, query: resourceQuery })}
+                                  onChange={(event) => setResourceEditor({ taskId: task.id, query: event.target.value })}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter" && suggestions[0]) { event.preventDefault(); selectResource(suggestions[0].id); }
+                                    if (event.key === "Escape") setResourceEditor(null);
+                                    if (event.key === "Backspace" && !resourceQuery && selectedResourceIds.length) removeResource(selectedResourceIds[selectedResourceIds.length - 1]);
+                                  }}
+                                />
+                              </div>
+                              {resourceEditor?.taskId === task.id && <div className="resource-suggestions">
+                                {suggestions.length ? suggestions.map((resource) => <button type="button" key={resource.id} onMouseDown={(event) => event.preventDefault()} onClick={() => selectResource(resource.id)}><span className="resource-suggestion-dot" style={{ background: resource.colour }} /><span><b>{resource.name}</b><small>{resource.role || "Employee"}</small></span></button>) : <span className="resource-no-results">No active employees match “{resourceQuery}”</span>}
+                              </div>}
+                            </div>;
+                          })() : editing?.id === task.id && editing.field === column.key ? (
                             <input
                               autoFocus
                               className="cell-input"
