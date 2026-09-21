@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -18,8 +19,11 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { recalculateTasks, type PlannerTask } from "./planner-model";
+import { dependenciesForTasks, recalculateTasks, type PlannerTask } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
+import { api } from "@/convex/_generated/api";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { toast } from "sonner";
 
 export type ProjectStatus = "active" | "archived" | "template";
 export interface ProjectRecord {
@@ -72,68 +76,9 @@ const uid = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2, 10);
 
-/* ------------------------------------------------------------------ seeds */
+/* ------------------------------------------------------------------ identifiers */
 
 export const BASE_CALENDAR_ID = "cal-base-belgium";
-export const RIVERSIDE_CALENDAR_ID = "cal-proj-riverside";
-export const RIVERSIDE_PROJECT_ID = "proj-riverside";
-
-const seedTasks: PlannerTask[] = [
-  { id: "1", parentId: null, name: "Riverside Arts Festival", duration: 18, durationUnit: "days", start: "2025-04-07", finish: "2025-04-30", isMilestone: false, predecessors: "", resource: "M. Alvarez", percent: 42, notes: "Main project brief and public opening.", color: "ochre" },
-  { id: "2", parentId: "1", name: "Site & permissions", duration: 5, durationUnit: "days", start: "2025-04-07", finish: "2025-04-11", isMilestone: false, predecessors: "", resource: "E. Shaw", percent: 100, notes: "", color: "sage" },
-  { id: "3", parentId: "1", name: "Artist lineup", duration: 8, durationUnit: "days", start: "2025-04-14", finish: "2025-04-23", isMilestone: false, predecessors: "2FS", resource: "M. Alvarez", percent: 66, notes: "Confirm three final commissions.", color: "clay" },
-  { id: "4", parentId: "1", name: "Install & opening", duration: 4, durationUnit: "days", start: "2025-04-25", finish: "2025-04-30", isMilestone: false, predecessors: "3FS+1d", resource: "J. Bell", percent: 18, notes: "Crew call at 07:30.", color: "ink" },
-  { id: "5", parentId: null, name: "Press & visitor materials", duration: 9, durationUnit: "days", start: "2025-04-10", finish: "2025-04-22", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 24, notes: "Printed guide, wayfinding, web copy.", color: "rust" },
-  { id: "6", parentId: "5", name: "Draft visitor guide", duration: 4, durationUnit: "days", start: "2025-04-10", finish: "2025-04-15", isMilestone: false, predecessors: "", resource: "R. Chen", percent: 72, notes: "", color: "sage" },
-  { id: "7", parentId: "5", name: "Print & distribute", duration: 3, durationUnit: "days", start: "2025-04-17", finish: "2025-04-21", isMilestone: false, predecessors: "6FS+1d", resource: "R. Chen", percent: 0, notes: "", color: "clay" },
-  { id: "8", parentId: null, name: "Festival opens", duration: 1, durationUnit: "days", start: "2025-05-01", finish: "2025-05-01", isMilestone: true, predecessors: "4FS, 7FS", resource: "", percent: 0, notes: "Public opening day.", color: "rust" },
-];
-
-function seedSystem(): CalendarSystem {
-  const holidays: CalendarException[] = [2024, 2025, 2026].flatMap((year) =>
-    belgianPublicHolidays(year).map((holiday) => ({
-      id: `import-${holiday.date}`,
-      calendarId: BASE_CALENDAR_ID,
-      startDate: holiday.date,
-      endDate: holiday.date,
-      label: holiday.label,
-      type: "holiday" as CalendarExceptionType,
-      isWorkingDay: false,
-      source: "import" as CalendarExceptionSource,
-    })),
-  );
-  const calendars: PlannerCalendar[] = [
-    { id: BASE_CALENDAR_ID, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] },
-    { id: RIVERSIDE_CALENDAR_ID, name: "Riverside Arts Festival", type: "project", parentCalendarId: BASE_CALENDAR_ID, isDefault: false },
-    { id: "cal-person-alvarez", name: "M. Alvarez — leave", type: "person", parentCalendarId: RIVERSIDE_CALENDAR_ID, isDefault: false },
-  ];
-  return {
-    calendars,
-    exceptions: [
-      ...holidays,
-      { id: "exc-install-shutdown", calendarId: RIVERSIDE_CALENDAR_ID, startDate: "2025-04-28", endDate: "2025-04-30", label: "Install shutdown", type: "shutdown", isWorkingDay: false, source: "manual" },
-      { id: "exc-alvarez-leave", calendarId: "cal-person-alvarez", startDate: "2025-04-24", endDate: "2025-04-24", label: "Annual leave", type: "leave", isWorkingDay: false, source: "manual" },
-    ],
-    defaultCalendarId: BASE_CALENDAR_ID,
-  };
-}
-
-const seedResources: ResourceRecord[] = [
-  { id: "res-alvarez", name: "M. Alvarez", role: "Producer", email: "marina@example.com", colour: "#d97757", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-alvarez" },
-  { id: "res-shaw", name: "E. Shaw", role: "Permits coordinator", email: "elias@example.com", colour: "#71947b", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-shaw" },
-  { id: "res-bell", name: "J. Bell", role: "Installation lead", email: "jordan@example.com", colour: "#4c78a8", hoursPerWeek: 32, isActive: true, calendarId: "cal-person-bell" },
-  { id: "res-chen", name: "R. Chen", role: "Communications", email: "riley@example.com", colour: "#b7794b", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-chen" },
-];
-const seedAssignments: TaskAssignment[] = [
-  { id: "as-1", taskId: "1", resourceId: "res-alvarez" }, { id: "as-2", taskId: "3", resourceId: "res-alvarez" },
-  { id: "as-3", taskId: "2", resourceId: "res-shaw" }, { id: "as-4", taskId: "4", resourceId: "res-bell" },
-  { id: "as-5", taskId: "5", resourceId: "res-chen" }, { id: "as-6", taskId: "6", resourceId: "res-chen" }, { id: "as-7", taskId: "7", resourceId: "res-chen" },
-];
-
-const seedProjects: ProjectRecord[] = [
-  { id: RIVERSIDE_PROJECT_ID, name: "Riverside Arts Festival", calendarId: RIVERSIDE_CALENDAR_ID, status: "active", startDate: "2025-04-01", schedulingDirection: "forward", createdAt: "2025-01-01T09:00:00.000Z", updatedAt: "2025-04-17T09:00:00.000Z" },
-  { id: "proj-press", name: "Press & visitor materials", calendarId: BASE_CALENDAR_ID, status: "active", startDate: "2025-04-10", schedulingDirection: "forward", createdAt: "2025-01-02T09:00:00.000Z", updatedAt: "2025-04-17T09:00:00.000Z" },
-];
 
 /* ------------------------------------------- pure calendar-system builders */
 
@@ -269,59 +214,105 @@ function recalculateProjects(
 }
 
 export function CalendarStoreProvider({ children }: { children: ReactNode }) {
-  const [system, setSystem] = useState<CalendarSystem>(seedSystem);
-  const [projects, setProjects] = useState<ProjectRecord[]>(seedProjects);
-  const [resources, setResources] = useState<ResourceRecord[]>(seedResources);
-  const [assignments, setAssignments] = useState<TaskAssignment[]>(seedAssignments);
-  const [tasksByProject, setTasksByProject] = useState<Record<string, PlannerTask[]>>({
-    [RIVERSIDE_PROJECT_ID]: seedTasks,
-    "proj-press": [],
-  });
-  const [activeProjectId, setActiveProjectId] = useState(() => {
-    try { return localStorage.getItem("vintage-gantt-active-project") ?? RIVERSIDE_PROJECT_ID; } catch { return RIVERSIDE_PROJECT_ID; }
-  });
+  const [system, setSystem] = useState<CalendarSystem>({ calendars: [], exceptions: [], defaultCalendarId: "" });
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [resources, setResources] = useState<ResourceRecord[]>([]);
+  const [assignments, setAssignments] = useState<TaskAssignment[]>([]);
+  const [tasksByProject, setTasksByProject] = useState<Record<string, PlannerTask[]>>({});
+  const [activeProjectId, setActiveProjectId] = useState("");
 
-  // Local persistence is the current backing store until the database adapter is added.
+  const { isAuthenticated } = useConvexAuth();
+  const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
+  const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
+  const replaceRemoteState = useMutation(api.planner.replaceState);
+  const hydratedRef = useRef(false);
+  const migrationStartedRef = useRef(false);
+  const suppressSaveRef = useRef(false);
+  const lastServerStateRef = useRef<unknown>(null);
+
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("vintage-gantt-calendar-state");
-      if (saved) {
-        const parsed = JSON.parse(saved) as Partial<{ system: CalendarSystem; projects: ProjectRecord[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; tasksByProject: Record<string, PlannerTask[]> }>;
-        if (parsed.system) setSystem(parsed.system);
-        if (parsed.projects) {
-          const migratedProjects = parsed.projects.map((project) => ({
-            id: project.id,
-            name: project.name,
-            calendarId: project.calendarId,
-            status: project.status ?? "active",
-            startDate: project.startDate ?? "2025-04-01",
-            schedulingDirection: project.schedulingDirection ?? "forward",
-            createdAt: project.createdAt ?? new Date().toISOString(),
-            updatedAt: project.updatedAt ?? new Date().toISOString(),
-          }));
-          setProjects(migratedProjects);
-          const persisted = migratedProjects.find((project) => project.id === activeProjectId && project.status !== "archived");
-          const fallback = migratedProjects.filter((project) => project.status === "active").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? migratedProjects[0];
-          setActiveProjectId(persisted?.id ?? fallback?.id ?? RIVERSIDE_PROJECT_ID);
-        }
-        if (parsed.resources) setResources(parsed.resources);
-        if (parsed.assignments) setAssignments(parsed.assignments);
-        if (parsed.tasksByProject) setTasksByProject(parsed.tasksByProject);
-      }
-    } catch { /* use seed data when storage is unavailable */ }
-  }, []);
+    if (!isAuthenticated || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
+    if (remoteState === null) {
+      migrationStartedRef.current = true;
+      let legacy: Record<string, unknown> | null = null;
+      try {
+        const raw = localStorage.getItem("vintage-gantt-calendar-state");
+        legacy = raw ? JSON.parse(raw) as Record<string, unknown> : null;
+      } catch { legacy = null; }
+      const legacySystem = legacy?.system as CalendarSystem | undefined;
+      const legacyProjects = legacy?.projects as ProjectRecord[] | undefined;
+      const legacyTasksByProject = legacy?.tasksByProject as Record<string, PlannerTask[]> | undefined;
+      const migration = legacySystem && legacyProjects ? {
+        projects: legacyProjects,
+        tasks: Object.entries(legacyTasksByProject ?? {}).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
+        dependencies: Object.entries(legacyTasksByProject ?? {}).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
+        calendars: legacySystem.calendars,
+        exceptions: legacySystem.exceptions,
+        resources: (legacy?.resources as ResourceRecord[] | undefined) ?? [],
+        assignments: (legacy?.assignments as TaskAssignment[] | undefined) ?? [],
+      } : null;
+      const finish = migration ? replaceRemoteState({ state: migration }) : initializeWorkspace({});
+      void finish.then(() => {
+        try { localStorage.removeItem("vintage-gantt-calendar-state"); } catch { /* migration cleanup is best effort */ }
+      }).catch(() => {
+        migrationStartedRef.current = false;
+        toast.error("Could not connect to the central planner database. Your changes were not saved.");
+      });
+      return;
+    }
+    suppressSaveRef.current = true;
+    const state = remoteState as { projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[]; resources: ResourceRecord[]; assignments: TaskAssignment[] };
+    const grouped: Record<string, PlannerTask[]> = {};
+    for (const task of state.tasks ?? []) (grouped[task.projectId] ??= []).push(task);
+    setProjects(state.projects ?? []);
+    setSystem({ calendars: state.calendars ?? [], exceptions: state.exceptions ?? [], defaultCalendarId: state.calendars?.find((calendar) => calendar.isDefault)?.id ?? "" });
+    setResources(state.resources ?? []);
+    setAssignments(state.assignments ?? []);
+    setTasksByProject(grouped);
+    const fallback = (state.projects ?? []).filter((project) => project.status === "active").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? state.projects?.[0];
+    setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived") ? current : fallback?.id ?? "");
+    hydratedRef.current = true;
+    lastServerStateRef.current = remoteState;
+  }, [isAuthenticated, remoteState, initializeWorkspace, replaceRemoteState]);
+
   useEffect(() => {
-    try { localStorage.setItem("vintage-gantt-calendar-state", JSON.stringify({ system, projects, resources, assignments, tasksByProject })); } catch { /* storage is optional */ }
-  }, [system, projects, resources, assignments, tasksByProject]);
-  useEffect(() => {
-    try { localStorage.setItem("vintage-gantt-active-project", activeProjectId); } catch { /* storage is optional */ }
-  }, [activeProjectId]);
-  useEffect(() => {
-    try { localStorage.setItem("vintage-gantt-active-project", activeProjectId); } catch { /* storage is optional */ }
-  }, [activeProjectId]);
+    if (!isAuthenticated || !hydratedRef.current) return;
+    if (suppressSaveRef.current) { suppressSaveRef.current = false; return; }
+    const state = {
+      projects,
+      tasks: Object.entries(tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
+      dependencies: Object.entries(tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
+      calendars: system.calendars,
+      exceptions: system.exceptions,
+      resources,
+      assignments,
+    };
+    void replaceRemoteState({ state }).then(() => { lastServerStateRef.current = state; }).catch(() => {
+      toast.error("Could not save to the central planner database. The last saved data was restored.");
+      const previous = lastServerStateRef.current as typeof state | null;
+      if (!previous) return;
+      suppressSaveRef.current = true;
+      setProjects(previous.projects);
+      setSystem({ calendars: previous.calendars, exceptions: previous.exceptions, defaultCalendarId: previous.calendars.find((calendar) => calendar.isDefault)?.id ?? "" });
+      setResources(previous.resources);
+      setAssignments(previous.assignments);
+      const restored: Record<string, PlannerTask[]> = {};
+      for (const task of previous.tasks) (restored[task.projectId] ??= []).push(task);
+      setTasksByProject(restored);
+    });
+  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, replaceRemoteState]);
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
-    [projects, activeProjectId],
+    () => projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? {
+      id: "",
+      name: "No project selected",
+      calendarId: system.defaultCalendarId,
+      status: "active" as ProjectStatus,
+      startDate: "",
+      schedulingDirection: "forward" as PlanningDirection,
+      createdAt: "",
+      updatedAt: "",
+    },
+    [projects, activeProjectId, system.defaultCalendarId],
   );
   const tasks = tasksByProject[activeProjectId] ?? [];
   const projectTasks = useCallback((projectId: string) => tasksByProject[projectId] ?? [], [tasksByProject]);
@@ -400,7 +391,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   const archiveProject = useCallback((projectId: string) => {
     setProjects((current) => current.map((project) => project.id === projectId ? { ...project, status: "archived", updatedAt: new Date().toISOString() } : project));
-    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active")?.id ?? RIVERSIDE_PROJECT_ID);
+    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active")?.id ?? "");
   }, [activeProjectId, projects]);
 
   const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>((projectId) => {
@@ -410,7 +401,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setTasksByProject((current) => { const next = { ...current }; delete next[projectId]; return next; });
     const taskIds = new Set((tasksByProject[projectId] ?? []).map((task) => task.id));
     setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
-    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId)?.id ?? RIVERSIDE_PROJECT_ID);
+    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId)?.id ?? "");
     return { ok: true, taskCount };
   }, [activeProjectId, projects, tasksByProject]);
 

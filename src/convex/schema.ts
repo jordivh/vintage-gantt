@@ -32,12 +32,21 @@ const schema = defineSchema(
       role: v.optional(roleValidator), // role of the user. do not remove
     }).index("email", ["email"]), // index for the email. do not remove or modify
 
-    // add other tables here
-
-    // tableName: defineTable({
-    //   ...
-    //   // table fields
-    // }).index("by_field", ["field"])
+    projects: defineTable({
+      ownerId: v.id("users"), id: v.string(), name: v.string(), status: v.string(), startDate: v.string(),
+      schedulingDirection: v.string(), calendarId: v.string(), createdAt: v.string(), updatedAt: v.string(),
+    }).index("by_owner", ["ownerId"]),
+    tasks: defineTable({
+      ownerId: v.id("users"), id: v.string(), projectId: v.string(), parentId: v.union(v.string(), v.null()), sortOrder: v.number(),
+      name: v.string(), duration: v.number(), durationUnit: v.string(), start: v.string(), finish: v.string(),
+      isMilestone: v.boolean(), predecessors: v.string(), resource: v.string(), percent: v.number(), notes: v.string(),
+      color: v.string(), collapsed: v.optional(v.boolean()),
+    }).index("by_owner_project", ["ownerId", "projectId"]),
+    dependencies: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), predecessorId: v.string(), successorId: v.string(), type: v.string(), lagDays: v.number() }).index("by_owner", ["ownerId"]),
+    calendars: defineTable({ ownerId: v.id("users"), id: v.string(), name: v.string(), type: v.string(), parentCalendarId: v.union(v.string(), v.null()), isDefault: v.boolean(), workingDays: v.optional(v.array(v.number())) }).index("by_owner", ["ownerId"]),
+    calendarExceptions: defineTable({ ownerId: v.id("users"), id: v.string(), calendarId: v.string(), startDate: v.string(), endDate: v.string(), label: v.string(), type: v.string(), isWorkingDay: v.boolean(), source: v.string() }).index("by_owner", ["ownerId"]),
+    resources: defineTable({ ownerId: v.id("users"), id: v.string(), name: v.string(), role: v.string(), email: v.string(), colour: v.string(), hoursPerWeek: v.number(), isActive: v.boolean(), calendarId: v.string() }).index("by_owner", ["ownerId"]),
+    taskAssignments: defineTable({ ownerId: v.id("users"), id: v.string(), taskId: v.string(), resourceId: v.string() }).index("by_owner", ["ownerId"]),
   },
   {
     schemaValidation: false,
