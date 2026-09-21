@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -25,6 +26,19 @@ export interface ProjectRecord {
   /** Required: every project is planned on a calendar. */
   calendarId: string;
 }
+
+export type LeaveType = "holiday leave" | "sick leave" | "training" | "other";
+export interface ResourceRecord {
+  id: string;
+  name: string;
+  role: string;
+  email: string;
+  colour: string;
+  hoursPerWeek: number;
+  isActive: boolean;
+  calendarId: string;
+}
+export interface TaskAssignment { id: string; taskId: string; resourceId: string; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -96,6 +110,18 @@ function seedSystem(): CalendarSystem {
     defaultCalendarId: BASE_CALENDAR_ID,
   };
 }
+
+const seedResources: ResourceRecord[] = [
+  { id: "res-alvarez", name: "M. Alvarez", role: "Producer", email: "marina@example.com", colour: "#d97757", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-alvarez" },
+  { id: "res-shaw", name: "E. Shaw", role: "Permits coordinator", email: "elias@example.com", colour: "#71947b", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-shaw" },
+  { id: "res-bell", name: "J. Bell", role: "Installation lead", email: "jordan@example.com", colour: "#4c78a8", hoursPerWeek: 32, isActive: true, calendarId: "cal-person-bell" },
+  { id: "res-chen", name: "R. Chen", role: "Communications", email: "riley@example.com", colour: "#b7794b", hoursPerWeek: 40, isActive: true, calendarId: "cal-person-chen" },
+];
+const seedAssignments: TaskAssignment[] = [
+  { id: "as-1", taskId: "1", resourceId: "res-alvarez" }, { id: "as-2", taskId: "3", resourceId: "res-alvarez" },
+  { id: "as-3", taskId: "2", resourceId: "res-shaw" }, { id: "as-4", taskId: "4", resourceId: "res-bell" },
+  { id: "as-5", taskId: "5", resourceId: "res-chen" }, { id: "as-6", taskId: "6", resourceId: "res-chen" }, { id: "as-7", taskId: "7", resourceId: "res-chen" },
+];
 
 const seedProjects: ProjectRecord[] = [
   { id: RIVERSIDE_PROJECT_ID, name: "Riverside Arts Festival", calendarId: RIVERSIDE_CALENDAR_ID },
@@ -189,6 +215,13 @@ interface CalendarStoreValue {
   projectsAffectedBy: (calendarId: string) => ProjectRecord[];
   previewCalendarChange: (nextSystem: CalendarSystem, changedCalendarId: string) => ImpactCount;
   previewProjectRelink: (projectId: string, calendarId: string) => ImpactCount;
+  resources: ResourceRecord[];
+  assignments: TaskAssignment[];
+  updateResource: (id: string, patch: Partial<ResourceRecord>) => void;
+  createResource: (input: Omit<ResourceRecord, "id" | "calendarId">) => ResourceRecord;
+  setTaskAssignments: (taskId: string, resourceIds: string[]) => void;
+  addResourceLeave: (resourceId: string, input: { startDate: string; endDate: string; type: LeaveType; note?: string }) => void;
+  resourceLeave: (resourceId: string) => CalendarException[];
   /** Applies a new calendar system and immediately re-plans every affected project. */
   applyCalendarSystem: (nextSystem: CalendarSystem) => void;
   createCalendar: (input: { name: string; type: CalendarType; parentCalendarId: string | null; workingDays?: Weekday[] }) => string | null;
@@ -221,16 +254,67 @@ function recalculateProjects(
 export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [system, setSystem] = useState<CalendarSystem>(seedSystem);
   const [projects, setProjects] = useState<ProjectRecord[]>(seedProjects);
+  const [resources, setResources] = useState<ResourceRecord[]>(seedResources);
+  const [assignments, setAssignments] = useState<TaskAssignment[]>(seedAssignments);
   const [tasksByProject, setTasksByProject] = useState<Record<string, PlannerTask[]>>({
     [RIVERSIDE_PROJECT_ID]: seedTasks,
     "proj-press": [],
   });
   const activeProjectId = RIVERSIDE_PROJECT_ID;
+
+  // Local persistence is the current backing store until the database adapter is added.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("vintage-gantt-calendar-state");
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<{ system: CalendarSystem; projects: ProjectRecord[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; tasksByProject: Record<string, PlannerTask[]> }>;
+        if (parsed.system) setSystem(parsed.system);
+        if (parsed.projects) setProjects(parsed.projects);
+        if (parsed.resources) setResources(parsed.resources);
+        if (parsed.assignments) setAssignments(parsed.assignments);
+        if (parsed.tasksByProject) setTasksByProject(parsed.tasksByProject);
+      }
+    } catch { /* use seed data when storage is unavailable */ }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("vintage-gantt-calendar-state", JSON.stringify({ system, projects, resources, assignments, tasksByProject })); } catch { /* storage is optional */ }
+  }, [system, projects, resources, assignments, tasksByProject]);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
     [projects, activeProjectId],
   );
   const tasks = tasksByProject[activeProjectId] ?? [];
+
+  const resourceLeave = useCallback((resourceId: string) => {
+    const resource = resources.find((item) => item.id === resourceId);
+    return resource ? system.exceptions.filter((exception) => exception.calendarId === resource.calendarId && exception.type === "leave") : [];
+  }, [resources, system]);
+
+  const createResource = useCallback<CalendarStoreValue["createResource"]>((input) => {
+    const id = `res-${uid()}`;
+    const calendarId = `cal-person-${uid()}`;
+    const base = system.calendars.find((calendar) => calendar.isDefault);
+    const calendar: PlannerCalendar = { id: calendarId, name: `${input.name} — leave`, type: "person", parentCalendarId: base?.id ?? system.defaultCalendarId, isDefault: false, workingDays: base?.workingDays };
+    setSystem((current) => ({ ...current, calendars: [...current.calendars, calendar] }));
+    const resource = { ...input, id, calendarId };
+    setResources((current) => [...current, resource]);
+    return resource;
+  }, [system]);
+
+  const updateResource = useCallback((id: string, patch: Partial<ResourceRecord>) => {
+    setResources((current) => current.map((resource) => resource.id === id ? { ...resource, ...patch } : resource));
+  }, []);
+
+  const setTaskAssignments = useCallback((taskId: string, resourceIds: string[]) => {
+    setAssignments((current) => [...current.filter((assignment) => assignment.taskId !== taskId), ...resourceIds.map((resourceId) => ({ id: `as-${uid()}`, taskId, resourceId }))]);
+  }, []);
+
+  const addResourceLeave = useCallback<CalendarStoreValue["addResourceLeave"]>((resourceId, input) => {
+    const resource = resources.find((item) => item.id === resourceId);
+    if (!resource) return;
+    const exception = makeException({ calendarId: resource.calendarId, startDate: input.startDate, endDate: input.endDate, label: `${input.type}${input.note ? ` · ${input.note}` : ""}`, type: "leave", source: "manual" });
+    setSystem((current) => ({ ...current, exceptions: [...current.exceptions, exception] }));
+  }, [resources]);
 
   const setTasks = useCallback(
     (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => {
@@ -426,11 +510,19 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       duplicateCalendar,
       renameCalendar,
       deleteCalendar,
+      resources,
+      assignments,
+      updateResource,
+      createResource,
+      setTaskAssignments,
+      addResourceLeave,
+      resourceLeave,
     }),
     [
       system, projects, activeProject, tasks, setTasks, setProjectCalendar, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
-      createCalendar, duplicateCalendar, renameCalendar, deleteCalendar,
+      createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
+      updateResource, createResource, setTaskAssignments, addResourceLeave, resourceLeave,
     ],
   );
 
