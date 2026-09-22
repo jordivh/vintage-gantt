@@ -51,7 +51,7 @@ const schema = defineSchema(
     taskAssignments: defineTable({ ownerId: v.id("users"), id: v.string(), taskId: v.string(), resourceId: v.string() }).index("by_owner", ["ownerId"]),
     planVersions: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), name: v.string(), isActive: v.boolean(), createdAt: v.string() }).index("by_owner_project", ["ownerId", "projectId"]),
     baselines: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), versionId: v.string(), name: v.string(), note: v.optional(v.string()), createdAt: v.string() }).index("by_owner_project", ["ownerId", "projectId"]),
-    baselineTasks: defineTable({ ownerId: v.id("users"), id: v.string(), baselineId: v.string(), taskId: v.string(), startDate: v.string(), finishDate: v.string(), durationDays: v.number(), marginPct: v.number(), marginDaysOriginal: v.number(), marginDaysConsumed: v.number() }).index("by_owner_baseline", ["ownerId", "baselineId"]),
+    baselineTasks: defineTable({ ownerId: v.id("users"), id: v.string(), baselineId: v.string(), taskId: v.string(), startDate: v.string(), finishDate: v.string(), durationDays: v.number(), marginPct: v.number(), marginDaysOriginal: v.number(), marginDaysConsumed: v.number(), predecessors: v.optional(v.string()) }).index("by_owner_baseline", ["ownerId", "baselineId"]),
   },
   {
     schemaValidation: false,

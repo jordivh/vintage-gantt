@@ -52,7 +52,7 @@ export interface ResourceRecord {
 export interface TaskAssignment { id: string; taskId: string; resourceId: string; }
 export interface PlanVersion { id: string; projectId: string; name: string; isActive: boolean; createdAt: string; }
 export interface Baseline { id: string; projectId: string; versionId: string; name: string; note?: string; createdAt: string; }
-export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; }
+export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -197,6 +197,7 @@ interface CalendarStoreValue {
   baselines: Baseline[];
   baselineTasks: BaselineTask[];
   createBaseline: (name: string, note?: string) => string;
+  deleteBaseline: (baselineId: string) => void;
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
   createPlanVersion: (name: string, resetMargins: boolean) => string;
@@ -359,7 +360,19 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const source = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
     const id = `version-${uid()}`;
     const version: PlanVersion = { id, projectId: activeProjectId, name: name.trim() || `Version ${planVersions.filter((item) => item.projectId === activeProjectId).length + 1}`, isActive: true, createdAt: new Date().toISOString() };
-    const copied = source.map((task) => ({ ...task, id: `task-${uid()}`, versionId: id, marginDaysConsumed: resetMargins ? 0 : task.marginDaysConsumed }));
+    const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
+    const copied = source.map((task) => ({
+      ...task,
+      id: idMap.get(task.id) ?? `task-${uid()}`,
+      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
+      predecessors: task.predecessors.split(",").map((part) => {
+        const match = part.trim().match(/^(\d+)(.*)$/);
+        if (!match) return part.trim();
+        return `${idMap.get(match[1]) ?? match[1]}${match[2]}`;
+      }).filter(Boolean).join(", "),
+      versionId: id,
+      marginDaysConsumed: resetMargins ? 0 : task.marginDaysConsumed,
+    }));
     setPlanVersions((current) => [...current.map((item) => item.projectId === activeProjectId ? { ...item, isActive: false } : item), version]);
     setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...copied] }));
     setActiveVersionId(id);
@@ -375,11 +388,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const version = planVersions.find((item) => item.projectId === activeProjectId && item.isActive) ?? planVersions.find((item) => item.projectId === activeProjectId);
     const id = `baseline-${uid()}`;
     const baseline: Baseline = { id, projectId: activeProjectId, versionId: version?.id ?? `version-${activeProjectId}-1`, name: name.trim() || "Baseline", note, createdAt: new Date().toISOString() };
-    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0 }));
+    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === (version?.id ?? activeVersionId)).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0, predecessors: task.predecessors }));
     setBaselines((current) => [...current, baseline]);
     setBaselineTasks((current) => [...current, ...snapshots]);
     return id;
-  }, [activeProjectId, planVersions, tasksByProject]);
+  }, [activeProjectId, activeVersionId, planVersions, tasksByProject]);
+
+  const deleteBaseline = useCallback((baselineId: string) => {
+    setBaselines((current) => current.filter((baseline) => baseline.id !== baselineId));
+    setBaselineTasks((current) => current.filter((snapshot) => snapshot.baselineId !== baselineId));
+  }, []);
 
   const resourceLeave = useCallback((resourceId: string) => {
     const resource = resources.find((item) => item.id === resourceId);
@@ -447,7 +465,12 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const allTaskIds = Object.values(tasksByProject).flat().map((task) => Number(task.id)).filter(Number.isFinite);
     const idOffset = Math.max(0, ...allTaskIds) + 1;
     const idMap = new Map(sourceTasks.map((task, index) => [task.id, String(idOffset + index)]));
-    const copiedTasks = sourceTasks.map((task) => ({ ...task, id: idMap.get(task.id) ?? task.id, predecessors: task.predecessors.replace(/\d+/g, (value) => idMap.get(value) ?? value) }));
+    const copiedTasks = sourceTasks.map((task) => ({
+      ...task,
+      id: idMap.get(task.id) ?? task.id,
+      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
+      predecessors: task.predecessors.replace(/\d+/g, (value) => idMap.get(value) ?? value),
+    }));
     const copiedAssignments = assignments.filter((assignment) => sourceTasks.some((task) => task.id === assignment.taskId)).map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
     const copy: ProjectRecord = { ...source, id, name: name.trim() || `${source.name} copy`, status: "template", createdAt: now, updatedAt: now };
     setProjects((current) => [...current, copy]);
@@ -702,6 +725,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       baselines,
       baselineTasks,
       createBaseline,
+      deleteBaseline,
       activeVersionId,
       setActiveVersion,
       createPlanVersion,
@@ -711,7 +735,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, activeVersionId, setActiveVersion, createPlanVersion,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion,
     ],
   );
 

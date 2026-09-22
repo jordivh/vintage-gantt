@@ -38,7 +38,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "totalFloat";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 const rowHeight = 42;
 const todayLineDate = "2025-04-17";
@@ -55,6 +55,9 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "notes", label: "Notes", width: 160 },
   { key: "margin", label: "Margin %", width: 92 },
   { key: "totalFloat", label: "Total float", width: 96 },
+  { key: "baselineStart", label: "Baseline start", width: 112 },
+  { key: "baselineFinish", label: "Baseline finish", width: 120 },
+  { key: "variance", label: "Variance", width: 88 },
 ];
 
 const parseDate = (date: string) => new Date(`${date}T12:00:00`);
@@ -109,6 +112,7 @@ export default function Dashboard() {
     setActiveVersion,
     createPlanVersion,
     createBaseline,
+    deleteBaseline,
     baselines,
     baselineTasks,
   } = useCalendarStore();
@@ -135,7 +139,7 @@ export default function Dashboard() {
     try { return localStorage.getItem("vintage-gantt-project-sidebar-collapsed") === "true"; } catch { return false; }
   });
   const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
-  const [hidden, setHidden] = useState<ColumnKey[]>(["margin", "totalFloat"]);
+  const [hidden, setHidden] = useState<ColumnKey[]>(["margin", "totalFloat", "baselineStart", "baselineFinish", "variance"]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
@@ -187,6 +191,10 @@ export default function Dashboard() {
   const calculatedTasks = useMemo(
     () => withCalculatedPlanningFields(tasks, system, calendarId),
     [tasks, system, calendarId],
+  );
+  const activeBaselineSnapshots = useMemo(
+    () => new Map(baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId).map((snapshot) => [snapshot.taskId, snapshot])),
+    [baselineTasks, activeBaselineId],
   );
 
   const visibleTasks = useMemo(() => {
@@ -639,7 +647,8 @@ export default function Dashboard() {
           <button className="tool-button" onClick={() => navigate("/reports/margins")}>Margin report</button>
           <button className="tool-button" onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}>New version</button>
           <select className="tool-button version-selector" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)} aria-label="Baseline selector"><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select>
-          <button className="tool-button" onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const id = createBaseline(name); setActiveBaselineId(id); toast.success("Baseline saved"); } }}>Baseline</button>
+          <button className="tool-button" onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}>Baseline</button>
+          {activeBaselineId && <button className="tool-button" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}>Delete baseline</button>}
           <button className="tool-button" onClick={() => navigate("/calendars")}><Settings2 size={15} /></button>
         </div>
       </div>
@@ -783,7 +792,7 @@ export default function Dashboard() {
           <div className="grid-scroll" ref={scrollRef}>
             <div className="grid-header">
               {columnDefs
-                .filter((column) => column.key === "id" || !hidden.includes(column.key))
+                .filter((column) => column.key === "id" || !hidden.includes(column.key) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
                 .map((column) => (
                   <div
                     key={column.key}
@@ -831,7 +840,7 @@ export default function Dashboard() {
                   }}
                 >
                   {columnDefs
-                    .filter((column) => column.key === "id" || !hidden.includes(column.key))
+                    .filter((column) => column.key === "id" || !hidden.includes(column.key) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
                     .map((column) => {
                       const value =
                         column.key === "id"
@@ -846,11 +855,25 @@ export default function Dashboard() {
                                   ? `${displayTask.marginPct ?? 0}%`
                                   : column.key === "totalFloat"
                                     ? `${displayTask.totalFloat ?? 0} d`
+                                    : column.key === "baselineStart"
+                                      ? activeBaselineSnapshots.get(task.id)?.startDate ?? "—"
+                                      : column.key === "baselineFinish"
+                                        ? activeBaselineSnapshots.get(task.id)?.finishDate ?? "—"
+                                        : column.key === "variance"
+                                          ? (() => {
+                                              const snapshot = activeBaselineSnapshots.get(task.id);
+                                              if (!snapshot) return "—";
+                                              const days = displayTask.finish === snapshot.finishDate
+                                                ? 0
+                                                : displayTask.finish > snapshot.finishDate
+                                                  ? workingDaysBetween(snapshot.finishDate, displayTask.finish, calendarId, system) - 1
+                                                  : -(workingDaysBetween(displayTask.finish, snapshot.finishDate, calendarId, system) - 1);
+                                              return `${days >= 0 ? "+" : ""}${days} d`;
+                                            })()
                                     : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
-                      const isName = column.key === "name";
-                      const canEdit = !["id", "wbs", "totalFloat"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
+                      const isName = column.key === "name";                          const canEdit = !["id", "wbs", "totalFloat", "baselineStart", "baselineFinish", "variance"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
                       return (
                         <div
                           key={column.key}
