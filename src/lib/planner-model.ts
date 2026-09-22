@@ -1,4 +1,6 @@
 import {
+  addWorkingDays,
+  durationInWorkingDays,
   findDependencyCycle,
   rollupSummary,
   scheduleTasks,
@@ -7,6 +9,7 @@ import {
   type PlanningDirection,
   type ScheduleDependency,
   type ScheduleTask,
+  workingDaysBetween,
 } from "./scheduling-engine";
 
 /** A task row as the planner UI edits it. */
@@ -18,6 +21,12 @@ export interface PlannerTask extends ScheduleTask {
   notes: string;
   collapsed?: boolean;
   color: string;
+  marginPct?: number;
+  marginDaysOriginal?: number;
+  marginDaysConsumed?: number;
+  totalFloat?: number;
+  isCritical?: boolean;
+  versionId?: string;
 }
 
 /** Parses strings like `"3FS+2d, 5SS"` into dependency records. */
@@ -48,6 +57,187 @@ export function dependenciesForTasks(items: PlannerTask[]): ScheduleDependency[]
       successorId: task.id,
     })),
   );
+}
+
+export interface CriticalPathTask {
+  earlyStart: string;
+  earlyFinish: string;
+  lateStart: string;
+  lateFinish: string;
+  totalFloat: number;
+  isCritical: boolean;
+}
+
+/**
+ * Computes CPM values without changing the scheduling engine. Durations and all
+ * date offsets are expressed in working days from the project's calendar.
+ */
+export function calculateCriticalPath(
+  tasks: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+): Map<string, CriticalPathTask> {
+  const dependencies = dependenciesForTasks(tasks);
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const duration = (task: PlannerTask) => Math.max(1, durationInWorkingDays({ ...task, isMilestone: task.duration === 0 }));
+  const projectStart = tasks.reduce((earliest, task) => !earliest || task.start < earliest ? task.start : earliest, "");
+  if (!projectStart) return new Map();
+  const incoming = new Map<string, ScheduleDependency[]>();
+  const outgoing = new Map<string, ScheduleDependency[]>();
+  for (const dependency of dependencies) {
+    incoming.set(dependency.successorId, [...(incoming.get(dependency.successorId) ?? []), dependency]);
+    outgoing.set(dependency.predecessorId, [...(outgoing.get(dependency.predecessorId) ?? []), dependency]);
+  }
+  const order: PlannerTask[] = [];
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (task: PlannerTask) => {
+    if (visited.has(task.id) || visiting.has(task.id)) return;
+    visiting.add(task.id);
+    for (const dependency of incoming.get(task.id) ?? []) {
+      const predecessor = byId.get(dependency.predecessorId);
+      if (predecessor) visit(predecessor);
+    }
+    visiting.delete(task.id);
+    visited.add(task.id);
+    order.push(task);
+  };
+  tasks.forEach(visit);
+  const early = new Map<string, { start: number; finish: number }>();
+  for (const task of order) {
+    let start = 0;
+    for (const dependency of incoming.get(task.id) ?? []) {
+      const predecessor = early.get(dependency.predecessorId);
+      if (!predecessor) continue;
+      const lag = dependency.lagDays;
+      const candidate = dependency.type === "SS"
+        ? predecessor.start + lag
+        : dependency.type === "FF"
+          ? predecessor.finish + lag - duration(task) + 1
+          : dependency.type === "SF"
+            ? predecessor.start + lag - duration(task) + 1
+            : predecessor.finish + lag + 1;
+      start = Math.max(start, candidate);
+    }
+    early.set(task.id, { start, finish: start + duration(task) - 1 });
+  }
+  const projectFinish = Math.max(...[...early.values()].map((value) => value.finish));
+  const late = new Map<string, { start: number; finish: number }>();
+  for (const task of [...order].reverse()) {
+    let finish = projectFinish;
+    for (const dependency of outgoing.get(task.id) ?? []) {
+      const successor = late.get(dependency.successorId);
+      if (!successor) continue;
+      const successorTask = byId.get(dependency.successorId);
+      if (!successorTask) continue;
+      const candidate = dependency.type === "SS"
+        ? successor.start - dependency.lagDays + duration(task) - 1
+        : dependency.type === "FF"
+          ? successor.finish - dependency.lagDays
+          : dependency.type === "SF"
+            ? successor.finish - dependency.lagDays
+            : successor.start - dependency.lagDays - 1;
+      finish = Math.min(finish, candidate);
+    }
+    late.set(task.id, { finish, start: finish - duration(task) + 1 });
+  }
+  const result = new Map<string, CriticalPathTask>();
+  for (const task of tasks) {
+    const e = early.get(task.id) ?? { start: 0, finish: 0 };
+    const l = late.get(task.id) ?? { start: e.start, finish: e.finish };
+    const totalFloat = Math.max(0, l.start - e.start);
+    result.set(task.id, {
+      earlyStart: addWorkingDays(projectStart, e.start, projectCalendarId, system),
+      earlyFinish: addWorkingDays(projectStart, e.finish, projectCalendarId, system),
+      lateStart: addWorkingDays(projectStart, l.start, projectCalendarId, system),
+      lateFinish: addWorkingDays(projectStart, l.finish, projectCalendarId, system),
+      totalFloat,
+      isCritical: totalFloat === 0,
+    });
+  }
+  for (const task of tasks.filter((item) => tasks.some((child) => child.parentId === item.id))) {
+    const children = tasks.filter((child) => child.parentId === task.id);
+    const critical = children.some((child) => result.get(child.id)?.isCritical);
+    const own = result.get(task.id);
+    if (own) result.set(task.id, { ...own, isCritical: critical, totalFloat: critical ? 0 : own.totalFloat });
+  }
+  return result;
+}
+
+export function applyMarginAbsorption(
+  previous: PlannerTask[],
+  next: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId: string | undefined,
+  changedTaskId?: string,
+): PlannerTask[] {
+  if (!changedTaskId) return next;
+  const before = previous.find((task) => task.id === changedTaskId);
+  const after = next.find((task) => task.id === changedTaskId);
+  if (!before || !after || before.parentId !== after.parentId) return next;
+  const calendarId = after.calendarId ?? projectCalendarId;
+  const delay = after.finish > before.finish
+    ? Math.max(0, workingDayDistance(before.finish, after.finish, calendarId, system))
+    : 0;
+  const original = Math.ceil(Math.max(0, durationInWorkingDays({ ...after, isMilestone: after.duration === 0 })) * Math.max(0, after.marginPct ?? before.marginPct ?? 0) / 100);
+  const previousConsumed = Math.max(0, before.marginDaysConsumed ?? 0);
+  const available = Math.max(0, original - previousConsumed);
+  const consumed = after.finish < before.finish
+    ? Math.max(0, Math.min(original, previousConsumed - workingDayDistance(after.finish, before.finish, calendarId, system)))
+    : Math.min(original, previousConsumed + delay);
+  const absorbed = Math.min(delay, available);
+  if (!absorbed) return next.map((task) => task.id === changedTaskId ? { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed } : task);
+  const dependencies = dependenciesForTasks(next);
+  const downstream = new Set<string>();
+  const visit = (id: string) => {
+    dependencies.filter((dependency) => dependency.predecessorId === id).forEach((dependency) => {
+      if (!downstream.has(dependency.successorId)) { downstream.add(dependency.successorId); visit(dependency.successorId); }
+    });
+  };
+  visit(changedTaskId);
+  return next.map((task) => {
+    if (task.id === changedTaskId) return { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed };
+    if (!downstream.has(task.id)) return task;
+    const taskCalendar = task.calendarId ?? projectCalendarId;
+    return {
+      ...task,
+      start: addWorkingDays(task.start, -absorbed, taskCalendar, system),
+      finish: addWorkingDays(task.finish, -absorbed, taskCalendar, system),
+    };
+  });
+}
+
+function workingDayDistance(from: string, to: string, calendarId: string | undefined, system: CalendarSystem) {
+  if (from === to) return 0;
+  if (from < to) return Math.max(0, workingDaysBetween(from, to, calendarId, system) - 1);
+  return Math.max(0, workingDaysBetween(to, from, calendarId, system) - 1);
+}
+
+export function withCalculatedPlanningFields(
+  tasks: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+): PlannerTask[] {
+  const critical = calculateCriticalPath(tasks, system, projectCalendarId);
+  const childrenByParent = new Map<string, PlannerTask[]>();
+  tasks.forEach((task) => task.parentId && childrenByParent.set(task.parentId, [...(childrenByParent.get(task.parentId) ?? []), task]));
+  return tasks.map((task) => {
+    const children = childrenByParent.get(task.id);
+    const marginPct = Math.max(0, task.marginPct ?? 0);
+    const marginDaysOriginal = children
+      ? children.reduce((sum, child) => sum + (child.marginDaysOriginal ?? Math.ceil(Math.max(0, durationInWorkingDays(child)) * (child.marginPct ?? 0) / 100)), 0)
+      : task.duration === 0 ? 0 : Math.ceil(Math.max(0, durationInWorkingDays(task)) * marginPct / 100);
+    const marginDaysConsumed = Math.min(marginDaysOriginal, Math.max(0, task.marginDaysConsumed ?? 0));
+    const cpm = critical.get(task.id);
+    return {
+      ...task,
+      marginPct: children ? 0 : marginPct,
+      marginDaysOriginal,
+      marginDaysConsumed,
+      totalFloat: cpm?.totalFloat ?? 0,
+      isCritical: cpm?.isCritical ?? false,
+    };
+  });
 }
 
 export interface RecalculateOptions {

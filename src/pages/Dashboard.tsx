@@ -32,13 +32,13 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { dependenciesForTasks, recalculateTasks, type PlannerTask } from "@/lib/planner-model";
+import { applyMarginAbsorption, dependenciesForTasks, recalculateTasks, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "totalFloat";
 
 const rowHeight = 42;
 const todayLineDate = "2025-04-17";
@@ -53,6 +53,8 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "resource", label: "Resource", width: 118 },
   { key: "percent", label: "% complete", width: 96 },
   { key: "notes", label: "Notes", width: 160 },
+  { key: "margin", label: "Margin %", width: 92 },
+  { key: "totalFloat", label: "Total float", width: 96 },
 ];
 
 const parseDate = (date: string) => new Date(`${date}T12:00:00`);
@@ -102,6 +104,13 @@ export default function Dashboard() {
     assignments,
     setTaskAssignments,
     resourceLeave,
+    planVersions,
+    activeVersionId,
+    setActiveVersion,
+    createPlanVersion,
+    createBaseline,
+    baselines,
+    baselineTasks,
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
@@ -126,11 +135,12 @@ export default function Dashboard() {
     try { return localStorage.getItem("vintage-gantt-project-sidebar-collapsed") === "true"; } catch { return false; }
   });
   const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
-  const [hidden, setHidden] = useState<ColumnKey[]>([]);
+  const [hidden, setHidden] = useState<ColumnKey[]>(["margin", "totalFloat"]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
   const [recalcDialog, setRecalcDialog] = useState(false);
+  const [activeBaselineId, setActiveBaselineId] = useState("");
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -168,10 +178,21 @@ export default function Dashboard() {
     setProjectHighlight(0);
   }, [projectSearch, expandedGroups]);
 
+  const [showCriticalPath, setShowCriticalPath] = useState(() => {
+    try { return localStorage.getItem("vintage-gantt-show-critical-path") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("vintage-gantt-show-critical-path", String(showCriticalPath)); } catch { /* preference is optional */ }
+  }, [showCriticalPath]);
+  const calculatedTasks = useMemo(
+    () => withCalculatedPlanningFields(tasks, system, calendarId),
+    [tasks, system, calendarId],
+  );
+
   const visibleTasks = useMemo(() => {
     const visible: Task[] = [];
     const walk = (parentId: string | null) =>
-      tasks
+      calculatedTasks
         .filter((task) => task.parentId === parentId)
         .forEach((task) => {
           if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task);
@@ -179,7 +200,7 @@ export default function Dashboard() {
         });
     walk(null);
     return visible;
-  }, [tasks, query]);
+  }, [calculatedTasks, query]);
 
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
   const taskTimestamps = tasks.flatMap((task) => [
@@ -201,8 +222,8 @@ export default function Dashboard() {
   });
   const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
   const timelineWidth = timelineDays.length * dayWidth;
-  const taskById = new Map(tasks.map((task) => [task.id, task]));
-  const isMilestone = (task: Task) => task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id);
+  const taskById = new Map(calculatedTasks.map((task) => [task.id, task]));
+  const isMilestone = (task: Task) => task.duration === 0 && !calculatedTasks.some((candidate) => candidate.parentId === task.id);
   const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
   const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
   const filteredProjectGroups = useMemo(() => {
@@ -245,7 +266,7 @@ export default function Dashboard() {
       setTasks(next);
       return;
     }
-    setTasks(result.tasks);
+    setTasks(withCalculatedPlanningFields(result.tasks, system, calendarId));
   };
 
   const normalizeMilestones = (items: Task[]) => items.map((task) => ({
@@ -262,7 +283,8 @@ export default function Dashboard() {
     }
     setHistory((items) => [...items.slice(-29), tasks]);
     setFuture([]);
-    recalculate(normalized, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
+    const absorbed = applyMarginAbsorption(tasks, normalized, system, calendarId, manuallyAnchoredId);
+    recalculate(absorbed, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
     return true;
   };
 
@@ -304,6 +326,7 @@ export default function Dashboard() {
         const start = addWorkingDays(finish, -(duration - 1), calendarId, system);
         return { ...task, start, finish, duration, durationUnit: "days" as const };
       }
+      if (field === "margin") return { ...task, marginPct: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
       if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
       if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
@@ -599,16 +622,24 @@ export default function Dashboard() {
           <button className="tool-button" onClick={undo} disabled={!history.length}><Undo2 size={16} /></button>
           <button className="tool-button" onClick={redo} disabled={!future.length}><Redo2 size={16} /></button>
           <button className="tool-button" onClick={openRecalculate}><Sparkles size={15} /> Recalculate</button>
+          <select className="tool-button version-selector" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }} aria-label="Plan version">
+            {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
+          </select>
           <span className="toolbar-divider" />
           <button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button>
           <button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button>
           <button className="tool-button" onClick={deleteSelected}><Trash2 size={15} /> Delete</button>
+          <button className={`tool-button ${showCriticalPath ? "active" : ""}`} onClick={() => setShowCriticalPath((value) => !value)}>Critical path</button>
         </div>
         <div className="toolbar-right">
           <div className="search-box"><Search size={15} /><input placeholder="Search projects and tasks" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
           <button className="tool-button"><Download size={15} /> Export</button>
           <button className="tool-button" onClick={() => toast("You are viewing your team dashboard")}><UserRound size={15} /> My dashboard</button>
           <button className="tool-button" onClick={openProjectSettings}><CalendarDays size={15} /> Project calendar</button>
+          <button className="tool-button" onClick={() => navigate("/reports/margins")}>Margin report</button>
+          <button className="tool-button" onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}>New version</button>
+          <select className="tool-button version-selector" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)} aria-label="Baseline selector"><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select>
+          <button className="tool-button" onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const id = createBaseline(name); setActiveBaselineId(id); toast.success("Baseline saved"); } }}>Baseline</button>
           <button className="tool-button" onClick={() => navigate("/calendars")}><Settings2 size={15} /></button>
         </div>
       </div>
@@ -776,6 +807,7 @@ export default function Dashboard() {
                 return count;
               })();
               const summary = tasks.some((item) => item.parentId === task.id);
+              const displayTask = taskById.get(task.id) ?? task;
               return (
                 <div
                   key={task.id}
@@ -807,14 +839,18 @@ export default function Dashboard() {
                           : column.key === "wbs"
                             ? getWbs(task, tasks)
                             : column.key === "duration"
-                              ? `${task.duration} ${task.durationUnit === "days" ? "d" : "w"}`
+                              ? `${displayTask.duration} ${displayTask.durationUnit === "days" ? "d" : "w"}`
                               : column.key === "percent"
-                                ? `${task.percent}%`
-                                : column.key === "resource"
+                                ? `${displayTask.percent}%`
+                                : column.key === "margin"
+                                  ? `${displayTask.marginPct ?? 0}%`
+                                  : column.key === "totalFloat"
+                                    ? `${displayTask.totalFloat ?? 0} d`
+                                    : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
                       const isName = column.key === "name";
-                      const canEdit = !["id", "wbs"].includes(column.key) && !(summary && ["start", "finish", "duration"].includes(column.key));
+                      const canEdit = !["id", "wbs", "totalFloat"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
                       return (
                         <div
                           key={column.key}
@@ -967,9 +1003,10 @@ export default function Dashboard() {
               </svg>
               {visibleTasks.map((task) => (
                 <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}>
+                  {activeBaselineId && baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id) && <span className="baseline-bar" style={{ left: dateOffset(baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start), width: barWidth({ ...task, start: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start, finish: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.finishDate ?? task.finish }) }} title="Baseline" />}
                   <div
-                    className={`task-bar ${isMilestone(task) ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
-                    title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}`}
+                    className={`task-bar ${showCriticalPath && task.isCritical ? "critical-bar" : isMilestone(task) ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
+                    title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}${task.marginDaysOriginal ? ` · Margin ${task.marginDaysConsumed ?? 0} of ${task.marginDaysOriginal} d consumed` : ""}`}
                     style={{
                       left:
                         dateOffset(
@@ -1048,8 +1085,7 @@ export default function Dashboard() {
           <div className="menu-rule" />
           <button
             onClick={() => {
-              const task = taskById.get(showMenu.id);
-              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, duration: 0, isMilestone: true, finish: item.start } : item)));
+              const task = taskById.get(showMenu.id);              if (task) commit(tasks.map((item) => (item.id === task.id ? { ...item, duration: 0, isMilestone: true, finish: item.start } : item)));
               setShowMenu(null);
             }}
           >

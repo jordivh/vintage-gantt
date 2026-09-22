@@ -182,6 +182,15 @@
 .calendar-copy b { color: #9a593f; font-size: 15px; }
 @media (max-width: 900px) { .calendar-screen { flex-direction: column; height: auto; } .calendar-sidebar { width: 100%; border-right: 0; border-bottom: 1px solid #aa9678; } .exception-row { grid-template-columns: 1fr 1fr; } }
 
+.critical-bar { background: #7d3f32 !important; box-shadow: 0 0 0 1px #542a22, 0 2px 0 #b87955; }
+.baseline-bar { position: absolute; z-index: 1; top: 34px; height: 4px; border: 1px solid #8d765a; background: transparent; opacity: .78; pointer-events: auto; }
+.margin-report-bar { width: 120px; height: 8px; display: inline-block; margin-right: 7px; background: #e5d7c0; border: 1px solid #ccb99a; vertical-align: middle; }
+.margin-report-bar span { display: block; height: 100%; background: #9a593f; }
+.margin-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; padding: 0; background: #d4c3aa; }
+.margin-summary > div { display: grid; gap: 7px; padding: 18px; background: #fbf7ee; }
+.margin-summary b { color: #927b61; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.margin-summary strong { color: #49372a; font: 22px Georgia, serif; }
+.version-selector { min-width: 110px; }
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
