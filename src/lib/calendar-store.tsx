@@ -36,6 +36,7 @@ export interface ProjectRecord {
   schedulingDirection: PlanningDirection;
   createdAt: string;
   updatedAt: string;
+  seedKey?: string;
 }
 
 export type LeaveType = "holiday leave" | "sick leave" | "training" | "other";
@@ -202,6 +203,7 @@ interface CalendarStoreValue {
   setActiveVersion: (versionId: string) => void;
   createPlanVersion: (name: string, resetMargins: boolean) => string;
   deletePlanVersion: (versionId: string) => { ok: boolean; message?: string };
+  resetTestProject: () => Promise<void>;
 }
 
 const CalendarStoreContext = createContext<CalendarStoreValue | null>(null);
@@ -240,9 +242,12 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useConvexAuth();
   const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
+  const ensureTestProject = useMutation(api.planner.ensureTestProject);
+  const resetTestProjectRemote = useMutation(api.planner.resetTestProject);
   const replaceRemoteState = useMutation(api.planner.replaceState);
   const hydratedRef = useRef(false);
   const migrationStartedRef = useRef(false);
+  const seedStartedRef = useRef(false);
   const suppressSaveRef = useRef(false);
   const lastServerStateRef = useRef<unknown>(null);
 
@@ -269,7 +274,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         planVersions: legacyProjects.map((project) => ({ id: `version-${project.id}-1`, projectId: project.id, name: "Versie 1", isActive: true, createdAt: new Date().toISOString() })),
       } : null;
       const finish = migration ? replaceRemoteState({ state: migration }) : initializeWorkspace({});
-      void finish.then(() => {
+      void finish.then(() => ensureTestProject({})).then(() => {
         try { localStorage.removeItem("vintage-gantt-calendar-state"); } catch { /* migration cleanup is best effort */ }
       }).catch(() => {
         migrationStartedRef.current = false;
@@ -299,6 +304,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     hydratedRef.current = true;
     lastServerStateRef.current = remoteState;
   }, [isAuthenticated, remoteState, initializeWorkspace, replaceRemoteState]);
+
+  useEffect(() => {
+    if (!isAuthenticated || remoteState === undefined || remoteState === null || seedStartedRef.current) return;
+    seedStartedRef.current = true;
+    void ensureTestProject({}).then((result) => {
+      if (result === true) hydratedRef.current = false;
+    }).catch(() => {
+      seedStartedRef.current = false;
+      toast.error("Could not prepare the server-side test project.");
+    });
+  }, [isAuthenticated, remoteState, ensureTestProject]);
 
   useEffect(() => {
     if (!isAuthenticated || !hydratedRef.current) return;
@@ -384,6 +400,18 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveVersionId(id);
     return id;
   }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
+
+  const resetTestProject = useCallback(async () => {
+    const result = await resetTestProjectRemote({});
+    const reset = result as { projectId: string; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[] };
+    setTasksByProject((current) => ({ ...current, [reset.projectId]: reset.tasks }));
+    setPlanVersions((current) => [...current.filter((version) => version.projectId !== reset.projectId), reset.version]);
+    setActiveVersionId(reset.version.id);
+    setAssignments((current) => [...current.filter((assignment) => !reset.tasks.some((task) => task.id === assignment.taskId)), ...reset.assignments]);
+    setBaselines((current) => current.filter((baseline) => baseline.projectId !== reset.projectId));
+    setBaselineTasks((current) => current.filter((snapshot) => !reset.tasks.some((task) => task.id === snapshot.taskId)));
+    setProjects((current) => current.map((project) => project.id === reset.projectId ? { ...project, name: "TP-R2 — Testproject", status: "active", startDate: "2026-10-05", schedulingDirection: "forward", updatedAt: new Date().toISOString() } : project));
+  }, [resetTestProjectRemote]);
 
   const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
     const versions = planVersions.filter((version) => version.projectId === activeProjectId);
@@ -750,13 +778,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setActiveVersion,
       createPlanVersion,
       deletePlanVersion,
+      resetTestProject,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion, resetTestProject,
     ],
   );
 

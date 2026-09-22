@@ -126,9 +126,11 @@ export default function Dashboard() {
     deleteBaseline,
     baselines,
     baselineTasks,
+    resetTestProject,
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
+  const isSeededTestProject = activeProject.seedKey === "TP-R2";
   useEffect(() => {
     setPlanningDirection(activeProject.schedulingDirection);
   }, [activeProjectId, activeProject.schedulingDirection]);
@@ -685,6 +687,7 @@ export default function Dashboard() {
             <div className="menu-rule" />
             <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}><FileSpreadsheet size={14} /> Set baseline</button>
             {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
+            {isSeededTestProject && <button className="danger" onClick={async () => { if (!window.confirm("Reset test project? All changes to the test project will be discarded.")) return; try { await resetTestProject(); setActiveBaselineId(""); setHistory([]); setFuture([]); toast.success("Test project reset"); } catch { toast.error("Could not reset the test project."); } }}><RefreshCw size={14} /> Reset test project</button>}
           </div>}</div>
         </div>
       </div>
