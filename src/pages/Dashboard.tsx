@@ -59,6 +59,18 @@ const parseDate = (date: string) => new Date(`${date}T12:00:00`);
 const formatDate = (date: string) =>
   new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parseDate(date));
 
+const parseDurationInput = (value: string, fallback: { amount: number; unit: "days" | "weeks" }) => {
+  const match = value.trim().match(/^(\d+(?:[.,]\d+)?)\s*(d|day|days|w|week|weeks)?$/i);
+  if (!match) return fallback;
+  const amount = Number(match[1].replace(",", "."));
+  if (!Number.isFinite(amount) || amount < 0) return fallback;
+  const unit = match[2]?.toLowerCase();
+  return {
+    amount,
+    unit: unit === "w" || unit === "week" || unit === "weeks" ? "weeks" : "days",
+  } as const;
+};
+
 const dateLabel = (date: Date) => isoDate(date);
 
 const getWbs = (task: Task, tasks: Task[]) => {
@@ -258,16 +270,15 @@ export default function Dashboard() {
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
-        const [amount, unit] = value.trim().split(/\s+/);
-        const parsed = Number(amount);
-        const duration = Number.isFinite(parsed) ? Math.max(0, parsed) : task.duration;
-        const weeks = unit === "weeks" || unit === "w";
+        const parsed = parseDurationInput(value, { amount: task.duration, unit: task.durationUnit });
+        const duration = parsed.amount;
+        const weeks = parsed.unit === "weeks";
         const summary = tasks.some((candidate) => candidate.parentId === task.id);
         const milestone = duration === 0 && !summary;
         return {
           ...task,
           duration,
-          durationUnit: (weeks ? "weeks" : "days") as "days" | "weeks",
+          durationUnit: parsed.unit,
           isMilestone: milestone,
           finish: milestone
             ? task.start
