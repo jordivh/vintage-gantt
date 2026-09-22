@@ -201,6 +201,7 @@ interface CalendarStoreValue {
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
   createPlanVersion: (name: string, resetMargins: boolean) => string;
+  deletePlanVersion: (versionId: string) => { ok: boolean; message?: string };
 }
 
 const CalendarStoreContext = createContext<CalendarStoreValue | null>(null);
@@ -373,11 +374,30 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       versionId: id,
       marginDaysConsumed: resetMargins ? 0 : task.marginDaysConsumed,
     }));
+    const sourceTaskIds = new Set(source.map((task) => task.id));
+    const copiedAssignments = assignments
+      .filter((assignment) => sourceTaskIds.has(assignment.taskId))
+      .map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
     setPlanVersions((current) => [...current.map((item) => item.projectId === activeProjectId ? { ...item, isActive: false } : item), version]);
     setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...copied] }));
+    setAssignments((current) => [...current, ...copiedAssignments]);
     setActiveVersionId(id);
     return id;
-  }, [activeProjectId, activeVersionId, planVersions, tasksByProject]);
+  }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
+
+  const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
+    const versions = planVersions.filter((version) => version.projectId === activeProjectId);
+    if (versions.length <= 1) return { ok: false, message: "A project must keep at least one plan version." };
+    const target = versions.find((version) => version.id === versionId);
+    if (!target) return { ok: false, message: "Plan version not found." };
+    const fallback = versions.find((version) => version.id !== versionId);
+    const removedTaskIds = new Set((tasksByProject[activeProjectId] ?? []).filter((task) => task.versionId === versionId).map((task) => task.id));
+    setTasksByProject((current) => ({ ...current, [activeProjectId]: (current[activeProjectId] ?? []).filter((task) => task.versionId !== versionId) }));
+    setAssignments((current) => current.filter((assignment) => !removedTaskIds.has(assignment.taskId)));
+    setPlanVersions((current) => current.filter((version) => version.id !== versionId).map((version) => version.id === fallback?.id ? { ...version, isActive: true } : version));
+    if (activeVersionId === versionId && fallback) setActiveVersionId(fallback.id);
+    return { ok: true };
+  }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
 
   useEffect(() => {
     const version = planVersions.find((item) => item.projectId === activeProjectId && item.isActive) ?? planVersions.find((item) => item.projectId === activeProjectId);
@@ -729,13 +749,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       activeVersionId,
       setActiveVersion,
       createPlanVersion,
+      deletePlanVersion,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion,
     ],
   );
 

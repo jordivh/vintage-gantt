@@ -111,6 +111,7 @@ export default function Dashboard() {
     activeVersionId,
     setActiveVersion,
     createPlanVersion,
+    deletePlanVersion,
     createBaseline,
     deleteBaseline,
     baselines,
@@ -633,6 +634,7 @@ export default function Dashboard() {
           <select className="tool-button version-selector" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }} aria-label="Plan version">
             {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
           </select>
+          {planVersions.filter((version) => version.projectId === activeProjectId).length > 1 && <button className="tool-button" title="Delete current plan version" onClick={() => { const version = planVersions.find((item) => item.id === activeVersionId); if (version && window.confirm(`Delete plan version “${version.name}”?`)) { const result = deletePlanVersion(activeVersionId); if (result.ok) { setHistory([]); setFuture([]); toast.success("Plan version deleted"); } else toast.error(result.message ?? "Could not delete plan version"); } }}>Delete version</button>}
           <span className="toolbar-divider" />
           <button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button>
           <button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button>
