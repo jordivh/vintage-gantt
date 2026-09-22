@@ -9,9 +9,16 @@ import {
   CircleHelp,
   Columns3,
   Copy,
+  Eye,
+  FileSpreadsheet,
+  MoreHorizontal,
+  RefreshCw,
+  SlidersHorizontal,
   Diamond,
   Download,
   GripVertical,
+  IndentDecrease,
+  IndentIncrease,
   LogOut,
   Plus,
   Redo2,
@@ -38,7 +45,7 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 const rowHeight = 42;
 const todayLineDate = "2025-04-17";
@@ -54,6 +61,9 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "percent", label: "% complete", width: 96 },
   { key: "notes", label: "Notes", width: 160 },
   { key: "margin", label: "Margin %", width: 92 },
+  { key: "marginOriginal", label: "Margin original", width: 112 },
+  { key: "marginConsumed", label: "Margin consumed", width: 118 },
+  { key: "marginRemaining", label: "Margin remaining", width: 120 },
   { key: "totalFloat", label: "Total float", width: 96 },
   { key: "baselineStart", label: "Baseline start", width: 112 },
   { key: "baselineFinish", label: "Baseline finish", width: 120 },
@@ -140,7 +150,18 @@ export default function Dashboard() {
     try { return localStorage.getItem("vintage-gantt-project-sidebar-collapsed") === "true"; } catch { return false; }
   });
   const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
-  const [hidden, setHidden] = useState<ColumnKey[]>(["margin", "totalFloat", "baselineStart", "baselineFinish", "variance"]);
+  const [hidden, setHidden] = useState<ColumnKey[]>(() => {
+    const fallback: ColumnKey[] = ["margin", "marginOriginal", "marginConsumed", "marginRemaining", "totalFloat", "baselineStart", "baselineFinish", "variance"];
+    try {
+      const saved = JSON.parse(localStorage.getItem("vintage-gantt-hidden-columns") ?? "null");
+      return Array.isArray(saved) ? saved.filter((key): key is ColumnKey => columnDefs.some((column) => column.key === key)) : fallback;
+    } catch { return fallback; }
+  });
+  const [viewOpen, setViewOpen] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") === "true"; } catch { return false; } });
+  const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
+  useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
@@ -602,8 +623,8 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="planner-shell" onClick={() => setShowMenu(null)}>
-      <header className="planner-topbar">
+    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
+      <header className="planner-topbar planner-context-bar">
         <div className="brand-lockup">
           <div className="brand-mark">⌁</div>
           <div>
@@ -617,6 +638,12 @@ export default function Dashboard() {
           <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
           <button className="tool-button" onClick={() => navigate("/resources")}>Resources</button>
         </nav>
+        <div className="context-selectors">
+          <label>Version <select className="context-select" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }}>
+            {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
+          </select></label>
+          <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select></label>
+        </div>
         <div className="top-actions">
           <div className="save-state"><span className="live-dot" /> Saved just now</div>
           <button className="icon-button" title="Help"><CircleHelp size={17} /></button>
@@ -625,33 +652,40 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="project-toolbar">
-        <div className="toolbar-left">
+      <div className="project-toolbar action-toolbar" onClick={(event) => event.stopPropagation()}>
+        <div className="toolbar-left task-actions">
           <button className="tool-button primary" onClick={() => addTask()}><Plus size={16} /> New task</button>
-          <button className="tool-button" onClick={undo} disabled={!history.length}><Undo2 size={16} /></button>
-          <button className="tool-button" onClick={redo} disabled={!future.length}><Redo2 size={16} /></button>
-          <button className="tool-button" onClick={openRecalculate}><Sparkles size={15} /> Recalculate</button>
-          <select className="tool-button version-selector" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }} aria-label="Plan version">
-            {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
-          </select>
-          {planVersions.filter((version) => version.projectId === activeProjectId).length > 1 && <button className="tool-button" title="Delete current plan version" onClick={() => { const version = planVersions.find((item) => item.id === activeVersionId); if (version && window.confirm(`Delete plan version “${version.name}”?`)) { const result = deletePlanVersion(activeVersionId); if (result.ok) { setHistory([]); setFuture([]); toast.success("Plan version deleted"); } else toast.error(result.message ?? "Could not delete plan version"); } }}>Delete version</button>}
           <span className="toolbar-divider" />
-          <button className="tool-button" onClick={() => selected[0] && indent(selected[0])}>→ Indent</button>
-          <button className="tool-button" onClick={() => selected[0] && indent(selected[0], true)}>← Outdent</button>
-          <button className="tool-button" onClick={deleteSelected}><Trash2 size={15} /> Delete</button>
-          <button className={`tool-button ${showCriticalPath ? "active" : ""}`} onClick={() => setShowCriticalPath((value) => !value)}>Critical path</button>
+          <button className="icon-button" title="Indent (Tab)" aria-label="Indent (Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={16} /></button>
+          <button className="icon-button" title="Outdent (Shift+Tab)" aria-label="Outdent (Shift+Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={16} /></button>
+          <button className="icon-button" title="Delete (Delete)" aria-label="Delete (Delete)" disabled={!selected.length} onClick={deleteSelected}><Trash2 size={15} /></button>
+          <button className="icon-button" title="Undo (Ctrl/Cmd+Z)" aria-label="Undo" disabled={!history.length} onClick={undo}><Undo2 size={15} /></button>
+          <button className="icon-button" title="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" disabled={!future.length} onClick={redo}><Redo2 size={15} /></button>
         </div>
-        <div className="toolbar-right">
+        <div className="toolbar-right view-actions">
           <div className="search-box"><Search size={15} /><input placeholder="Search projects and tasks" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-          <button className="tool-button"><Download size={15} /> Export</button>
-          <button className="tool-button" onClick={() => toast("You are viewing your team dashboard")}><UserRound size={15} /> My dashboard</button>
-          <button className="tool-button" onClick={openProjectSettings}><CalendarDays size={15} /> Project calendar</button>
-          <button className="tool-button" onClick={() => navigate("/reports/margins")}>Margin report</button>
-          <button className="tool-button" onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}>New version</button>
-          <select className="tool-button version-selector" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)} aria-label="Baseline selector"><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select>
-          <button className="tool-button" onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}>Baseline</button>
-          {activeBaselineId && <button className="tool-button" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}>Delete baseline</button>}
-          <button className="tool-button" onClick={() => navigate("/calendars")}><Settings2 size={15} /></button>
+          <div className="toolbar-zoom" aria-label="Zoom"><span>Zoom</span>{(["day", "week", "month", "quarter"] as const).map((value) => <button key={value} className={zoom === value ? "active" : ""} onClick={() => setZoom(value)}>{value}</button>)}</div>
+          <div className="toolbar-popover-wrap"><button className="tool-button quiet" onClick={() => { setViewOpen((open) => !open); setOverflowOpen(false); }}><Eye size={15} /> View</button>{viewOpen && <div className="toolbar-popover view-popover" onClick={(event) => event.stopPropagation()}>
+            <div className="popover-heading"><b>VIEW</b><button onClick={() => setViewOpen(false)}><X size={14} /></button></div>
+            <label><input type="checkbox" checked={showCriticalPath} onChange={(event) => setShowCriticalPath(event.target.checked)} /> Critical path</label>
+            <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margins on bars</label>
+            <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Baseline bars</label>
+            <div className="popover-subheading">COLUMNS</div>
+            {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
+          </div>}</div>
+          <select className="toolbar-zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value as "day" | "week" | "month" | "quarter")} aria-label="Zoom"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option><option value="quarter">Quarter</option></select>
+          <div className="toolbar-popover-wrap"><button className="icon-button" title="More actions" aria-label="More actions" onClick={() => { setOverflowOpen((open) => !open); setViewOpen(false); }}><MoreHorizontal size={18} /></button>{overflowOpen && <div className="toolbar-popover overflow-popover" onClick={(event) => event.stopPropagation()}>
+            <div className="responsive-task-actions"><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={14} /> <span>Indent</span></button><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={14} /> <span>Outdent</span></button><button disabled={!selected.length} onClick={deleteSelected}><Trash2 size={14} /> Delete</button><button disabled={!history.length} onClick={undo}><Undo2 size={14} /> Undo</button><button disabled={!future.length} onClick={redo}><Redo2 size={14} /> Redo</button><div className="menu-rule" /></div>
+            <button onClick={openRecalculate}><RefreshCw size={14} /> Recalculate</button>
+            <button onClick={() => toast("Export ready")}><Download size={14} /> Export</button>
+            <button onClick={() => navigate("/reports/margins")}><Columns3 size={14} /> Margin report</button>
+            <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
+            <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
+            <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}><Copy size={14} /> New version</button>
+            <div className="menu-rule" />
+            <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}><FileSpreadsheet size={14} /> Set baseline</button>
+            {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
+          </div>}</div>
         </div>
       </div>
 
@@ -857,6 +891,12 @@ export default function Dashboard() {
                                   ? `${displayTask.marginPct ?? 0}%`
                                   : column.key === "totalFloat"
                                     ? `${displayTask.totalFloat ?? 0} d`
+                                    : column.key === "marginOriginal"
+                                      ? `${displayTask.marginDaysOriginal ?? 0} d`
+                                      : column.key === "marginConsumed"
+                                        ? `${displayTask.marginDaysConsumed ?? 0} d`
+                                        : column.key === "marginRemaining"
+                                          ? `${Math.max(0, (displayTask.marginDaysOriginal ?? 0) - (displayTask.marginDaysConsumed ?? 0))} d`
                                     : column.key === "baselineStart"
                                       ? activeBaselineSnapshots.get(task.id)?.startDate ?? "—"
                                       : column.key === "baselineFinish"
@@ -875,7 +915,7 @@ export default function Dashboard() {
                                     : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
-                      const isName = column.key === "name";                          const canEdit = !["id", "wbs", "totalFloat", "baselineStart", "baselineFinish", "variance"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
+                      const isName = column.key === "name";                          const canEdit = !["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
                       return (
                         <div
                           key={column.key}
@@ -1028,7 +1068,7 @@ export default function Dashboard() {
               </svg>
               {visibleTasks.map((task) => (
                 <div key={task.id} className={`timeline-row ${selected.includes(task.id) ? "selected" : ""}`} style={{ height: rowHeight }} onClick={() => setSelected([task.id])}>
-                  {activeBaselineId && baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id) && <span className="baseline-bar" style={{ left: dateOffset(baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start), width: barWidth({ ...task, start: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start, finish: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.finishDate ?? task.finish }) }} title="Baseline" />}
+                  {showBaselineBars && activeBaselineId && baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id) && <span className="baseline-bar" style={{ left: dateOffset(baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start), width: barWidth({ ...task, start: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start, finish: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.finishDate ?? task.finish }) }} title="Baseline" />}
                   <div
                     className={`task-bar ${showCriticalPath && task.isCritical ? "critical-bar" : isMilestone(task) ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
                     title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}${task.marginDaysOriginal ? ` · Margin ${task.marginDaysConsumed ?? 0} of ${task.marginDaysOriginal} d consumed` : ""}`}
@@ -1065,6 +1105,7 @@ export default function Dashboard() {
                         <span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} />
                       </>
                     )}
+                    {showMarginsOnBars && !isMilestone(task) && (task.marginDaysOriginal ?? 0) > 0 && <span className="margin-buffer" style={{ width: `${Math.min(100, Math.max(0, ((task.marginDaysOriginal ?? 0) - (task.marginDaysConsumed ?? 0)) / (task.marginDaysOriginal ?? 1)) * 100)}%` }} title={`Remaining margin: ${Math.max(0, (task.marginDaysOriginal ?? 0) - (task.marginDaysConsumed ?? 0))} d`} />}
                     {isMilestone(task) && <Diamond size={18} fill="currentColor" />}
                   </div>
                 </div>
