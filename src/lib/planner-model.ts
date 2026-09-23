@@ -27,6 +27,8 @@ export interface PlannerTask extends ScheduleTask {
   totalFloat?: number;
   isCritical?: boolean;
   versionId?: string;
+  /** Template rows store the start as a working-day offset from the project start. */
+  startOffsetDays?: number;
 }
 
 /** Parses strings like `"3FS+2d, 5SS"` into dependency records. */

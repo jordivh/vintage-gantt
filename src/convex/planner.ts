@@ -46,19 +46,20 @@ export const getState = query({
 });
 
 const TEST_SEED_KEY = "TP-R2";
+const STARTER_SEED_KEY = "STARTER-PROJECT";
 const TEST_PROJECT_ID = "proj-tp-r2";
 const TEST_VERSION_ID = "version-tp-r2-1";
 const TEST_TASK_IDS = ["1", "2", "3", "4", "5", "6", "7", "8"];
 
 const testTasks = (versionId: string) => [
-  { id: "1", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 0, name: "Voorbereiding", duration: 0, durationUnit: "days", start: "2026-10-05", finish: "2026-10-13", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "2", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 1, name: "Concept opstellen", duration: 5, durationUnit: "days", start: "2026-10-05", finish: "2026-10-09", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", versionId, marginPct: 20, marginDaysOriginal: 1, marginDaysConsumed: 0 },
-  { id: "3", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 2, name: "Concept nakijken", duration: 2, durationUnit: "days", start: "2026-10-12", finish: "2026-10-13", isMilestone: false, predecessors: "2FS", resource: "", percent: 0, notes: "", color: "sage", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "4", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 3, name: "Uitvoering", duration: 0, durationUnit: "days", start: "2026-10-14", finish: "2026-10-30", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "clay", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "5", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 4, name: "Bouwen", duration: 10, durationUnit: "days", start: "2026-10-14", finish: "2026-10-27", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "clay", versionId, marginPct: 10, marginDaysOriginal: 1, marginDaysConsumed: 0 },
-  { id: "6", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 5, name: "Documentatie", duration: 4, durationUnit: "days", start: "2026-10-14", finish: "2026-10-19", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "ink", versionId, marginPct: 50, marginDaysOriginal: 2, marginDaysConsumed: 0 },
-  { id: "7", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 6, name: "Testen", duration: 3, durationUnit: "days", start: "2026-10-28", finish: "2026-10-30", isMilestone: false, predecessors: "5FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "8", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 7, name: "Oplevering", duration: 0, durationUnit: "days", start: "2026-11-02", finish: "2026-11-02", isMilestone: true, predecessors: "7FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "1", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 0, name: "Voorbereiding", startOffsetDays: 0, duration: 0, durationUnit: "days", start: "2026-10-05", finish: "2026-10-13", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "2", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 1, name: "Concept opstellen", startOffsetDays: 0, duration: 5, durationUnit: "days", start: "2026-10-05", finish: "2026-10-09", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", versionId, marginPct: 20, marginDaysOriginal: 1, marginDaysConsumed: 0 },
+  { id: "3", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 2, name: "Concept nakijken", startOffsetDays: 5, duration: 2, durationUnit: "days", start: "2026-10-12", finish: "2026-10-13", isMilestone: false, predecessors: "2FS", resource: "", percent: 0, notes: "", color: "sage", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "4", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 3, name: "Uitvoering", startOffsetDays: 7, duration: 0, durationUnit: "days", start: "2026-10-14", finish: "2026-10-30", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "clay", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "5", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 4, name: "Bouwen", startOffsetDays: 7, duration: 10, durationUnit: "days", start: "2026-10-14", finish: "2026-10-27", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "clay", versionId, marginPct: 10, marginDaysOriginal: 1, marginDaysConsumed: 0 },
+  { id: "6", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 5, name: "Documentatie", startOffsetDays: 7, duration: 4, durationUnit: "days", start: "2026-10-14", finish: "2026-10-19", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "ink", versionId, marginPct: 50, marginDaysOriginal: 2, marginDaysConsumed: 0 },
+  { id: "7", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 6, name: "Testen", startOffsetDays: 17, duration: 3, durationUnit: "days", start: "2026-10-28", finish: "2026-10-30", isMilestone: false, predecessors: "5FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "8", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 7, name: "Oplevering", startOffsetDays: 20, duration: 0, durationUnit: "days", start: "2026-11-02", finish: "2026-11-02", isMilestone: true, predecessors: "7FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
 ];
 
 const testDependencies = [
@@ -69,14 +70,37 @@ const testDependencies = [
   { id: "dep-tp-r2-7-8", projectId: TEST_PROJECT_ID, predecessorId: "7", successorId: "8", type: "FS", lagDays: 0 },
 ];
 
+/** Creates the one empty starter project a brand-new workspace opens on, exactly once. */
+const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now: string) => {
+  const starterRun = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", STARTER_SEED_KEY)).first();
+  if (starterRun) return false;
+  const projects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+  const hasRealProject = projects.some((project) => project.kind !== "template");
+  if (!hasRealProject) {
+    const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const calendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? "cal-base-belgium";
+    await ctx.db.insert("projects", { ownerId, id: "proj-welcome", name: "New project", status: "active", kind: "project", startDate: new Date().toISOString().slice(0, 10), schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now });
+    await ctx.db.insert("planVersions", { ownerId, id: "version-proj-welcome-1", projectId: "proj-welcome", name: "Versie 1", isActive: true, createdAt: now });
+  }
+  await ctx.db.insert("seedRuns", { ownerId, seedKey: STARTER_SEED_KEY, executedAt: now });
+  return !hasRealProject;
+};
+
 const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   const executed = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", TEST_SEED_KEY)).first();
   const existing = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("seedKey"), TEST_SEED_KEY)).first();
-  if (executed) return false;
   const now = new Date().toISOString();
   if (existing) {
-    await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
-    return false;
+    // A legacy seeded project row is reclassified as the built-in template; its data stays untouched.
+    const needsMigration = existing.kind !== "template" || existing.isBuiltin !== true || existing.status !== "template";
+    if (needsMigration) await ctx.db.patch(existing._id, { kind: "template", isBuiltin: true, status: "template", updatedAt: now });
+    if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
+    const starterCreated = await ensureStarterProject(ctx, ownerId, now);
+    return needsMigration || starterCreated;
+  }
+  if (executed) {
+    // The built-in template was deleted on purpose — it must stay deleted.
+    return await ensureStarterProject(ctx, ownerId, now);
   }
   const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
   const base = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
@@ -98,7 +122,7 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
     await ctx.db.insert("resources", { ownerId, id: "res-tp-r2-shaw", name: "E. Shaw", role: "Permits coordinator", email: "", colour: "#75856c", hoursPerWeek: 40, isActive: true, calendarId: "cal-tp-r2-shaw" });
     producer = { id: "res-tp-r2-alvarez", calendarId: "cal-tp-r2-alvarez" };
   }
-  await ctx.db.insert("projects", { ownerId, id: TEST_PROJECT_ID, name: "TP-R2 — Testproject", status: "active", startDate: "2026-10-05", schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now, seedKey: TEST_SEED_KEY });
+  await ctx.db.insert("projects", { ownerId, id: TEST_PROJECT_ID, name: "TP-R2 — Testproject", status: "template", kind: "template", isBuiltin: true, startDate: "2026-10-05", schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now, seedKey: TEST_SEED_KEY });
   await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now });
   for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
   for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
@@ -108,6 +132,7 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
     if (!leaveExists) await ctx.db.insert("calendarExceptions", { ownerId, id: "exc-tp-r2-alvarez-leave", calendarId: producer?.calendarId!, startDate: "2026-10-14", endDate: "2026-10-16", label: "Test leave", type: "leave", isWorkingDay: false, source: "manual" });
   }
   await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
+  await ensureStarterProject(ctx, ownerId, now);
   return true;
 };
 
@@ -149,7 +174,7 @@ export const resetTestProject = mutation({
     const now = new Date().toISOString();
     const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const baseCalendar = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
-    await ctx.db.patch(project._id, { name: "TP-R2 — Testproject", status: "active", startDate: "2026-10-05", schedulingDirection: "forward", calendarId: baseCalendar?.id ?? project.calendarId, updatedAt: now });
+    await ctx.db.patch(project._id, { name: "TP-R2 — Testproject", status: "template", kind: "template", isBuiltin: true, startDate: "2026-10-05", schedulingDirection: "forward", calendarId: baseCalendar?.id ?? project.calendarId, updatedAt: now });
     await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now });
     for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
     for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });

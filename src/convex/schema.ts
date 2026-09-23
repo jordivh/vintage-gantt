@@ -34,8 +34,11 @@ const schema = defineSchema(
 
     projects: defineTable({
       ownerId: v.id("users"), id: v.string(), name: v.string(), status: v.string(), startDate: v.string(),
-      schedulingDirection: v.string(), calendarId: v.string(), createdAt: v.string(), updatedAt: v.string(),
+      schedulingDirection: v.string(), calendarId: v.string(),      createdAt: v.string(), updatedAt: v.string(),
       seedKey: v.optional(v.string()),
+      kind: v.optional(v.string()), // "project" (default) | "template"
+      isBuiltin: v.optional(v.boolean()),
+      hidden: v.optional(v.boolean()),
     }).index("by_owner", ["ownerId"]),
     tasks: defineTable({
       ownerId: v.id("users"), id: v.string(), projectId: v.string(), parentId: v.union(v.string(), v.null()), sortOrder: v.number(),
@@ -44,6 +47,7 @@ const schema = defineSchema(
       color: v.string(), collapsed: v.optional(v.boolean()), versionId: v.optional(v.string()),
       marginPct: v.optional(v.number()), marginDaysOriginal: v.optional(v.number()), marginDaysConsumed: v.optional(v.number()),
       totalFloat: v.optional(v.number()), isCritical: v.optional(v.boolean()),
+      startOffsetDays: v.optional(v.number()),
     }).index("by_owner_project", ["ownerId", "projectId"]).index("by_owner_project_version", ["ownerId", "projectId", "versionId"]),
     dependencies: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), predecessorId: v.string(), successorId: v.string(), type: v.string(), lagDays: v.number() }).index("by_owner", ["ownerId"]),
     calendars: defineTable({ ownerId: v.id("users"), id: v.string(), name: v.string(), type: v.string(), parentCalendarId: v.union(v.string(), v.null()), isDefault: v.boolean(), workingDays: v.optional(v.array(v.number())) }).index("by_owner", ["ownerId"]),
