@@ -103,10 +103,9 @@ export default function Dashboard() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const {
-    system,
-    activeProject,
-    tasks,
-    setTasks,
+    system,      activeProject,
+      tasks,
+      setTasks,
     setProjectCalendar,
     previewProjectRelink,
     projects,
@@ -127,6 +126,7 @@ export default function Dashboard() {
     baselines,
     baselineTasks,
     resetTestProject,
+    saveAsTemplate,
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
@@ -259,7 +259,7 @@ export default function Dashboard() {
   const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
   const dayIsWorking = (date: string) => resolveWorkingDay(date, calendarId, system);
   const filteredProjectGroups = useMemo(() => {
-    const matching = projects.filter((project) => project.name.toLowerCase().includes(projectSearch.toLowerCase()));
+    const matching = projects.filter((project) => (project.kind ?? "project") === "project" && project.name.toLowerCase().includes(projectSearch.toLowerCase()));
     return {
       active: matching.filter((project) => project.status === "active"),
       archived: matching.filter((project) => project.status === "archived"),
@@ -686,6 +686,7 @@ export default function Dashboard() {
             <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}><Copy size={14} /> New version</button>
             <div className="menu-rule" />
             <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}><FileSpreadsheet size={14} /> Set baseline</button>
+            <button onClick={() => { const name = window.prompt("Template name", `${activeProject.name} template`); if (name?.trim()) void saveAsTemplate(activeProject.id, activeVersionId, name.trim()).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template.")); }}><Copy size={14} /> Save as template</button>
             {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
             {isSeededTestProject && <button className="danger" onClick={async () => { if (!window.confirm("Reset test project? All changes to the test project will be discarded.")) return; try { await resetTestProject(); setActiveBaselineId(""); setHistory([]); setFuture([]); toast.success("Test project reset"); } catch { toast.error("Could not reset the test project."); } }}><RefreshCw size={14} /> Reset test project</button>}
           </div>}</div>

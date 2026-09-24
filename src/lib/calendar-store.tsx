@@ -37,6 +37,9 @@ export interface ProjectRecord {
   createdAt: string;
   updatedAt: string;
   seedKey?: string;
+  kind?: "project" | "template";
+  isBuiltin?: boolean;
+  hidden?: boolean;
 }
 
 export type LeaveType = "holiday leave" | "sick leave" | "training" | "other";
@@ -171,6 +174,10 @@ interface CalendarStoreValue {
   setTasks: (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => void;
   setProjectCalendar: (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => void;
   createProject: (input: { name: string; startDate: string; schedulingDirection: PlanningDirection; calendarId: string }) => string;
+  createProjectFromTemplate: (input: { templateId: string | null; name: string; startDate: string; calendarId: string; schedulingDirection: PlanningDirection }) => Promise<{ id: string; skippedAssignments: number }>;
+  saveAsTemplate: (projectId: string, versionId: string, name: string) => Promise<void>;
+  setTemplateHidden: (templateId: string, hidden: boolean) => Promise<void>;
+  deleteTemplate: (templateId: string) => Promise<void>;
   renameProject: (projectId: string, name: string) => void;
   duplicateProject: (projectId: string, name: string) => string;
   archiveProject: (projectId: string) => void;
@@ -215,6 +222,7 @@ function recalculateProjects(
 ): Record<string, PlannerTask[]> {
   const next: Record<string, PlannerTask[]> = { ...current };
   for (const project of projectList) {
+    if ((project.kind ?? "project") !== "project") continue;
     const tasks = current[project.id];
     if (!tasks?.length) continue;
     const result = recalculateTasks(tasks, {
@@ -244,6 +252,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
   const ensureTestProject = useMutation(api.planner.ensureTestProject);
   const resetTestProjectRemote = useMutation(api.planner.resetTestProject);
+  const createProjectFromTemplateRemote = useMutation(api.planner.createProjectFromTemplate);
+  const saveAsTemplateRemote = useMutation(api.planner.saveAsTemplate);
+  const setTemplateHiddenRemote = useMutation(api.planner.hideTemplate);
+  const deleteTemplateRemote = useMutation(api.planner.deleteTemplate);
   const replaceRemoteState = useMutation(api.planner.replaceState);
   const hydratedRef = useRef(false);
   const migrationStartedRef = useRef(false);
@@ -299,8 +311,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setBaselines(state.baselines ?? []);
     setBaselineTasks(state.baselineTasks ?? []);
     setTasksByProject(grouped);
-    const fallback = (state.projects ?? []).filter((project) => project.status === "active").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? state.projects?.[0];
-    setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived") ? current : fallback?.id ?? "");
+    const fallback = (state.projects ?? []).filter((project) => project.status === "active" && project.kind !== "template").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? (state.projects ?? []).find((project) => project.status !== "archived" && project.kind !== "template");
+    setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived" && (project.kind ?? "project") === "project") ? current : fallback?.id ?? "");
     hydratedRef.current = true;
     lastServerStateRef.current = remoteState;
   }, [isAuthenticated, remoteState, initializeWorkspace, replaceRemoteState]);
@@ -349,7 +361,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     });
   }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState]);
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? {
+    () => projects.find((project) => project.id === activeProjectId && (project.kind ?? "project") === "project") ?? projects.find((project) => (project.kind ?? "project") === "project") ?? {
       id: "",
       name: "No project selected",
       calendarId: system.defaultCalendarId,
@@ -483,7 +495,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setActiveProject = useCallback((projectId: string) => {
-    if (projects.some((project) => project.id === projectId && project.status !== "archived")) setActiveProjectId(projectId);
+    if (projects.some((project) => project.id === projectId && project.status !== "archived" && (project.kind ?? "project") === "project")) setActiveProjectId(projectId);
   }, [projects]);
 
   const createProject = useCallback<CalendarStoreValue["createProject"]>((input) => {
@@ -498,6 +510,41 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveProjectId(id);
     return id;
   }, []);
+
+  const createProjectFromTemplate = useCallback<CalendarStoreValue["createProjectFromTemplate"]>(async (input) => {
+    const result = await createProjectFromTemplateRemote(input);
+    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; skippedAssignments: number };
+    setProjects((current) => [...current, created.project]);
+    setPlanVersions((current) => [...current, created.version]);
+    setTasksByProject((current) => ({ ...current, [created.project.id]: created.tasks.map((task) => ({ ...task, versionId: created.version.id })) }));
+    setAssignments((current) => [...current, ...created.assignments]);
+    setActiveVersionId(created.version.id);
+    setActiveProjectId(created.project.id);
+    return { id: created.project.id, skippedAssignments: created.skippedAssignments };
+  }, [createProjectFromTemplateRemote]);
+
+  const saveAsTemplate = useCallback<CalendarStoreValue["saveAsTemplate"]>(async (projectId, versionId, name) => {
+    const result = await saveAsTemplateRemote({ projectId, versionId, name });
+    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[] };
+    setProjects((current) => [...current, created.project]);
+    setPlanVersions((current) => [...current, created.version]);
+    setTasksByProject((current) => ({ ...current, [created.project.id]: created.tasks.map((task) => ({ ...task, versionId: created.version.id })) }));
+    setAssignments((current) => [...current, ...created.assignments]);
+  }, [saveAsTemplateRemote]);
+
+  const setTemplateHidden = useCallback<CalendarStoreValue["setTemplateHidden"]>(async (templateId, hidden) => {
+    await setTemplateHiddenRemote({ templateId, hidden });
+    setProjects((current) => current.map((project) => project.id === templateId ? { ...project, hidden, updatedAt: new Date().toISOString() } : project));
+  }, [setTemplateHiddenRemote]);
+
+  const deleteTemplate = useCallback<CalendarStoreValue["deleteTemplate"]>(async (templateId) => {
+    await deleteTemplateRemote({ templateId });
+    const taskIds = new Set((tasksByProject[templateId] ?? []).map((task) => task.id));
+    setProjects((current) => current.filter((project) => project.id !== templateId));
+    setTasksByProject((current) => { const next = { ...current }; delete next[templateId]; return next; });
+    setPlanVersions((current) => current.filter((version) => version.projectId !== templateId));
+    setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
+  }, [deleteTemplateRemote, tasksByProject]);
 
   const renameProject = useCallback((projectId: string, name: string) => {
     if (!name.trim()) return;
@@ -579,13 +626,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   );
 
   const calendarsUsingProjects = useCallback(
-    (calendarId: string) => projects.filter((project) => project.calendarId === calendarId),
+    (calendarId: string) => projects.filter((project) => (project.kind ?? "project") === "project" && project.calendarId === calendarId),
     [projects],
   );
 
   const projectsAffectedBy = useCallback(
     (calendarId: string) =>
-      projects.filter((project) =>
+      projects.filter((project) => (project.kind ?? "project") === "project" &&
         calendarChain(system, project.calendarId).some((calendar) => calendar.id === calendarId),
       ),
     [projects, system],
@@ -626,6 +673,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   const setProjectCalendar = useCallback(
     (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => {
+      if (!projects.some((project) => project.id === projectId && (project.kind ?? "project") === "project")) return;
       const effectiveSystem = nextSystem ?? system;
       setSystem(effectiveSystem);
       setProjects((current) =>
@@ -642,7 +690,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         return result.error ? current : { ...current, [projectId]: result.tasks };
       });
     },
-    [system],
+    [projects, system],
   );
 
   const createCalendar = useCallback<CalendarStoreValue["createCalendar"]>(
@@ -707,7 +755,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       if (calendar.isDefault) {
         return { ok: false, message: "The base calendar cannot be deleted." };
       }
-      const usedBy = projects.filter((project) => project.calendarId === id);
+      const usedBy = projects.filter((project) => (project.kind ?? "project") === "project" && project.calendarId === id);
       if (usedBy.length) {
         return {
           ok: false,
@@ -747,6 +795,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setTasks,
       setProjectCalendar,
       createProject,
+      createProjectFromTemplate,
+      saveAsTemplate,
+      setTemplateHidden,
+      deleteTemplate,
       renameProject,
       duplicateProject,
       archiveProject,
@@ -781,7 +833,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       resetTestProject,
     }),
     [
-      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
+      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,

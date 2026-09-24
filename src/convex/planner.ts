@@ -49,25 +49,77 @@ const TEST_SEED_KEY = "TP-R2";
 const STARTER_SEED_KEY = "STARTER-PROJECT";
 const TEST_PROJECT_ID = "proj-tp-r2";
 const TEST_VERSION_ID = "version-tp-r2-1";
-const TEST_TASK_IDS = ["1", "2", "3", "4", "5", "6", "7", "8"];
+
+const templateTaskId = () => crypto.randomUUID().replace(/\D/g, "");
+const dateShift = (date: string, amount: number) => {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + amount);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+};
+const isWorkingDate = (date: string, calendarId: string, calendars: any[], exceptions: any[]) => {
+  const chain: any[] = [];
+  let current = calendars.find((calendar) => calendar.id === calendarId);
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    chain.push(current);
+    current = current.parentCalendarId ? calendars.find((calendar) => calendar.id === current.parentCalendarId) : undefined;
+  }
+  for (const calendar of chain) {
+    const exception = exceptions.filter((item) => item.calendarId === calendar.id && item.startDate <= date && item.endDate >= date)
+      .sort((a, b) => Number(b.isWorkingDay) - Number(a.isWorkingDay))[0];
+    if (exception) return exception.isWorkingDay;
+  }
+  const pattern = chain.find((calendar) => calendar.workingDays?.length)?.workingDays ?? [1, 2, 3, 4, 5];
+  return pattern.includes(new Date(`${date}T12:00:00`).getDay());
+};
+const addWorkingDateOffset = (date: string, amount: number, calendarId: string, calendars: any[], exceptions: any[]) => {
+  let result = date;
+  const direction = amount < 0 ? -1 : 1;
+  let remaining = Math.abs(amount);
+  while (remaining > 0) {
+    result = dateShift(result, direction);
+    if (isWorkingDate(result, calendarId, calendars, exceptions)) remaining -= 1;
+  }
+  return result;
+};
+const workingDateOffset = (from: string, to: string, calendarId: string, calendars: any[], exceptions: any[]) => {
+  if (from === to) return 0;
+  const direction = to > from ? 1 : -1;
+  let cursor = from;
+  let count = 0;
+  while (cursor !== to) {
+    cursor = dateShift(cursor, direction);
+    if (isWorkingDate(cursor, calendarId, calendars, exceptions)) count += direction;
+  }
+  return count;
+};
+const finishDateFor = (start: string, duration: number, unit: string, calendarId: string, calendars: any[], exceptions: any[]) => {
+  const days = Math.max(0, unit === "weeks" ? duration * 5 : duration);
+  return days <= 1 ? start : addWorkingDateOffset(start, days - 1, calendarId, calendars, exceptions);
+};
+const rewritePredecessors = (text: string, idMap: Map<string, string>) => text.split(",").map((part) => {
+  const match = part.trim().match(/^(\d+)(.*)$/);
+  return match ? `${idMap.get(match[1]) ?? match[1]}${match[2]}` : part.trim();
+}).filter(Boolean).join(", ");
 
 const testTasks = (versionId: string) => [
-  { id: "1", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 0, name: "Voorbereiding", startOffsetDays: 0, duration: 0, durationUnit: "days", start: "2026-10-05", finish: "2026-10-13", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "2", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 1, name: "Concept opstellen", startOffsetDays: 0, duration: 5, durationUnit: "days", start: "2026-10-05", finish: "2026-10-09", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", versionId, marginPct: 20, marginDaysOriginal: 1, marginDaysConsumed: 0 },
-  { id: "3", projectId: TEST_PROJECT_ID, parentId: "1", sortOrder: 2, name: "Concept nakijken", startOffsetDays: 5, duration: 2, durationUnit: "days", start: "2026-10-12", finish: "2026-10-13", isMilestone: false, predecessors: "2FS", resource: "", percent: 0, notes: "", color: "sage", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "4", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 3, name: "Uitvoering", startOffsetDays: 7, duration: 0, durationUnit: "days", start: "2026-10-14", finish: "2026-10-30", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "clay", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "5", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 4, name: "Bouwen", startOffsetDays: 7, duration: 10, durationUnit: "days", start: "2026-10-14", finish: "2026-10-27", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "clay", versionId, marginPct: 10, marginDaysOriginal: 1, marginDaysConsumed: 0 },
-  { id: "6", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 5, name: "Documentatie", startOffsetDays: 7, duration: 4, durationUnit: "days", start: "2026-10-14", finish: "2026-10-19", isMilestone: false, predecessors: "3FS", resource: "", percent: 0, notes: "", color: "ink", versionId, marginPct: 50, marginDaysOriginal: 2, marginDaysConsumed: 0 },
-  { id: "7", projectId: TEST_PROJECT_ID, parentId: "4", sortOrder: 6, name: "Testen", startOffsetDays: 17, duration: 3, durationUnit: "days", start: "2026-10-28", finish: "2026-10-30", isMilestone: false, predecessors: "5FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
-  { id: "8", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 7, name: "Oplevering", startOffsetDays: 20, duration: 0, durationUnit: "days", start: "2026-11-02", finish: "2026-11-02", isMilestone: true, predecessors: "7FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "92026001", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 0, name: "Voorbereiding", startOffsetDays: 0, duration: 0, durationUnit: "days", start: "2026-10-05", finish: "2026-10-13", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "92026002", projectId: TEST_PROJECT_ID, parentId: "92026001", sortOrder: 1, name: "Concept opstellen", startOffsetDays: 0, duration: 5, durationUnit: "days", start: "2026-10-05", finish: "2026-10-09", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", versionId, marginPct: 20, marginDaysOriginal: 1, marginDaysConsumed: 0 },
+  { id: "92026003", projectId: TEST_PROJECT_ID, parentId: "92026001", sortOrder: 2, name: "Concept nakijken", startOffsetDays: 5, duration: 2, durationUnit: "days", start: "2026-10-12", finish: "2026-10-13", isMilestone: false, predecessors: "92026002FS", resource: "", percent: 0, notes: "", color: "sage", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "92026004", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 3, name: "Uitvoering", startOffsetDays: 7, duration: 0, durationUnit: "days", start: "2026-10-14", finish: "2026-10-30", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "clay", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "92026005", projectId: TEST_PROJECT_ID, parentId: "92026004", sortOrder: 4, name: "Bouwen", startOffsetDays: 7, duration: 10, durationUnit: "days", start: "2026-10-14", finish: "2026-10-27", isMilestone: false, predecessors: "92026003FS", resource: "", percent: 0, notes: "", color: "clay", versionId, marginPct: 10, marginDaysOriginal: 1, marginDaysConsumed: 0 },
+  { id: "92026006", projectId: TEST_PROJECT_ID, parentId: "92026004", sortOrder: 5, name: "Documentatie", startOffsetDays: 7, duration: 4, durationUnit: "days", start: "2026-10-14", finish: "2026-10-19", isMilestone: false, predecessors: "92026003FS", resource: "", percent: 0, notes: "", color: "ink", versionId, marginPct: 50, marginDaysOriginal: 2, marginDaysConsumed: 0 },
+  { id: "92026007", projectId: TEST_PROJECT_ID, parentId: "92026004", sortOrder: 6, name: "Testen", startOffsetDays: 17, duration: 3, durationUnit: "days", start: "2026-10-28", finish: "2026-10-30", isMilestone: false, predecessors: "92026005FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
+  { id: "92026008", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 7, name: "Oplevering", startOffsetDays: 20, duration: 0, durationUnit: "days", start: "2026-11-02", finish: "2026-11-02", isMilestone: true, predecessors: "92026007FS", resource: "", percent: 0, notes: "", color: "rust", versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
 ];
 
 const testDependencies = [
-  { id: "dep-tp-r2-2-3", projectId: TEST_PROJECT_ID, predecessorId: "2", successorId: "3", type: "FS", lagDays: 0 },
-  { id: "dep-tp-r2-3-5", projectId: TEST_PROJECT_ID, predecessorId: "3", successorId: "5", type: "FS", lagDays: 0 },
-  { id: "dep-tp-r2-3-6", projectId: TEST_PROJECT_ID, predecessorId: "3", successorId: "6", type: "FS", lagDays: 0 },
-  { id: "dep-tp-r2-5-7", projectId: TEST_PROJECT_ID, predecessorId: "5", successorId: "7", type: "FS", lagDays: 0 },
-  { id: "dep-tp-r2-7-8", projectId: TEST_PROJECT_ID, predecessorId: "7", successorId: "8", type: "FS", lagDays: 0 },
+  { id: "dep-tp-r2-2-3", projectId: TEST_PROJECT_ID, predecessorId: "92026002", successorId: "92026003", type: "FS", lagDays: 0 },
+  { id: "dep-tp-r2-3-5", projectId: TEST_PROJECT_ID, predecessorId: "92026003", successorId: "92026005", type: "FS", lagDays: 0 },
+  { id: "dep-tp-r2-3-6", projectId: TEST_PROJECT_ID, predecessorId: "92026003", successorId: "92026006", type: "FS", lagDays: 0 },
+  { id: "dep-tp-r2-5-7", projectId: TEST_PROJECT_ID, predecessorId: "92026005", successorId: "92026007", type: "FS", lagDays: 0 },
+  { id: "dep-tp-r2-7-8", projectId: TEST_PROJECT_ID, predecessorId: "92026007", successorId: "92026008", type: "FS", lagDays: 0 },
 ];
 
 /** Creates the one empty starter project a brand-new workspace opens on, exactly once. */
@@ -75,7 +127,7 @@ const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now:
   const starterRun = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", STARTER_SEED_KEY)).first();
   if (starterRun) return false;
   const projects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-  const hasRealProject = projects.some((project) => project.kind !== "template");
+  const hasRealProject = projects.some((project) => (project.kind ?? "project") === "project");
   if (!hasRealProject) {
     const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const calendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? "cal-base-belgium";
@@ -88,17 +140,25 @@ const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now:
 
 const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   const executed = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", TEST_SEED_KEY)).first();
-  const existing = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("seedKey"), TEST_SEED_KEY)).first();
+  const keyedRows = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("seedKey"), TEST_SEED_KEY)).collect();
+  const existing = keyedRows.find((project) => project.kind === "template") ?? keyedRows.find((project) => project.id === TEST_PROJECT_ID);
   const now = new Date().toISOString();
   if (existing) {
-    // A legacy seeded project row is reclassified as the built-in template; its data stays untouched.
-    const needsMigration = existing.kind !== "template" || existing.isBuiltin !== true || existing.status !== "template";
-    if (needsMigration) await ctx.db.patch(existing._id, { kind: "template", isBuiltin: true, status: "template", updatedAt: now });
+    if (!existing.isBuiltin || existing.status !== "template") await ctx.db.patch(existing._id, { kind: "template", isBuiltin: true, status: "template", updatedAt: now });
     if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
     const starterCreated = await ensureStarterProject(ctx, ownerId, now);
-    return needsMigration || starterCreated;
+    return starterCreated;
   }
-  if (executed) {
+  const legacyRows = keyedRows.filter((project) => project.id !== TEST_PROJECT_ID);
+  for (const legacy of legacyRows) {
+    // Keep any earlier seeded test project and all its plan data intact; reserve TP-R2 for the clean template.
+    await ctx.db.patch(legacy._id, {
+      seedKey: undefined,
+      isBuiltin: false,
+      updatedAt: now,
+    });
+  }
+  if (executed && !legacyRows.length) {
     // The built-in template was deleted on purpose — it must stay deleted.
     return await ensureStarterProject(ctx, ownerId, now);
   }
@@ -127,14 +187,189 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
   for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
   if (producer) {
-    await ctx.db.insert("taskAssignments", { ownerId, id: "as-tp-r2-bouwen", taskId: "5", resourceId: producer.id });
+    await ctx.db.insert("taskAssignments", { ownerId, id: "as-tp-r2-bouwen", taskId: "92026005", resourceId: producer.id });
     const leaveExists = exceptions.some((item) => item.calendarId === producer.calendarId && item.startDate === "2026-10-14" && item.endDate === "2026-10-16");
-    if (!leaveExists) await ctx.db.insert("calendarExceptions", { ownerId, id: "exc-tp-r2-alvarez-leave", calendarId: producer?.calendarId!, startDate: "2026-10-14", endDate: "2026-10-16", label: "Test leave", type: "leave", isWorkingDay: false, source: "manual" });
+    if (producer.calendarId === "cal-tp-r2-alvarez" && !leaveExists) await ctx.db.insert("calendarExceptions", { ownerId, id: "exc-tp-r2-alvarez-leave", calendarId: producer.calendarId, startDate: "2026-10-14", endDate: "2026-10-16", label: "Test leave", type: "leave", isWorkingDay: false, source: "manual" });
   }
-  await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
+  if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
   await ensureStarterProject(ctx, ownerId, now);
   return true;
 };
+
+export const saveAsTemplate = mutation({
+  args: { projectId: v.string(), versionId: v.string(), name: v.string() },
+  handler: async (ctx, args) => {
+    const ownerId = await requireOwner(ctx);
+    const source = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.projectId)).first();
+    if (!source || (source.kind ?? "project") !== "project") throw new Error("Choose a regular project to save as a template.");
+    const sourceTasks = (await ctx.db.query("tasks").withIndex("by_owner_project_version", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.projectId).eq("versionId", args.versionId)).collect()).sort((a, b) => a.sortOrder - b.sortOrder);
+    const now = new Date().toISOString();
+    const id = `template-${crypto.randomUUID()}`;
+    const versionId = `version-${id}-1`;
+    const calendarRows = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const exceptionRows = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const idMap = new Map(sourceTasks.map((task) => [task.id, templateTaskId()]));
+    await ctx.db.insert("projects", { ownerId, id, name: args.name.trim() || `${source.name} template`, status: "template", kind: "template", isBuiltin: false, startDate: source.startDate, schedulingDirection: "forward", calendarId: source.calendarId, createdAt: now, updatedAt: now });
+    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now };
+    await ctx.db.insert("planVersions", { ownerId, ...version });
+    const copiedTasks: any[] = [];
+    for (const task of sourceTasks) {
+      const startOffsetDays = workingDateOffset(source.startDate, task.start, source.calendarId, calendarRows, exceptionRows);
+      const copiedTask = {
+        id: idMap.get(task.id)!, projectId: id, parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
+        sortOrder: task.sortOrder, name: task.name, duration: task.duration, durationUnit: task.durationUnit,
+        start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(source.startDate, task.finish, source.calendarId, calendarRows, exceptionRows),
+        isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap), resource: "",
+        percent: 0, notes: task.notes, color: task.color, collapsed: task.collapsed ?? false, versionId,
+        marginPct: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : task.marginPct ?? 0,
+        marginDaysOriginal: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : Math.ceil(Math.max(0, task.duration * (task.durationUnit === "weeks" ? 5 : 1)) * (task.marginPct ?? 0) / 100),
+        marginDaysConsumed: 0,
+      };
+      await ctx.db.insert("tasks", { ownerId, ...copiedTask });
+      copiedTasks.push(copiedTask);
+    }
+    const sourceAssignments = await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const resources = await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const copiedAssignments: any[] = [];
+    for (const assignment of sourceAssignments.filter((item) => idMap.has(item.taskId) && resources.some((resource) => resource.id === item.resourceId))) {
+      const copied = { id: `as-${crypto.randomUUID()}`, taskId: idMap.get(assignment.taskId)!, resourceId: assignment.resourceId };
+      await ctx.db.insert("taskAssignments", { ownerId, ...copied });
+      copiedAssignments.push(copied);
+    }
+    const dependencies = await ctx.db.query("dependencies").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("projectId"), args.projectId)).collect();
+    const copiedDependencies: any[] = [];
+    for (const dependency of dependencies) if (idMap.has(dependency.predecessorId) && idMap.has(dependency.successorId)) {
+      const copied = { id: `dep-${crypto.randomUUID()}`, projectId: id, predecessorId: idMap.get(dependency.predecessorId)!, successorId: idMap.get(dependency.successorId)!, type: dependency.type, lagDays: dependency.lagDays };
+      await ctx.db.insert("dependencies", { ownerId, ...copied });
+      copiedDependencies.push(copied);
+    }
+    return { project: { id, name: args.name.trim() || `${source.name} template`, projectId: id, status: "template", kind: "template", isBuiltin: false, hidden: false, startDate: source.startDate, schedulingDirection: "forward", calendarId: source.calendarId, createdAt: now, updatedAt: now }, version, tasks: copiedTasks, assignments: copiedAssignments, dependencies: copiedDependencies };
+  },
+});
+
+export const createProjectFromTemplate = mutation({
+  args: { templateId: v.union(v.string(), v.null()), name: v.string(), startDate: v.string(), calendarId: v.string(), schedulingDirection: v.string() },
+  handler: async (ctx, args) => {
+    const ownerId = await requireOwner(ctx);
+    const projects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const template = args.templateId ? projects.find((project) => project.id === args.templateId && project.kind === "template" && !project.hidden) : null;
+    if (args.templateId && !template) throw new Error("That template is no longer available.");
+    const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const exceptions = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const defaultCalendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? args.calendarId;
+    const calendarId = template
+      ? (calendars.some((calendar) => calendar.id === template.calendarId) ? template.calendarId : defaultCalendarId)
+      : (calendars.some((calendar) => calendar.id === args.calendarId) ? args.calendarId : defaultCalendarId);
+    const id = `proj-${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    const versionId = `version-${id}-1`;
+    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now };
+    const project = { id, name: args.name.trim() || "Untitled project", status: "active", kind: "project" as const, isBuiltin: false, startDate: args.startDate, schedulingDirection: (args.schedulingDirection === "backward" ? "backward" : "forward"), calendarId, createdAt: now, updatedAt: now };
+    await ctx.db.insert("projects", { ownerId, ...project });
+    await ctx.db.insert("planVersions", { ownerId, ...version });
+    const createdTasks: any[] = [];
+    const createdAssignments: any[] = [];
+    const createdDependencies: any[] = [];
+    let skippedAssignments = 0;
+    const idMap = new Map<string, string>();
+    const sourceTasks = template ? (await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", template.id)).collect()).sort((a, b) => a.sortOrder - b.sortOrder) : [];
+    const templateVersion = template ? (await ctx.db.query("planVersions").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", template.id)).collect()).find((item) => item.isActive) : undefined;
+    const activeSourceTasks = sourceTasks.filter((task) => !task.versionId || task.versionId === templateVersion?.id);
+    activeSourceTasks.forEach((task) => idMap.set(task.id, templateTaskId()));
+    const activeSourceIds = new Set(activeSourceTasks.map((task) => task.id));
+    const resourceRows = await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const assignmentRows = await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    for (const sourceTask of activeSourceTasks) {
+      const taskId = idMap.get(sourceTask.id)!;
+      const startOffsetDays = sourceTask.startOffsetDays ?? workingDateOffset(template!.startDate, sourceTask.start, template!.calendarId, calendars, exceptions);
+      const start = addWorkingDateOffset(args.startDate, startOffsetDays, calendarId, calendars, exceptions);
+      const finishOffsetDays = sourceTask.finishOffsetDays ?? workingDateOffset(template!.startDate, sourceTask.finish, template!.calendarId, calendars, exceptions);
+      const hasChildren = activeSourceTasks.some((task) => task.parentId === sourceTask.id);
+      const duration = hasChildren ? 0 : sourceTask.duration;
+      const finish = hasChildren ? start : finishDateFor(start, duration, sourceTask.durationUnit, calendarId, calendars, exceptions);
+      const marginPct = hasChildren || duration === 0 ? 0 : sourceTask.marginPct ?? 0;
+      const task = {
+        id: taskId, projectId: id, parentId: sourceTask.parentId ? idMap.get(sourceTask.parentId) ?? null : null, sortOrder: sourceTask.sortOrder,
+        name: sourceTask.name, duration, durationUnit: sourceTask.durationUnit, start, finish, isMilestone: duration === 0 && !hasChildren,
+        predecessors: rewritePredecessors(sourceTask.predecessors, idMap), resource: "", percent: 0, notes: sourceTask.notes,
+        color: sourceTask.color, collapsed: sourceTask.collapsed ?? false, versionId, marginPct,
+        marginDaysOriginal: hasChildren || duration === 0 ? 0 : Math.ceil(Math.max(0, duration * (sourceTask.durationUnit === "weeks" ? 5 : 1)) * marginPct / 100), marginDaysConsumed: 0,
+        startOffsetDays, finishOffsetDays,
+      };
+      await ctx.db.insert("tasks", { ownerId, ...task });
+      createdTasks.push(task);
+      for (const assignment of assignmentRows.filter((row) => row.taskId === sourceTask.id)) {
+        if (resourceRows.some((resource) => resource.id === assignment.resourceId)) {
+          const copied = { id: `as-${crypto.randomUUID()}`, taskId, resourceId: assignment.resourceId };
+          await ctx.db.insert("taskAssignments", { ownerId, ...copied });
+          createdAssignments.push(copied);
+        } else skippedAssignments += 1;
+      }
+    }
+    if (template) {
+      const deps = await ctx.db.query("dependencies").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("projectId"), template.id)).collect();
+      for (const dependency of deps) if (activeSourceIds.has(dependency.predecessorId) && activeSourceIds.has(dependency.successorId)) {
+        const copied = { id: `dep-${crypto.randomUUID()}`, projectId: id, predecessorId: idMap.get(dependency.predecessorId)!, successorId: idMap.get(dependency.successorId)!, type: dependency.type, lagDays: dependency.lagDays };
+        await ctx.db.insert("dependencies", { ownerId, ...copied });
+        createdDependencies.push(copied);
+      }
+    }
+    // Roll summary rows up from the leaves toward the root, including nested hierarchies.
+    const depthOf = (task: (typeof createdTasks)[number]) => {
+      let depth = 0;
+      let parentId = task.parentId;
+      const seen = new Set<string>();
+      while (parentId && !seen.has(parentId)) {
+        seen.add(parentId);
+        depth += 1;
+        parentId = createdTasks.find((candidate) => candidate.id === parentId)?.parentId ?? null;
+      }
+      return depth;
+    };
+    const taskRows = await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", id)).collect();
+    const rowsById = new Map(taskRows.map((row) => [row.id, row]));
+    const summaries = createdTasks.filter((task) => createdTasks.some((child) => child.parentId === task.id)).sort((a, b) => depthOf(b) - depthOf(a));
+    for (const summary of summaries) {
+      const children = createdTasks.filter((task) => task.parentId === summary.id);
+      if (!children.length) continue;
+      summary.start = children.reduce((min, task) => task.start < min ? task.start : min, children[0].start);
+      summary.finish = children.reduce((max, task) => task.finish > max ? task.finish : max, children[0].finish);
+      summary.startOffsetDays = workingDateOffset(args.startDate, summary.start, calendarId, calendars, exceptions);
+      summary.finishOffsetDays = workingDateOffset(args.startDate, summary.finish, calendarId, calendars, exceptions);
+      summary.duration = Math.max(1, workingDateOffset(summary.start, summary.finish, calendarId, calendars, exceptions) + (isWorkingDate(summary.finish, calendarId, calendars, exceptions) ? 1 : 0));
+      const row = rowsById.get(summary.id);
+      if (row) await ctx.db.patch(row._id, { start: summary.start, finish: summary.finish, duration: summary.duration, startOffsetDays: summary.startOffsetDays, finishOffsetDays: summary.finishOffsetDays, isMilestone: false, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 });
+    }
+    return { project, version, tasks: createdTasks, assignments: createdAssignments, dependencies: createdDependencies, skippedAssignments };
+  },
+});
+
+export const hideTemplate = mutation({
+  args: { templateId: v.string(), hidden: v.boolean() },
+  handler: async (ctx, args) => {
+    const ownerId = await requireOwner(ctx);
+    const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
+    if (!project || project.kind !== "template") throw new Error("Template not found.");
+    await ctx.db.patch(project._id, { hidden: args.hidden, updatedAt: new Date().toISOString() });
+  },
+});
+
+export const deleteTemplate = mutation({
+  args: { templateId: v.string() },
+  handler: async (ctx, args) => {
+    const ownerId = await requireOwner(ctx);
+    const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
+    if (!project || project.kind !== "template") throw new Error("Template not found.");
+    if (project.isBuiltin) throw new Error("Built-in templates can be hidden, not deleted.");
+    const tasks = await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.templateId)).collect();
+    const taskIds = new Set(tasks.map((task) => task.id));
+    for (const row of tasks) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("dependencies").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("projectId"), args.templateId)).collect()) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect()) if (taskIds.has(row.taskId)) await ctx.db.delete(row._id);
+    for (const row of await ctx.db.query("planVersions").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.templateId)).collect()) await ctx.db.delete(row._id);
+    await ctx.db.delete(project._id);
+  },
+});
 
 export const initializeWorkspace = mutation({
   args: {},
@@ -156,8 +391,8 @@ export const resetTestProject = mutation({
   args: {},
   handler: async (ctx) => {
     const ownerId = await requireOwner(ctx);
-    const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("seedKey"), TEST_SEED_KEY)).first();
-    if (!project) throw new Error("The seeded test project no longer exists.");
+    const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.and(q.eq(q.field("seedKey"), TEST_SEED_KEY), q.eq(q.field("kind"), "project"))).first();
+    if (!project) throw new Error("There is no editable seeded test project to reset.");
     const tasks = await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", TEST_PROJECT_ID)).collect();
     const taskIds = new Set(tasks.map((task) => task.id));
     const dependencies = await ctx.db.query("dependencies").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("projectId"), TEST_PROJECT_ID)).collect();
@@ -179,7 +414,7 @@ export const resetTestProject = mutation({
     for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
     for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
     const producer = (await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect()).find((resource) => resource.name === "M. Alvarez");
-    const resetAssignment = producer ? { id: "as-tp-r2-bouwen", taskId: "5", resourceId: producer.id } : null;
+    const resetAssignment = producer ? { id: "as-tp-r2-bouwen", taskId: "92026005", resourceId: producer.id } : null;
     const producerCalendarId = producer?.calendarId;
     if (resetAssignment) {
       await ctx.db.insert("taskAssignments", { ownerId, ...resetAssignment });
