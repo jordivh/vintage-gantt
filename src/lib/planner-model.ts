@@ -135,7 +135,7 @@ export function resolvePredecessorInput(
   const dependencies: ScheduleDependency[] = [];
   for (const rawPart of trimmed.split(",")) {
     const part = rawPart.trim();
-    const match = part.match(/^(\d+)(FS|SS|FF|SF)?([+-]\\d+)?d?$/i);
+    const match = part.match(displayDependencyPattern);
     if (!part || !match) return { error: `Invalid predecessor “${part || rawPart}”. Use e.g. 3FS+2d.` };
     const predecessorId = displayTasks.get(match[1]);
     if (!predecessorId) return { error: `Task ID ${match[1]} does not exist.` };
@@ -147,67 +147,6 @@ export function resolvePredecessorInput(
   const cycle = findDependencyCycle(candidateTasks, dependenciesForTasks(candidateTasks));
   if (cycle) return { error: `Dependency rejected: circular chain ${cycle.join(" → ")}.` };
   return { value: predecessorText };
-}
-
-/** Converts stored internal task references into the current sequential display IDs. */
-function formatPredecessorsForDisplayLegacy(
-  value: string,
-  tasks: PlannerTask[],
-  displayIds: ReadonlyMap<string, number>,
-): string {
-  const byDisplayId = new Map([...displayIds].map(([id, displayId]) => [String(displayId), id]));
-  return value.split(",").map((part) => {
-    const trimmed = part.trim();
-    if (!trimmed) return "";
-    const resolved = parseDependency(trimmed, tasks)[0];
-    if (resolved) {
-      const displayId = displayIds.get(resolved.predecessorId);
-      if (displayId === undefined) return "";
-      const lag = resolved.lagDays === 0 ? "" : `${resolved.lagDays > 0 ? "+" : ""}${resolved.lagDays}d`;
-      return `${displayId}${resolved.type}${lag}`;
-    }
-    const legacy = trimmed.match(/^(\d+)(FS|SS|FF|SF)?([+-]\\d+)?d?$/i);
-    const predecessorId = legacy ? byDisplayId.get(legacy[1]) : undefined;
-    if (!legacy || !predecessorId) return "";
-    return `${legacy[1]}${legacy[2]?.toUpperCase() ?? "FS"}${legacy[3] ? `${legacy[3]}d` : ""}`;
-  }).filter(Boolean).join(", ");
-}
-
-export function resolvePredecessorInput(
-  value: string,
-  successorId: string,
-  tasks: PlannerTask[],
-  displayIds: ReadonlyMap<string, number>,
-): { value: string; error?: never } | { value?: never; error: string } {
-  const trimmed = value.trim();
-  if (!trimmed) return { value: "" };
-  const displayTasks = new Map([...displayIds].map(([id, displayId]) => [String(displayId), id]));
-  const dependencies: ScheduleDependency[] = [];
-  for (const rawPart of trimmed.split(",")) {
-    const part = rawPart.trim();
-    const match = part.match(/^(\d+)(FS|SS|FF|SF)?([+-]\\d+)?d?$/i);
-    if (!part || !match) return { error: `Invalid predecessor “${part || rawPart}”. Use e.g. 3FS+2d.` };
-    const predecessorId = displayTasks.get(match[1]);
-    if (!predecessorId) return { error: `Task ID ${match[1]} does not exist.` };
-    if (predecessorId === successorId) return { error: "A task cannot depend on itself." };
-    dependencies.push({
-      predecessorId,
-      successorId,
-      type: (match[2]?.toUpperCase() ?? "FS") as DependencyType,
-      lagDays: Number(match[3] ?? 0),
-    });
-  }
-  const candidateTasks = tasks.map((task) => ({
-    ...task,
-    predecessors: task.id === successorId
-      ? dependencies.map((dependency) => `${dependency.predecessorId}${dependency.type}${dependency.lagDays ? `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d` : ""}`).join(", ")
-      : task.predecessors,
-  }));
-  const cycle = findDependencyCycle(candidateTasks, dependenciesForTasks(candidateTasks));
-  if (cycle) return { error: `Dependency rejected: circular chain ${cycle.join(" → ")}.` };
-  return {
-    value: dependencies.map((dependency) => `${dependency.predecessorId}${dependency.type}${dependency.lagDays ? `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d` : ""}`).join(", "),
-  };
 }
 
 export function dependenciesForTasks(items: PlannerTask[]): ScheduleDependency[] {
