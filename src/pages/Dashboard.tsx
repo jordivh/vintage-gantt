@@ -39,7 +39,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyMarginAbsorption, dependenciesForTasks, recalculateTasks, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
+import { applyMarginAbsorption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -48,7 +48,7 @@ type Task = PlannerTask;
 type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 const rowHeight = 42;
-const todayLineDate = "2025-04-17";
+const todayLineDate = isoDate(new Date());
 const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "id", label: "ID", width: 58 },
   { key: "wbs", label: "WBS", width: 70 },
@@ -141,6 +141,7 @@ export default function Dashboard() {
   const [split, setSplit] = useState(58);
   const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [modalTask, setModalTask] = useState<Task | null>(null);
+  const [predecessorError, setPredecessorError] = useState<{ taskId: string; message: string } | null>(null);
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
   const [query, setQuery] = useState("");
@@ -184,6 +185,7 @@ export default function Dashboard() {
   const [pendingCalendarId, setPendingCalendarId] = useState(calendarId);
   const [relinkConfirm, setRelinkConfirm] = useState<{ calendarId: string; projects: number; tasks: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try { localStorage.setItem("vintage-gantt-project-sidebar-collapsed", String(sidebarCollapsed)); } catch { /* storage is optional */ }
@@ -231,27 +233,22 @@ export default function Dashboard() {
     walk(null);
     return visible;
   }, [calculatedTasks, query]);
-  const taskDisplayIds = useMemo(() => {
-    const ordered: Task[] = [];
-    const walk = (parentId: string | null) =>
-      calculatedTasks
-        .filter((task) => task.parentId === parentId)
-        .forEach((task) => {
-          ordered.push(task);
-          walk(task.id);
-        });
-    walk(null);
-    return new Map(ordered.map((task, index) => [task.id, index + 1]));
-  }, [calculatedTasks]);
+  const taskDisplayIds = useMemo(
+    () => new Map(orderTasksForDisplay(calculatedTasks).map((task, index) => [task.id, index + 1])),
+    [calculatedTasks],
+  );
 
   
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
-  const taskTimestamps = tasks.flatMap((task) => [
+  const taskTimestamps = calculatedTasks.flatMap((task) => [
     new Date(`${task.start}T12:00:00`).getTime(),
     new Date(`${task.finish}T12:00:00`).getTime(),
   ]);
-  const earliestTaskDate = taskTimestamps.length ? new Date(Math.min(...taskTimestamps)) : planningAnchor;
-  const latestTaskDate = taskTimestamps.length ? new Date(Math.max(...taskTimestamps)) : planningAnchor;
+  const projectStartDate = taskTimestamps.length ? new Date(Math.min(...taskTimestamps)) : parseDate(activeProject.startDate || todayLineDate);
+  const projectFinishDate = taskTimestamps.length ? new Date(Math.max(...taskTimestamps)) : projectStartDate;
+  const earliestTaskDate = projectStartDate;
+  const latestTaskDate = projectFinishDate;
+  const isTodayInProjectRange = todayLineDate >= dateLabel(projectStartDate) && todayLineDate <= dateLabel(projectFinishDate);
   const timelineStart = new Date(Math.min(earliestTaskDate.getTime(), planningAnchor.getTime()));
   timelineStart.setDate(timelineStart.getDate() - 14);
   const timelineEnd = new Date(Math.max(latestTaskDate.getTime(), planningAnchor.getTime()));
@@ -265,6 +262,13 @@ export default function Dashboard() {
   });
   const dayWidth = zoom === "day" ? 48 : zoom === "week" ? 17 : zoom === "month" ? 9 : 5;
   const timelineWidth = timelineDays.length * dayWidth;
+  useEffect(() => {
+    const scroller = timelineScrollRef.current;
+    if (!scroller || !activeProjectId || !activeVersionId) return;
+    const targetDate = isTodayInProjectRange ? todayLineDate : dateLabel(projectStartDate);
+    const targetOffset = Math.round((parseDate(targetDate).getTime() - timelineStart.getTime()) / 86400000) * dayWidth;
+    scroller.scrollLeft = Math.max(0, targetOffset - dayWidth * 7);
+  }, [activeProjectId, activeVersionId, zoom]);
   const taskById = new Map(calculatedTasks.map((task) => [task.id, task]));
   const isMilestone = (task: Task) => task.duration === 0 && !calculatedTasks.some((candidate) => candidate.parentId === task.id);
   const assignedResources = (taskId: string) => assignments.filter((assignment) => assignment.taskId === taskId).map((assignment) => resources.find((resource) => resource.id === assignment.resourceId)).filter(Boolean);
@@ -332,6 +336,18 @@ export default function Dashboard() {
   };
 
   const updateTask = (id: string, field: ColumnKey, value: string) => {
+    if (field === "predecessors") {
+      const resolved = resolvePredecessorInput(value, id, tasks, taskDisplayIds);
+      if (resolved.error) {
+        setPredecessorError({ taskId: id, message: resolved.error });
+        setEditing(null);
+        return;
+      }
+      setPredecessorError(null);
+      commit(tasks.map((task) => task.id === id ? { ...task, predecessors: resolved.value } : task));
+      setEditing(null);
+      return;
+    }
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
@@ -895,6 +911,8 @@ export default function Dashboard() {
                       const value =
                         column.key === "id"
                           ? String(taskDisplayIds.get(task.id) ?? "")
+                          : column.key === "predecessors"
+                            ? formatPredecessorsForDisplay(task.predecessors, calculatedTasks, taskDisplayIds)
                           : column.key === "wbs"
                             ? getWbs(task, tasks)
                             : column.key === "duration"
@@ -933,7 +951,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${predecessorError?.taskId === task.id && column.key === "predecessors" ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
@@ -948,6 +966,7 @@ export default function Dashboard() {
                             }
                           }}
                         >
+                          {predecessorError?.taskId === task.id && column.key === "predecessors" && <span className="cell-validation-error" role="alert">{predecessorError.message}</span>}
                           {isName && <span className="row-handle"><GripVertical size={13} /></span>}
                           {isName && summary && (
                             <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>
