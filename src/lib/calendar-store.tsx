@@ -174,7 +174,7 @@ interface CalendarStoreValue {
   setTasks: (updater: PlannerTask[] | ((prev: PlannerTask[]) => PlannerTask[])) => void;
   setProjectCalendar: (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => void;
   createProject: (input: { name: string; startDate: string; schedulingDirection: PlanningDirection; calendarId: string }) => string;
-  createProjectFromTemplate: (input: { templateId: string | null; name: string; startDate: string; calendarId: string; schedulingDirection: PlanningDirection }) => Promise<{ id: string; skippedAssignments: number }>;
+  createProjectFromTemplate: (input: { templateId: string | null; name: string; startDate: string; calendarId: string; schedulingDirection: PlanningDirection; includeAssignments?: boolean }) => Promise<{ id: string; skippedAssignments: number }>;
   saveAsTemplate: (projectId: string, versionId: string, name: string) => Promise<void>;
   setTemplateHidden: (templateId: string, hidden: boolean) => Promise<void>;
   deleteTemplate: (templateId: string) => Promise<void>;
@@ -210,7 +210,6 @@ interface CalendarStoreValue {
   setActiveVersion: (versionId: string) => void;
   createPlanVersion: (name: string, resetMargins: boolean) => string;
   deletePlanVersion: (versionId: string) => { ok: boolean; message?: string };
-  resetTestProject: () => Promise<void>;
 }
 
 const CalendarStoreContext = createContext<CalendarStoreValue | null>(null);
@@ -222,7 +221,7 @@ function recalculateProjects(
 ): Record<string, PlannerTask[]> {
   const next: Record<string, PlannerTask[]> = { ...current };
   for (const project of projectList) {
-    if ((project.kind ?? "project") !== "project") continue;
+    if ((project.kind ?? (project.status === "template" ? "template" : "project")) !== "project") continue;
     const tasks = current[project.id];
     if (!tasks?.length) continue;
     const result = recalculateTasks(tasks, {
@@ -251,7 +250,6 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
   const ensureTestProject = useMutation(api.planner.ensureTestProject);
-  const resetTestProjectRemote = useMutation(api.planner.resetTestProject);
   const createProjectFromTemplateRemote = useMutation(api.planner.createProjectFromTemplate);
   const saveAsTemplateRemote = useMutation(api.planner.saveAsTemplate);
   const setTemplateHiddenRemote = useMutation(api.planner.hideTemplate);
@@ -311,8 +309,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setBaselines(state.baselines ?? []);
     setBaselineTasks(state.baselineTasks ?? []);
     setTasksByProject(grouped);
-    const fallback = (state.projects ?? []).filter((project) => project.status === "active" && project.kind !== "template").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? (state.projects ?? []).find((project) => project.status !== "archived" && project.kind !== "template");
-    setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived" && (project.kind ?? "project") === "project") ? current : fallback?.id ?? "");
+    const isRegularProject = (project: ProjectRecord) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project";
+    const fallback = (state.projects ?? []).filter((project) => project.status === "active" && isRegularProject(project)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? (state.projects ?? []).find((project) => project.status !== "archived" && isRegularProject(project));
+    setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived" && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ? current : fallback?.id ?? "");
     hydratedRef.current = true;
     lastServerStateRef.current = remoteState;
   }, [isAuthenticated, remoteState, initializeWorkspace, replaceRemoteState]);
@@ -361,7 +360,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     });
   }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState]);
   const activeProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId && (project.kind ?? "project") === "project") ?? projects.find((project) => (project.kind ?? "project") === "project") ?? {
+    () => projects.find((project) => project.id === activeProjectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? projects.find((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? {
       id: "",
       name: "No project selected",
       calendarId: system.defaultCalendarId,
@@ -412,18 +411,6 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveVersionId(id);
     return id;
   }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
-
-  const resetTestProject = useCallback(async () => {
-    const result = await resetTestProjectRemote({});
-    const reset = result as { projectId: string; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[] };
-    setTasksByProject((current) => ({ ...current, [reset.projectId]: reset.tasks }));
-    setPlanVersions((current) => [...current.filter((version) => version.projectId !== reset.projectId), reset.version]);
-    setActiveVersionId(reset.version.id);
-    setAssignments((current) => [...current.filter((assignment) => !reset.tasks.some((task) => task.id === assignment.taskId)), ...reset.assignments]);
-    setBaselines((current) => current.filter((baseline) => baseline.projectId !== reset.projectId));
-    setBaselineTasks((current) => current.filter((snapshot) => !reset.tasks.some((task) => task.id === snapshot.taskId)));
-    setProjects((current) => current.map((project) => project.id === reset.projectId ? { ...project, name: "TP-R2 — Testproject", status: "active", startDate: "2026-10-05", schedulingDirection: "forward", updatedAt: new Date().toISOString() } : project));
-  }, [resetTestProjectRemote]);
 
   const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
     const versions = planVersions.filter((version) => version.projectId === activeProjectId);
@@ -495,7 +482,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setActiveProject = useCallback((projectId: string) => {
-    if (projects.some((project) => project.id === projectId && project.status !== "archived" && (project.kind ?? "project") === "project")) setActiveProjectId(projectId);
+    if (projects.some((project) => project.id === projectId && project.status !== "archived" && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project")) setActiveProjectId(projectId);
   }, [projects]);
 
   const createProject = useCallback<CalendarStoreValue["createProject"]>((input) => {
@@ -512,7 +499,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createProjectFromTemplate = useCallback<CalendarStoreValue["createProjectFromTemplate"]>(async (input) => {
-    const result = await createProjectFromTemplateRemote(input);
+    const result = await createProjectFromTemplateRemote({ ...input, includeAssignments: input.includeAssignments ?? false });
     const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; skippedAssignments: number };
     setProjects((current) => [...current, created.project]);
     setPlanVersions((current) => [...current, created.version]);
@@ -552,7 +539,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const duplicateProject = useCallback<CalendarStoreValue["duplicateProject"]>((projectId, name) => {
-    const source = projects.find((project) => project.id === projectId);
+    const source = projects.find((project) => project.id === projectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project");
     const id = `proj-${uid()}`;
     const now = new Date().toISOString();
     if (!source) return id;
@@ -564,10 +551,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       ...task,
       id: idMap.get(task.id) ?? task.id,
       parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
-      predecessors: task.predecessors.replace(/\d+/g, (value) => idMap.get(value) ?? value),
+      predecessors: task.predecessors.split(",").map((part) => {
+        const match = part.trim().match(/^(\d+)(.*)$/);
+        return match ? `${idMap.get(match[1]) ?? match[1]}${match[2]}` : part.trim();
+      }).filter(Boolean).join(", "),
     }));
     const copiedAssignments = assignments.filter((assignment) => sourceTasks.some((task) => task.id === assignment.taskId)).map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
-    const copy: ProjectRecord = { ...source, id, name: name.trim() || `${source.name} copy`, status: "template", createdAt: now, updatedAt: now };
+    const copy: ProjectRecord = { ...source, id, name: name.trim() || `${source.name} copy`, status: "active", kind: "project", isBuiltin: false, createdAt: now, updatedAt: now };
     setProjects((current) => [...current, copy]);
     setTasksByProject((current) => ({ ...current, [id]: copiedTasks }));
     setAssignments((current) => [...current, ...copiedAssignments]);
@@ -575,18 +565,22 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [projects, tasksByProject, assignments]);
 
   const archiveProject = useCallback((projectId: string) => {
+    if (!projects.some((project) => project.id === projectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project")) return;
     setProjects((current) => current.map((project) => project.id === projectId ? { ...project, status: "archived", updatedAt: new Date().toISOString() } : project));
-    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active")?.id ?? "");
+    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active" && project.kind !== "template")?.id ?? "");
   }, [activeProjectId, projects]);
 
   const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>((projectId) => {
     const taskCount = (tasksByProject[projectId] ?? []).length;
-    if (projects.length <= 1) return { ok: false, taskCount };
+    const project = projects.find((item) => item.id === projectId);
+    if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "project") return { ok: false, taskCount };
+    const regularProjects = projects.filter((item) => (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
+    if (regularProjects.length <= 1) return { ok: false, taskCount };
     setProjects((current) => current.filter((project) => project.id !== projectId));
     setTasksByProject((current) => { const next = { ...current }; delete next[projectId]; return next; });
     const taskIds = new Set((tasksByProject[projectId] ?? []).map((task) => task.id));
     setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
-    if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId)?.id ?? "");
+    if (activeProjectId === projectId) setActiveProjectId(regularProjects.find((item) => item.id !== projectId && item.status === "active")?.id ?? regularProjects.find((item) => item.id !== projectId)?.id ?? "");
     return { ok: true, taskCount };
   }, [activeProjectId, projects, tasksByProject]);
 
@@ -626,13 +620,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   );
 
   const calendarsUsingProjects = useCallback(
-    (calendarId: string) => projects.filter((project) => (project.kind ?? "project") === "project" && project.calendarId === calendarId),
+    (calendarId: string) => projects.filter((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project" && project.calendarId === calendarId),
     [projects],
   );
 
   const projectsAffectedBy = useCallback(
     (calendarId: string) =>
-      projects.filter((project) => (project.kind ?? "project") === "project" &&
+      projects.filter((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project" &&
         calendarChain(system, project.calendarId).some((calendar) => calendar.id === calendarId),
       ),
     [projects, system],
@@ -673,7 +667,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   const setProjectCalendar = useCallback(
     (projectId: string, calendarId: string, nextSystem?: CalendarSystem) => {
-      if (!projects.some((project) => project.id === projectId && (project.kind ?? "project") === "project")) return;
+      if (!projects.some((project) => project.id === projectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project")) return;
       const effectiveSystem = nextSystem ?? system;
       setSystem(effectiveSystem);
       setProjects((current) =>
@@ -755,7 +749,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       if (calendar.isDefault) {
         return { ok: false, message: "The base calendar cannot be deleted." };
       }
-      const usedBy = projects.filter((project) => (project.kind ?? "project") === "project" && project.calendarId === id);
+      const usedBy = projects.filter((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project" && project.calendarId === id);
       if (usedBy.length) {
         return {
           ok: false,
@@ -830,14 +824,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setActiveVersion,
       createPlanVersion,
       deletePlanVersion,
-      resetTestProject,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion, resetTestProject,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion,
     ],
   );
 

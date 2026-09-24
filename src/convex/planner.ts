@@ -73,8 +73,13 @@ const isWorkingDate = (date: string, calendarId: string, calendars: any[], excep
   const pattern = chain.find((calendar) => calendar.workingDays?.length)?.workingDays ?? [1, 2, 3, 4, 5];
   return pattern.includes(new Date(`${date}T12:00:00`).getDay());
 };
-const addWorkingDateOffset = (date: string, amount: number, calendarId: string, calendars: any[], exceptions: any[]) => {
+const resolveWorkingDate = (date: string, calendarId: string, calendars: any[], exceptions: any[]) => {
   let result = date;
+  while (!isWorkingDate(result, calendarId, calendars, exceptions)) result = dateShift(result, 1);
+  return result;
+};
+const addWorkingDateOffset = (date: string, amount: number, calendarId: string, calendars: any[], exceptions: any[]) => {
+  let result = resolveWorkingDate(date, calendarId, calendars, exceptions);
   const direction = amount < 0 ? -1 : 1;
   let remaining = Math.abs(amount);
   while (remaining > 0) {
@@ -127,7 +132,7 @@ const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now:
   const starterRun = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", STARTER_SEED_KEY)).first();
   if (starterRun) return false;
   const projects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-  const hasRealProject = projects.some((project) => (project.kind ?? "project") === "project");
+  const hasRealProject = projects.some((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project");
   if (!hasRealProject) {
     const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const calendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? "cal-base-belgium";
@@ -140,23 +145,23 @@ const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now:
 
 const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   const executed = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", TEST_SEED_KEY)).first();
-  const keyedRows = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("seedKey"), TEST_SEED_KEY)).collect();
-  const existing = keyedRows.find((project) => project.kind === "template") ?? keyedRows.find((project) => project.id === TEST_PROJECT_ID);
+  const allProjects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+  const keyedRows = allProjects.filter((project) => project.seedKey === TEST_SEED_KEY);
+  const existing = keyedRows.find((project) => project.kind === "template" || project.status === "template")
+    ?? keyedRows.find((project) => project.id === TEST_PROJECT_ID)
+    ?? allProjects.find((project) => project.id === TEST_PROJECT_ID)
+    ?? keyedRows[0];
   const now = new Date().toISOString();
   if (existing) {
-    if (!existing.isBuiltin || existing.status !== "template") await ctx.db.patch(existing._id, { kind: "template", isBuiltin: true, status: "template", updatedAt: now });
+    if (!existing.isBuiltin || existing.status !== "template" || existing.kind !== "template" || existing.seedKey !== TEST_SEED_KEY) await ctx.db.patch(existing._id, { kind: "template", isBuiltin: true, status: "template", seedKey: TEST_SEED_KEY, updatedAt: now });
     if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
     const starterCreated = await ensureStarterProject(ctx, ownerId, now);
     return starterCreated;
   }
-  const legacyRows = keyedRows.filter((project) => project.id !== TEST_PROJECT_ID);
+  const legacyRows = keyedRows;
   for (const legacy of legacyRows) {
-    // Keep any earlier seeded test project and all its plan data intact; reserve TP-R2 for the clean template.
-    await ctx.db.patch(legacy._id, {
-      seedKey: undefined,
-      isBuiltin: false,
-      updatedAt: now,
-    });
+    // Retain older duplicate markers without touching their project or scheduling data.
+    await ctx.db.patch(legacy._id, { seedKey: undefined, updatedAt: now });
   }
   if (executed && !legacyRows.length) {
     // The built-in template was deleted on purpose — it must stay deleted.
@@ -166,31 +171,10 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   const base = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
   const calendarId = base?.id ?? "cal-base-belgium";
   if (!base) await ctx.db.insert("calendars", { ownerId, id: calendarId, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] });
-  const exceptions = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-  const seedExceptions = [
-    { id: "exc-tp-r2-armistice", calendarId, startDate: "2026-11-11", endDate: "2026-11-11", label: "Wapenstilstand", type: "holiday", isWorkingDay: false, source: "import" },
-    { id: "exc-tp-r2-shutdown", calendarId, startDate: "2026-12-24", endDate: "2027-01-01", label: "collectieve sluiting", type: "shutdown", isWorkingDay: false, source: "import" },
-  ];
-  for (const exception of seedExceptions) if (!exceptions.some((item) => item.calendarId === calendarId && item.startDate === exception.startDate && item.endDate === exception.endDate)) await ctx.db.insert("calendarExceptions", { ownerId, ...exception });
-
-  const resources = await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-  let producer: { id: string; calendarId: string } | undefined = resources.find((resource) => resource.name === "M. Alvarez");
-  if (!resources.length) {
-    await ctx.db.insert("calendars", { ownerId, id: "cal-tp-r2-alvarez", name: "M. Alvarez — leave", type: "person", parentCalendarId: calendarId, isDefault: false, workingDays: [1, 2, 3, 4, 5] });
-    await ctx.db.insert("calendars", { ownerId, id: "cal-tp-r2-shaw", name: "E. Shaw — leave", type: "person", parentCalendarId: calendarId, isDefault: false, workingDays: [1, 2, 3, 4, 5] });
-    await ctx.db.insert("resources", { ownerId, id: "res-tp-r2-alvarez", name: "M. Alvarez", role: "Producer", email: "", colour: "#ad6650", hoursPerWeek: 40, isActive: true, calendarId: "cal-tp-r2-alvarez" });
-    await ctx.db.insert("resources", { ownerId, id: "res-tp-r2-shaw", name: "E. Shaw", role: "Permits coordinator", email: "", colour: "#75856c", hoursPerWeek: 40, isActive: true, calendarId: "cal-tp-r2-shaw" });
-    producer = { id: "res-tp-r2-alvarez", calendarId: "cal-tp-r2-alvarez" };
-  }
   await ctx.db.insert("projects", { ownerId, id: TEST_PROJECT_ID, name: "TP-R2 — Testproject", status: "template", kind: "template", isBuiltin: true, startDate: "2026-10-05", schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now, seedKey: TEST_SEED_KEY });
   await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now });
   for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
   for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
-  if (producer) {
-    await ctx.db.insert("taskAssignments", { ownerId, id: "as-tp-r2-bouwen", taskId: "92026005", resourceId: producer.id });
-    const leaveExists = exceptions.some((item) => item.calendarId === producer.calendarId && item.startDate === "2026-10-14" && item.endDate === "2026-10-16");
-    if (producer.calendarId === "cal-tp-r2-alvarez" && !leaveExists) await ctx.db.insert("calendarExceptions", { ownerId, id: "exc-tp-r2-alvarez-leave", calendarId: producer.calendarId, startDate: "2026-10-14", endDate: "2026-10-16", label: "Test leave", type: "leave", isWorkingDay: false, source: "manual" });
-  }
   if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
   await ensureStarterProject(ctx, ownerId, now);
   return true;
@@ -201,8 +185,9 @@ export const saveAsTemplate = mutation({
   handler: async (ctx, args) => {
     const ownerId = await requireOwner(ctx);
     const source = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.projectId)).first();
-    if (!source || (source.kind ?? "project") !== "project") throw new Error("Choose a regular project to save as a template.");
-    const sourceTasks = (await ctx.db.query("tasks").withIndex("by_owner_project_version", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.projectId).eq("versionId", args.versionId)).collect()).sort((a, b) => a.sortOrder - b.sortOrder);
+    if (!source || (source.kind ?? (source.status === "template" ? "template" : "project")) !== "project") throw new Error("Choose a regular project to save as a template.");
+    const sourceTasks = (await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.projectId)).collect()).filter((task) => !task.versionId || task.versionId === args.versionId).sort((a, b) => a.sortOrder - b.sortOrder);
+    if (!sourceTasks.length) throw new Error("Add tasks to this plan version before saving it as a template.");
     const now = new Date().toISOString();
     const id = `template-${crypto.randomUUID()}`;
     const versionId = `version-${id}-1`;
@@ -214,11 +199,12 @@ export const saveAsTemplate = mutation({
     await ctx.db.insert("planVersions", { ownerId, ...version });
     const copiedTasks: any[] = [];
     for (const task of sourceTasks) {
-      const startOffsetDays = workingDateOffset(source.startDate, task.start, source.calendarId, calendarRows, exceptionRows);
+      const templateAnchorDate = resolveWorkingDate(source.startDate, source.calendarId, calendarRows, exceptionRows);
+      const startOffsetDays = workingDateOffset(templateAnchorDate, task.start, source.calendarId, calendarRows, exceptionRows);
       const copiedTask = {
         id: idMap.get(task.id)!, projectId: id, parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
         sortOrder: task.sortOrder, name: task.name, duration: task.duration, durationUnit: task.durationUnit,
-        start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(source.startDate, task.finish, source.calendarId, calendarRows, exceptionRows),
+        start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(templateAnchorDate, task.finish, source.calendarId, calendarRows, exceptionRows),
         isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap), resource: "",
         percent: 0, notes: task.notes, color: task.color, collapsed: task.collapsed ?? false, versionId,
         marginPct: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : task.marginPct ?? 0,
@@ -228,10 +214,11 @@ export const saveAsTemplate = mutation({
       await ctx.db.insert("tasks", { ownerId, ...copiedTask });
       copiedTasks.push(copiedTask);
     }
+    const sourceTaskIds = new Set(sourceTasks.map((task) => task.id));
     const sourceAssignments = await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const resources = await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const copiedAssignments: any[] = [];
-    for (const assignment of sourceAssignments.filter((item) => idMap.has(item.taskId) && resources.some((resource) => resource.id === item.resourceId))) {
+    for (const assignment of sourceAssignments.filter((item) => sourceTaskIds.has(item.taskId) && idMap.has(item.taskId) && resources.some((resource) => resource.id === item.resourceId))) {
       const copied = { id: `as-${crypto.randomUUID()}`, taskId: idMap.get(assignment.taskId)!, resourceId: assignment.resourceId };
       await ctx.db.insert("taskAssignments", { ownerId, ...copied });
       copiedAssignments.push(copied);
@@ -243,16 +230,16 @@ export const saveAsTemplate = mutation({
       await ctx.db.insert("dependencies", { ownerId, ...copied });
       copiedDependencies.push(copied);
     }
-    return { project: { id, name: args.name.trim() || `${source.name} template`, projectId: id, status: "template", kind: "template", isBuiltin: false, hidden: false, startDate: source.startDate, schedulingDirection: "forward", calendarId: source.calendarId, createdAt: now, updatedAt: now }, version, tasks: copiedTasks, assignments: copiedAssignments, dependencies: copiedDependencies };
+    return { project: { id, name: args.name.trim() || `${source.name} template`, status: "template", kind: "template", isBuiltin: false, hidden: false, startDate: source.startDate, schedulingDirection: "forward", calendarId: source.calendarId, createdAt: now, updatedAt: now }, version, tasks: copiedTasks, assignments: copiedAssignments, dependencies: copiedDependencies };
   },
 });
 
 export const createProjectFromTemplate = mutation({
-  args: { templateId: v.union(v.string(), v.null()), name: v.string(), startDate: v.string(), calendarId: v.string(), schedulingDirection: v.string() },
+  args: { templateId: v.union(v.string(), v.null()), name: v.string(), startDate: v.string(), calendarId: v.string(), schedulingDirection: v.string(), includeAssignments: v.boolean() },
   handler: async (ctx, args) => {
     const ownerId = await requireOwner(ctx);
     const projects = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-    const template = args.templateId ? projects.find((project) => project.id === args.templateId && project.kind === "template" && !project.hidden) : null;
+    const template = args.templateId ? projects.find((project) => project.id === args.templateId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "template" && !project.hidden) : null;
     if (args.templateId && !template) throw new Error("That template is no longer available.");
     const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const exceptions = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
@@ -279,11 +266,13 @@ export const createProjectFromTemplate = mutation({
     const activeSourceIds = new Set(activeSourceTasks.map((task) => task.id));
     const resourceRows = await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const assignmentRows = await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+    const projectAnchorDate = resolveWorkingDate(args.startDate, calendarId, calendars, exceptions);
+    const templateAnchorDate = template ? resolveWorkingDate(template.startDate, template.calendarId, calendars, exceptions) : "";
     for (const sourceTask of activeSourceTasks) {
       const taskId = idMap.get(sourceTask.id)!;
-      const startOffsetDays = sourceTask.startOffsetDays ?? workingDateOffset(template!.startDate, sourceTask.start, template!.calendarId, calendars, exceptions);
-      const start = addWorkingDateOffset(args.startDate, startOffsetDays, calendarId, calendars, exceptions);
-      const finishOffsetDays = sourceTask.finishOffsetDays ?? workingDateOffset(template!.startDate, sourceTask.finish, template!.calendarId, calendars, exceptions);
+      const startOffsetDays = sourceTask.startOffsetDays ?? workingDateOffset(templateAnchorDate, sourceTask.start, template!.calendarId, calendars, exceptions);
+      const start = addWorkingDateOffset(projectAnchorDate, startOffsetDays, calendarId, calendars, exceptions);
+      const finishOffsetDays = sourceTask.finishOffsetDays ?? workingDateOffset(templateAnchorDate, sourceTask.finish, template!.calendarId, calendars, exceptions);
       const hasChildren = activeSourceTasks.some((task) => task.parentId === sourceTask.id);
       const duration = hasChildren ? 0 : sourceTask.duration;
       const finish = hasChildren ? start : finishDateFor(start, duration, sourceTask.durationUnit, calendarId, calendars, exceptions);
@@ -291,6 +280,7 @@ export const createProjectFromTemplate = mutation({
       const task = {
         id: taskId, projectId: id, parentId: sourceTask.parentId ? idMap.get(sourceTask.parentId) ?? null : null, sortOrder: sourceTask.sortOrder,
         name: sourceTask.name, duration, durationUnit: sourceTask.durationUnit, start, finish, isMilestone: duration === 0 && !hasChildren,
+
         predecessors: rewritePredecessors(sourceTask.predecessors, idMap), resource: "", percent: 0, notes: sourceTask.notes,
         color: sourceTask.color, collapsed: sourceTask.collapsed ?? false, versionId, marginPct,
         marginDaysOriginal: hasChildren || duration === 0 ? 0 : Math.ceil(Math.max(0, duration * (sourceTask.durationUnit === "weeks" ? 5 : 1)) * marginPct / 100), marginDaysConsumed: 0,
@@ -298,7 +288,7 @@ export const createProjectFromTemplate = mutation({
       };
       await ctx.db.insert("tasks", { ownerId, ...task });
       createdTasks.push(task);
-      for (const assignment of assignmentRows.filter((row) => row.taskId === sourceTask.id)) {
+      for (const assignment of args.includeAssignments ? assignmentRows.filter((row) => row.taskId === sourceTask.id) : []) {
         if (resourceRows.some((resource) => resource.id === assignment.resourceId)) {
           const copied = { id: `as-${crypto.randomUUID()}`, taskId, resourceId: assignment.resourceId };
           await ctx.db.insert("taskAssignments", { ownerId, ...copied });
@@ -334,8 +324,8 @@ export const createProjectFromTemplate = mutation({
       if (!children.length) continue;
       summary.start = children.reduce((min, task) => task.start < min ? task.start : min, children[0].start);
       summary.finish = children.reduce((max, task) => task.finish > max ? task.finish : max, children[0].finish);
-      summary.startOffsetDays = workingDateOffset(args.startDate, summary.start, calendarId, calendars, exceptions);
-      summary.finishOffsetDays = workingDateOffset(args.startDate, summary.finish, calendarId, calendars, exceptions);
+      summary.startOffsetDays = workingDateOffset(projectAnchorDate, summary.start, calendarId, calendars, exceptions);
+      summary.finishOffsetDays = workingDateOffset(projectAnchorDate, summary.finish, calendarId, calendars, exceptions);
       summary.duration = Math.max(1, workingDateOffset(summary.start, summary.finish, calendarId, calendars, exceptions) + (isWorkingDate(summary.finish, calendarId, calendars, exceptions) ? 1 : 0));
       const row = rowsById.get(summary.id);
       if (row) await ctx.db.patch(row._id, { start: summary.start, finish: summary.finish, duration: summary.duration, startOffsetDays: summary.startOffsetDays, finishOffsetDays: summary.finishOffsetDays, isMilestone: false, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 });
@@ -349,7 +339,7 @@ export const hideTemplate = mutation({
   handler: async (ctx, args) => {
     const ownerId = await requireOwner(ctx);
     const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
-    if (!project || project.kind !== "template") throw new Error("Template not found.");
+    if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "template") throw new Error("Template not found.");
     await ctx.db.patch(project._id, { hidden: args.hidden, updatedAt: new Date().toISOString() });
   },
 });
@@ -359,7 +349,7 @@ export const deleteTemplate = mutation({
   handler: async (ctx, args) => {
     const ownerId = await requireOwner(ctx);
     const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
-    if (!project || project.kind !== "template") throw new Error("Template not found.");
+    if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "template") throw new Error("Template not found.");
     if (project.isBuiltin) throw new Error("Built-in templates can be hidden, not deleted.");
     const tasks = await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", args.templateId)).collect();
     const taskIds = new Set(tasks.map((task) => task.id));
@@ -384,50 +374,6 @@ export const ensureTestProject = mutation({
   handler: async (ctx) => {
     const ownerId = await requireOwner(ctx);
     return await seedTestProject(ctx, ownerId);
-  },
-});
-
-export const resetTestProject = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const ownerId = await requireOwner(ctx);
-    const project = await ctx.db.query("projects").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.and(q.eq(q.field("seedKey"), TEST_SEED_KEY), q.eq(q.field("kind"), "project"))).first();
-    if (!project) throw new Error("There is no editable seeded test project to reset.");
-    const tasks = await ctx.db.query("tasks").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", TEST_PROJECT_ID)).collect();
-    const taskIds = new Set(tasks.map((task) => task.id));
-    const dependencies = await ctx.db.query("dependencies").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.eq(q.field("projectId"), TEST_PROJECT_ID)).collect();
-    const assignments = await ctx.db.query("taskAssignments").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).filter((q) => q.or(...[...taskIds].map((id) => q.eq(q.field("taskId"), id)))).collect();
-    const versions = await ctx.db.query("planVersions").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", TEST_PROJECT_ID)).collect();
-    const baselines = await ctx.db.query("baselines").withIndex("by_owner_project", (q) => q.eq("ownerId", ownerId as never).eq("projectId", TEST_PROJECT_ID)).collect();
-    for (const row of tasks) await ctx.db.delete(row._id);
-    for (const row of dependencies) await ctx.db.delete(row._id);
-    for (const row of assignments) await ctx.db.delete(row._id);
-    for (const row of versions) await ctx.db.delete(row._id);
-    for (const row of baselines) await ctx.db.delete(row._id);
-    const baselineTasks = await ctx.db.query("baselineTasks").withIndex("by_owner_baseline", (q) => q.eq("ownerId", ownerId as never)).collect();
-    for (const row of baselineTasks.filter((item) => baselines.some((baseline) => baseline.id === item.baselineId) || taskIds.has(item.taskId))) await ctx.db.delete(row._id);
-    const now = new Date().toISOString();
-    const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-    const baseCalendar = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
-    await ctx.db.patch(project._id, { name: "TP-R2 — Testproject", status: "template", kind: "template", isBuiltin: true, startDate: "2026-10-05", schedulingDirection: "forward", calendarId: baseCalendar?.id ?? project.calendarId, updatedAt: now });
-    await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now });
-    for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
-    for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
-    const producer = (await ctx.db.query("resources").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect()).find((resource) => resource.name === "M. Alvarez");
-    const resetAssignment = producer ? { id: "as-tp-r2-bouwen", taskId: "92026005", resourceId: producer.id } : null;
-    const producerCalendarId = producer?.calendarId;
-    if (resetAssignment) {
-      await ctx.db.insert("taskAssignments", { ownerId, ...resetAssignment });
-      const leaveRows = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
-      for (const row of leaveRows.filter((item) => item.id === "exc-tp-r2-alvarez-leave")) await ctx.db.delete(row._id);
-      await ctx.db.insert("calendarExceptions", { ownerId, id: "exc-tp-r2-alvarez-leave", calendarId: producer?.calendarId!, startDate: "2026-10-14", endDate: "2026-10-16", label: "Test leave", type: "leave", isWorkingDay: false, source: "manual" });
-    }
-    return {
-      projectId: TEST_PROJECT_ID,
-      version: { id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now },
-      tasks: testTasks(TEST_VERSION_ID),
-      assignments: resetAssignment ? [resetAssignment] : [],
-    };
   },
 });
 
