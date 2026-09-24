@@ -231,7 +231,20 @@ export default function Dashboard() {
     walk(null);
     return visible;
   }, [calculatedTasks, query]);
+  const taskDisplayIds = useMemo(() => {
+    const ordered: Task[] = [];
+    const walk = (parentId: string | null) =>
+      calculatedTasks
+        .filter((task) => task.parentId === parentId)
+        .forEach((task) => {
+          ordered.push(task);
+          walk(task.id);
+        });
+    walk(null);
+    return new Map(ordered.map((task, index) => [task.id, index + 1]));
+  }, [calculatedTasks]);
 
+  
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
   const taskTimestamps = tasks.flatMap((task) => [
     new Date(`${task.start}T12:00:00`).getTime(),
@@ -881,7 +894,7 @@ export default function Dashboard() {
                     .map((column) => {
                       const value =
                         column.key === "id"
-                          ? task.id
+                          ? String(taskDisplayIds.get(task.id) ?? "")
                           : column.key === "wbs"
                             ? getWbs(task, tasks)
                             : column.key === "duration"
