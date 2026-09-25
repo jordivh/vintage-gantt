@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { CalendarDays, Check, ChevronLeft, ChevronRight, LogOut, Pencil, Plus, Trash2, UserRound, X } from "lucide-react";
+import { CalendarDays, Check, ChevronLeft, ChevronRight, LogOut, Plus, Trash2, UserRound } from "lucide-react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
 import { useCalendarStore, type LeaveType, type ResourceRecord } from "@/lib/calendar-store";
-import { parseIsoDate, resolveWorkingDay, WEEKDAY_LABELS, WEEK_ORDER, type Weekday } from "@/lib/scheduling-engine";
+import { monthCells, parseIsoDate, resolveWorkingDay, WEEKDAY_LABELS, WEEK_ORDER, type Weekday } from "@/lib/scheduling-engine";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -14,12 +14,6 @@ const dayCount = (start: string, end: string) => Math.floor((parseIsoDate(end).g
 const scheduleLabel = (days: Weekday[]) => {
   if (days.length === 5 && days.every((day) => [1, 2, 3, 4, 5].includes(day))) return "Mon–Fri";
   return days.length ? days.map((day) => WEEKDAY_LABELS[day].slice(0, 3)).join(", ") : "No working days";
-};
-const monthCells = (year: number, month: number) => {
-  const first = new Date(year, month, 1, 12);
-  const count = new Date(year, month + 1, 0, 12).getDate();
-  const leading = (first.getDay() + 6) % 7;
-  return [...Array.from({ length: leading }, () => null), ...Array.from({ length: count }, (_, i) => `${year}-${String(month + 1).padStart(2, "0")}-${String(i + 1).padStart(2, "0")}`)];
 };
 
 export default function Resources() {

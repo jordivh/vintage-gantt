@@ -51,9 +51,6 @@ export function orderTasksForDisplay<T extends { id: string; parentId?: string |
 const dependencySuffixPattern = /^(FS|SS|FF|SF)?([+-]\d+)?d?$/i;
 const displayDependencyPattern = /^(\d+)(FS|SS|FF|SF)?([+-]\d+)?d?$/i;
 
-const serializeDependency = (dependency: ScheduleDependency) =>
-  `${dependency.predecessorId}${dependency.type}${dependency.lagDays ? `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d` : ""}`;
-
 const parseDependencyPart = (part: string, tasks: { id: string }[]): ScheduleDependency | null => {
   const predecessor = [...tasks].sort((left, right) => right.id.length - left.id.length).find((task) =>
     part.startsWith(task.id) && dependencySuffixPattern.test(part.slice(task.id.length)),
@@ -72,29 +69,6 @@ const parseDependencyPart = (part: string, tasks: { id: string }[]): ScheduleDep
 /** Parses stored predecessor strings into dependencies referencing internal task IDs. */
 export function parseDependency(value: string, tasks: { id: string }[]): ScheduleDependency[] {
   return value.split(",").map((part) => parseDependencyPart(part.trim(), tasks)).filter((dependency): dependency is ScheduleDependency => Boolean(dependency));
-}
-
-/** Converts legacy display-ID references into stable internal-ID references. */
-export function migrateLegacyPredecessors(tasks: PlannerTask[]): PlannerTask[] {
-  const ordered = orderTasksForDisplay(tasks);
-  return tasks.map((task) => ({
-    ...task,
-    predecessors: task.predecessors.split(",").map((rawPart) => {
-      const part = rawPart.trim();
-      if (!part) return "";
-      const existing = parseDependencyPart(part, tasks);
-      if (existing) return serializeDependency(existing);
-      const legacy = part.match(displayDependencyPattern);
-      const predecessor = legacy ? ordered[Number(legacy[1]) - 1] : undefined;
-      if (!legacy || !predecessor) return "";
-      return serializeDependency({
-        predecessorId: predecessor.id,
-        successorId: task.id,
-        type: (legacy[2]?.toUpperCase() ?? "FS") as DependencyType,
-        lagDays: Number(legacy[3] ?? 0),
-      });
-    }).filter(Boolean).join(", "),
-  }));
 }
 
 /** Converts stored internal task references into the current sequential display IDs. */

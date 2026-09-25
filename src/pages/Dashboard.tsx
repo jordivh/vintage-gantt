@@ -13,7 +13,6 @@ import {
   FileSpreadsheet,
   MoreHorizontal,
   RefreshCw,
-  SlidersHorizontal,
   Diamond,
   Download,
   GripVertical,
@@ -23,8 +22,6 @@ import {
   Plus,
   Redo2,
   Search,
-  Settings2,
-  Sparkles,
   Trash2,
   Undo2,
   UserRound,
@@ -120,7 +117,6 @@ export default function Dashboard() {
     activeVersionId,
     setActiveVersion,
     createPlanVersion,
-    deletePlanVersion,
     createBaseline,
     deleteBaseline,
     baselines,
@@ -344,7 +340,7 @@ export default function Dashboard() {
         return;
       }
       setPredecessorError(null);
-      commit(tasks.map((task) => task.id === id ? { ...task, predecessors: resolved.value } : task));
+      commit(tasks.map((task) => task.id === id ? { ...task, predecessors: resolved.value ?? "" } : task));
       setEditing(null);
       return;
     }

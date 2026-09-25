@@ -1,4 +1,3 @@
-import { motion } from "framer-motion";
 import { ArrowRight, CalendarDays, Check, Layers3, MoveRight } from "lucide-react";
 import { Link } from "react-router";
 

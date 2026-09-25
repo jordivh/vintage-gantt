@@ -17,6 +17,7 @@ import {
   WEEKDAY_LABELS,
   WEEK_ORDER,
   calendarChain,
+  monthCells,
   parseIsoDate,
   resolveWorkingDay,
   type CalendarException,
@@ -51,20 +52,6 @@ const formatDate = (iso: string) =>
 
 const formatRange = (start: string, end: string) =>
   start === end ? formatDate(start) : `${formatDate(start)} → ${formatDate(end)}`;
-
-const isoOf = (year: number, month: number, day: number) =>
-  `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-
-/** Monday-first cells for one month, padded with nulls. */
-function monthCells(year: number, month: number): (string | null)[] {
-  const first = new Date(year, month, 1, 12);
-  const daysInMonth = new Date(year, month + 1, 0, 12).getDate();
-  const lead = (first.getDay() + 6) % 7;
-  return [
-    ...Array.from({ length: lead }, () => null),
-    ...Array.from({ length: daysInMonth }, (_, index) => isoOf(year, month, index + 1)),
-  ];
-}
 
 export default function Calendars() {
   const { user, signOut } = useAuth();

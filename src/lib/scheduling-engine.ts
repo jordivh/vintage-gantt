@@ -84,6 +84,19 @@ export const isoDate = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 export const parseIsoDate = (value: string) => new Date(`${value}T12:00:00`);
 
+/** Returns Monday-first date cells for one month, padded with nulls. */
+export function monthCells(year: number, month: number): (string | null)[] {
+  const first = new Date(year, month, 1, 12);
+  const daysInMonth = new Date(year, month + 1, 0, 12).getDate();
+  const lead = (first.getDay() + 6) % 7;
+  return [
+    ...Array.from({ length: lead }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) =>
+      `${year}-${String(month + 1).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
+    ),
+  ];
+}
+
 const shiftDays = (value: string, amount: number) => {
   const date = parseIsoDate(value);
   date.setDate(date.getDate() + amount);
