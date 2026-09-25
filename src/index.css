@@ -126,7 +126,7 @@
 .overflow-popover button:disabled { opacity: .4; }
 .overflow-popover .danger { color: #9a4f3d; }
 .responsive-task-actions { display: none; }
-.margin-buffer { position: absolute; right: 0; top: 0; bottom: 0; background: rgba(245,220,155,.6); border-left: 1px dashed rgba(112,80,48,.65); z-index: 1; pointer-events: none; }
+.margin-zone { position: absolute; left: 100%; top: 0; bottom: 0; border: 1px dashed rgba(112,80,48,.7); border-left: 0; background: repeating-linear-gradient(45deg, rgba(245,220,155,.8) 0 4px, rgba(219,188,133,.8) 4px 8px); z-index: 1; pointer-events: none; }
 @media (max-width: 1100px) { .toolbar-zoom { display: none; } .toolbar-zoom-select { display: inline-block; } .task-actions .icon-button { display: none; } .responsive-task-actions { display: block; } .context-selectors { margin-right: 8px; } }
 @media (max-width: 800px) { .planner-topbar, .project-toolbar { padding-left: 12px; padding-right: 12px; } .toolbar-left .tool-button:not(.primary), .toolbar-right .search-box { display: none; } .save-state { display: none; } .grid-pane { width: 72% !important; } .timeline-controls { right: 5px; } .statusbar { padding: 0 12px; gap: 8px; } .statusbar span:last-child { display: none; } }
 

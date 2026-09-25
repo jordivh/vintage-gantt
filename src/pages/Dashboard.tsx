@@ -34,11 +34,12 @@ import {
   addWorkingDays,
   findDependencyCycle,
   isoDate,
+  remainingMarginDays,
   resolveWorkingDay,
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyMarginAbsorption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
+import { applyMarginConsumption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -170,7 +171,8 @@ export default function Dashboard() {
   });
   const [viewOpen, setViewOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
-  const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") === "true"; } catch { return false; } });
+  // Margin occupies real time, so its zone is drawn on the timeline by default.
+  const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") !== "false"; } catch { return true; } });
   const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
   useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns-v2", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -350,8 +352,8 @@ export default function Dashboard() {
     }
     setHistory((items) => [...items.slice(-29), tasks]);
     setFuture([]);
-    const absorbed = applyMarginAbsorption(tasks, normalized, system, calendarId, manuallyAnchoredId);
-    recalculate(absorbed, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
+    const consumed = applyMarginConsumption(tasks, normalized);
+    recalculate(consumed, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
     return true;
   };
 
@@ -658,7 +660,13 @@ export default function Dashboard() {
       .flatMap((dependency) => {
         const predecessor = taskById.get(dependency.predecessorId);
         if (!predecessor || !visibleTasks.some((task) => task.id === predecessor.id)) return [];
-        const x1 = dateOffset(predecessor.start) + barWidth(predecessor);
+        // The link leaves the end of the predecessor's slot, so a successor that
+        // starts after the margin zone is drawn from where it may actually start.
+        const predecessorMargin = remainingMarginDays(predecessor);
+        const marginZoneWidth = predecessorMargin > 0
+          ? dateOffset(addWorkingDays(predecessor.finish, predecessorMargin, calendarId, system)) - dateOffset(predecessor.finish)
+          : 0;
+        const x1 = dateOffset(predecessor.start) + barWidth(predecessor) + marginZoneWidth;
         const x2 = dateOffset(successor.start);
         const y1 = taskTop(predecessor.id) + rowHeight / 2;
         const y2 = taskTop(successor.id) + rowHeight / 2;
@@ -748,7 +756,7 @@ export default function Dashboard() {
           <div className="toolbar-popover-wrap"><button className="tool-button quiet" onClick={() => { setViewOpen((open) => !open); setOverflowOpen(false); }}><Eye size={15} /> View</button>{viewOpen && <div className="toolbar-popover view-popover" onClick={(event) => event.stopPropagation()}>
             <div className="popover-heading"><b>VIEW</b><button onClick={() => setViewOpen(false)}><X size={14} /></button></div>
             <label><input type="checkbox" checked={showCriticalPath} onChange={(event) => setShowCriticalPath(event.target.checked)} /> Critical path</label>
-            <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margins on bars</label>
+            <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margin zones</label>
             <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Baseline bars</label>
             <div className="popover-subheading">COLUMNS</div>
             {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
@@ -1161,7 +1169,7 @@ export default function Dashboard() {
                   {showBaselineBars && activeBaselineId && baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id) && <span className="baseline-bar" style={{ left: dateOffset(baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start), width: barWidth({ ...task, start: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.startDate ?? task.start, finish: baselineTasks.find((snapshot) => snapshot.baselineId === activeBaselineId && snapshot.taskId === task.id)?.finishDate ?? task.finish }) }} title="Baseline" />}
                   <div
                     className={`task-bar ${showCriticalPath && task.isCritical ? "critical-bar" : isMilestone(task) ? "milestone" : task.parentId === null ? "summary-bar" : `bar-${task.color}`}`}
-                    title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}${task.marginDaysOriginal ? ` · Margin ${task.marginDaysConsumed ?? 0} of ${task.marginDaysOriginal} d consumed` : ""}`}
+                    title={`${task.name} · ${formatDate(task.start)} – ${formatDate(task.finish)}${remainingMarginDays(task) > 0 ? ` + ${remainingMarginDays(task)} d margin` : ""}${task.marginDaysConsumed ? ` · ${task.marginDaysConsumed} of ${task.marginDaysOriginal} d consumed` : ""}`}
                     style={{
                       left:
                         dateOffset(
@@ -1195,7 +1203,11 @@ export default function Dashboard() {
                         <span className="bar-grip right" onPointerDown={(event) => beginBarResize(event, task, "finish")} />
                       </>
                     )}
-                    {showMarginsOnBars && !isMilestone(task) && (task.marginDaysOriginal ?? 0) > 0 && <span className="margin-buffer" style={{ width: `${Math.min(100, Math.max(0, ((task.marginDaysOriginal ?? 0) - (task.marginDaysConsumed ?? 0)) / (task.marginDaysOriginal ?? 1)) * 100)}%` }} title={`Remaining margin: ${Math.max(0, (task.marginDaysOriginal ?? 0) - (task.marginDaysConsumed ?? 0))} d`} />}
+{showMarginsOnBars && !isMilestone(task) && !tasks.some((item) => item.parentId === task.id) && remainingMarginDays(task) > 0 && (() => {
+                      const remaining = remainingMarginDays(task);
+                      const zoneEnd = addWorkingDays(task.finish, remaining, calendarId, system);
+                      return <span className="margin-zone" style={{ width: dateOffset(zoneEnd) - dateOffset(task.finish) }} title={`${task.name} · margin zone · ${remaining} d remaining`} />;
+                    })()}
                     {isMilestone(task) && <Diamond size={18} fill="currentColor" />}
                   </div>
                 </div>

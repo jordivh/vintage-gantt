@@ -3,6 +3,7 @@ import {
   durationInWorkingDays,
   earliestDependencyStart,
   findDependencyCycle,
+  remainingMarginDays,
   rollupSummary,
   scheduleTasks,
   type CalendarSystem,
@@ -227,8 +228,16 @@ export function calculateCriticalPath(
   const dependencies = dependenciesForTasks(tasks);
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const duration = (task: PlannerTask) => Math.max(1, durationInWorkingDays({ ...task, isMilestone: task.duration === 0 }));
+  // Margin occupies real time: a task's slot is its work plus its remaining
+  // reserve, and that slot is what the network schedules. The reserve is counted
+  // here and nowhere else, so it is never added twice.
+  const slotDuration = (task: PlannerTask) =>
+    summaryIds.has(task.id) ? duration(task) : duration(task) + remainingMarginDays(task);
   const projectStart = tasks.reduce((earliest, task) => !earliest || task.start < earliest ? task.start : earliest, "");
   if (!projectStart) return new Map();
+  const summaryIds = new Set(
+    tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id),
+  );
   const incoming = new Map<string, ScheduleDependency[]>();
   const outgoing = new Map<string, ScheduleDependency[]>();
   for (const dependency of dependencies) {
@@ -250,9 +259,6 @@ export function calculateCriticalPath(
     order.push(task);
   };
   tasks.forEach(visit);
-  const summaryIds = new Set(
-    tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id),
-  );
   const early = new Map<string, { start: number; finish: number }>();
   for (const task of order) {
     // A task that was placed manually (dragged, or planned later than its
@@ -275,7 +281,7 @@ export function calculateCriticalPath(
             : predecessor.finish + lag + 1;
       start = Math.max(start, candidate);
     }
-    early.set(task.id, { start, finish: start + duration(task) - 1 });
+    early.set(task.id, { start, finish: start + slotDuration(task) - 1 });
   }
   // Float is measured against the finish of the *work* in the plan. Summary rows
   // and milestones are markers, not work: a terminal milestone is placed one
@@ -296,16 +302,21 @@ export function calculateCriticalPath(
       if (!successor) continue;
       const successorTask = byId.get(dependency.successorId);
       if (!successorTask) continue;
+      // Mirror of the forward rules. FF and SF hang off the successor's work
+      // finish, so its own reserve is taken out of its slot end exactly once.
+      const successorMargin = summaryIds.has(successorTask.id) ? 0 : remainingMarginDays(successorTask);
+      const successorWorkFinish = successor.finish - successorMargin;
+      const lag = dependency.lagDays;
       const candidate = dependency.type === "SS"
-        ? successor.start - dependency.lagDays + duration(task) - 1
+        ? successor.start - lag + slotDuration(task) - 1
         : dependency.type === "FF"
-          ? successor.finish - dependency.lagDays
+          ? successorWorkFinish - lag
           : dependency.type === "SF"
-            ? successor.finish - dependency.lagDays
-            : successor.start - dependency.lagDays - 1;
+            ? successorWorkFinish - lag + slotDuration(task) - 1
+            : successor.start - lag - 1;
       finish = Math.min(finish, candidate);
     }
-    late.set(task.id, { finish, start: finish - duration(task) + 1 });
+    late.set(task.id, { finish, start: finish - slotDuration(task) + 1 });
   }
   const result = new Map<string, CriticalPathTask>();
   for (const task of tasks) {
@@ -334,37 +345,40 @@ export function calculateCriticalPath(
   return result;
 }
 
-export function applyMarginAbsorption(
-  previous: PlannerTask[],
-  next: PlannerTask[],
-  system: CalendarSystem,
-  projectCalendarId: string | undefined,
-  changedTaskId?: string,
-): PlannerTask[] {
-  if (!changedTaskId) return next;
-  const before = previous.find((task) => task.id === changedTaskId);
-  const after = next.find((task) => task.id === changedTaskId);
-  if (!before || !after || before.parentId !== after.parentId) return next;
-  const calendarId = after.calendarId ?? projectCalendarId;
-  const delay = after.finish > before.finish
-    ? Math.max(0, workingDayDistance(before.finish, after.finish, calendarId, system))
-    : 0;
-  const original = Math.ceil(Math.max(0, durationInWorkingDays({ ...after, isMilestone: after.duration === 0 })) * Math.max(0, after.marginPct ?? before.marginPct ?? 0) / 100);
-  const previousConsumed = Math.max(0, before.marginDaysConsumed ?? 0);
-  const consumed = after.finish < before.finish
-    ? Math.max(0, Math.min(original, previousConsumed - workingDayDistance(after.finish, before.finish, calendarId, system)))
-    : Math.min(original, previousConsumed + delay);
-  // Margin records how much of a task's buffer a delay consumed, but it is
-  // bookkeeping only: it never moves a task and never delays a successor.
-  return next.map((task) => task.id === changedTaskId
-    ? { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed }
-    : task);
+/** A task's margin reserve: the stored value when it has one, else sized from its work. */
+function marginReserveDays(task: PlannerTask) {
+  if (task.isMilestone || task.duration === 0) return 0;
+  const marginPct = Math.max(0, task.marginPct ?? 0);
+  if (marginPct === 0) return 0;
+  return task.marginDaysOriginal ?? Math.ceil(Math.max(0, durationInWorkingDays(task)) * marginPct / 100);
 }
 
-function workingDayDistance(from: string, to: string, calendarId: string | undefined, system: CalendarSystem) {
-  if (from === to) return 0;
-  if (from < to) return Math.max(0, workingDaysBetween(from, to, calendarId, system) - 1);
-  return Math.max(0, workingDaysBetween(to, from, calendarId, system) - 1);
+/**
+ * Keeps each task's reserve in step with its work. Margin occupies real time (see
+ * `remainingMarginDays`), so this only maintains the bookkeeping: extending a task
+ * eats its reserve first, shortening it gives those days back up to the original
+ * amount, and the reserve is re-sized from the current work only when the margin
+ * percentage itself changes.
+ */
+export function applyMarginConsumption(previous: PlannerTask[], next: PlannerTask[]): PlannerTask[] {
+  const previousById = new Map(previous.map((task) => [task.id, task]));
+  return next.map((task) => {
+    const before = previousById.get(task.id);
+    if (!before) return task;
+    // Summaries roll up their children and never carry a reserve of their own.
+    if (next.some((child) => child.parentId === task.id)) return task;
+    const workDays = task.isMilestone || task.duration === 0 ? 0 : Math.max(0, durationInWorkingDays(task));
+    const beforeWorkDays = before.isMilestone || before.duration === 0 ? 0 : Math.max(0, durationInWorkingDays(before));
+    const marginPct = Math.max(0, task.marginPct ?? 0);
+    const resized = marginPct !== Math.max(0, before.marginPct ?? 0);
+    const original = resized
+      ? Math.ceil(workDays * marginPct / 100)
+      : Math.max(0, before.marginDaysOriginal ?? Math.ceil(workDays * marginPct / 100));
+    const consumed = resized
+      ? Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0))
+      : Math.max(0, Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0) + (workDays - beforeWorkDays)));
+    return { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed };
+  });
 }
 
 export function withCalculatedPlanningFields(
@@ -379,8 +393,8 @@ export function withCalculatedPlanningFields(
     const children = childrenByParent.get(task.id);
     const marginPct = Math.max(0, task.marginPct ?? 0);
     const marginDaysOriginal = children
-      ? children.reduce((sum, child) => sum + (child.marginDaysOriginal ?? Math.ceil(Math.max(0, durationInWorkingDays(child)) * (child.marginPct ?? 0) / 100)), 0)
-      : task.duration === 0 ? 0 : Math.ceil(Math.max(0, durationInWorkingDays(task)) * marginPct / 100);
+      ? children.reduce((sum, child) => sum + marginReserveDays(child), 0)
+      : marginReserveDays({ ...task, marginPct });
     const marginDaysConsumed = Math.min(marginDaysOriginal, Math.max(0, task.marginDaysConsumed ?? 0));
     const cpm = critical.get(task.id);
     return {

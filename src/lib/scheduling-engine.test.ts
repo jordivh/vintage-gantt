@@ -10,6 +10,7 @@ import {
   type PlannerCalendar,
 } from "./scheduling-engine";
 import {
+  applyMarginConsumption,
   orderTasksForDisplay,
   recalculateTasks,
   startEditRestriction,
@@ -215,14 +216,13 @@ const tpR2 = (documentatieDays: number, documentatieMarginPct = 50): PlannerTask
 
 describe("critical path — TP-R2 test project", () => {
   const system = systemWith([]);
-  const schedule = (
-    documentatieDays: number,
-    marginPct = 50,
-    overrides: Record<string, Partial<PlannerTask>> = {},
+  /** Mirrors a commit in the app: reserve bookkeeping first, then the pass. */
+  const commit = (
+    previous: PlannerTask[],
+    next: PlannerTask[],
     anchoredTaskIds: string[] = [],
   ): PlannerTask[] => {
-    const tasks = tpR2(documentatieDays, marginPct).map((task) => ({ ...task, ...(overrides[task.id] ?? {}) }));
-    const recalculated = recalculateTasks(tasks, {
+    const recalculated = recalculateTasks(applyMarginConsumption(previous, next), {
       direction: "forward",
       calendarSystem: system,
       projectCalendarId: "base",
@@ -231,66 +231,103 @@ describe("critical path — TP-R2 test project", () => {
     expect(recalculated.error).toBeUndefined();
     return withCalculatedPlanningFields(recalculated.tasks, system, "base");
   };
+  const schedule = (
+    documentatieDays: number,
+    marginPct = 50,
+    overrides: Record<string, Partial<PlannerTask>> = {},
+    anchoredTaskIds: string[] = [],
+  ): PlannerTask[] => {
+    // Reserves exist before the pass runs, exactly as they do in the app.
+    const seeded = withCalculatedPlanningFields(
+      tpR2(documentatieDays, marginPct).map((task) => ({ ...task, ...(overrides[task.id] ?? {}) })),
+      system,
+      "base",
+    );
+    return commit(seeded, seeded, anchoredTaskIds);
+  };
+  /** Mirrors the grid's duration edit: the work grows, its dates follow. */
+  const extendBy = (tasks: PlannerTask[], id: string, days: number): PlannerTask[] =>
+    tasks.map((task) => {
+      if (task.id !== id) return task;
+      const duration = task.duration + days;
+      return { ...task, duration, finish: addWorkingDays(task.start, duration - 1, "base", system) };
+    });
   const byId = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
   const criticalIds = (tasks: PlannerTask[]) => tasks.filter((task) => task.isCritical).map((task) => task.id).sort().join(",");
-  const floats = (tasks: PlannerTask[]) => tasks.map((task) => `${task.id}=${task.totalFloat}`).join(" ");
 
-  test("dependent tasks start the first working day after their predecessor", () => {
-    const tasks = byId(schedule(13));
-    expect(tasks.get("t3")?.start).toBe("2026-10-02");
-    // Both successors of 1.2 start 2026-10-06: a stale later start must not survive.
-    expect(tasks.get("t5")?.start).toBe("2026-10-06");
-    expect(tasks.get("t5")?.finish).toBe("2026-10-19");
-    expect(tasks.get("t6")?.start).toBe("2026-10-06");
-    expect(tasks.get("t7")?.start).toBe("2026-10-20");
-    expect(tasks.get("t8")?.start).toBe("2026-10-23");
-  });
-
-  test("Documentatie at 4d has 9 working days of float and is not critical", () => {
+  test("the margin zone occupies time: successors start after the reserve", () => {
     const tasks = byId(schedule(4));
-    expect(tasks.get("t6")?.finish).toBe("2026-10-09");
-    expect(tasks.get("t6")?.totalFloat).toBe(9);
-    expect(tasks.get("t6")?.isCritical).toBe(false);
+    // 1.1: 5 d work (25 Sep – 1 Oct) + 1 d margin (2 Oct) → 1.2 starts Mon 5 Oct.
+    expect(tasks.get("t2")?.finish).toBe("2026-10-01");
+    expect(tasks.get("t2")?.marginDaysOriginal).toBe(1);
+    expect(tasks.get("t3")?.start).toBe("2026-10-05");
+    expect(tasks.get("t5")?.start).toBe("2026-10-07");
+    expect(tasks.get("t6")?.start).toBe("2026-10-07");
+    // 2.1: 10 d work + 1 d margin → 2.3 starts after that zone.
+    expect(tasks.get("t5")?.finish).toBe("2026-10-20");
+    expect(tasks.get("t7")?.start).toBe("2026-10-22");
+    expect(tasks.get("t8")?.start).toBe("2026-10-27");
   });
 
-  test("Documentatie at 13d ties the Bouwen → Testen path: float 0, critical", () => {
-    const tasks = byId(schedule(13));
-    expect(tasks.get("t6")?.finish).toBe("2026-10-22");
-    expect(tasks.get("t6")?.totalFloat).toBe(0);
-    expect(tasks.get("t6")?.isCritical).toBe(true);
-    expect(tasks.get("t7")?.isCritical).toBe(true);
+  test("extending 1.1 by one day eats its margin and moves nothing", () => {
+    const base = schedule(4);
+    const tasks = byId(commit(base, extendBy(base, "t2", 1)));
+    expect(tasks.get("t2")?.duration).toBe(6);
+    expect(tasks.get("t2")?.marginDaysOriginal).toBe(1);
+    expect(tasks.get("t2")?.marginDaysConsumed).toBe(1);
+    expect((tasks.get("t2")?.marginDaysOriginal ?? 0) - (tasks.get("t2")?.marginDaysConsumed ?? 0)).toBe(0);
+    expect(tasks.get("t3")?.start).toBe("2026-10-05");
+    expect(tasks.get("t8")?.start).toBe("2026-10-27");
   });
 
-  test("Documentatie at 16d drives the plan: it is critical, 2.1 and 2.3 are not", () => {
-    const tasks = byId(schedule(16));
-    expect(tasks.get("t6")?.finish).toBe("2026-10-27");
-    expect(tasks.get("t6")?.totalFloat).toBe(0);
-    expect(tasks.get("t6")?.isCritical).toBe(true);
-    expect(tasks.get("t5")?.isCritical).toBe(false);
-    expect(tasks.get("t7")?.isCritical).toBe(false);
+  test("extending 1.1 by two more days shifts everything after it by exactly two days", () => {
+    const base = schedule(4);
+    const oneDay = commit(base, extendBy(base, "t2", 1));
+    const threeDays = commit(oneDay, extendBy(oneDay, "t2", 2));
+    const before = byId(oneDay);
+    const after = byId(threeDays);
+    expect(after.get("t2")?.marginDaysConsumed).toBe(1); // the reserve is spent, never negative
+    for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
+      expect(addWorkingDays(before.get(id)!.start, 2, "base", system)).toBe(after.get(id)!.start);
+    }
+    expect(after.get("t3")?.start).toBe("2026-10-07");
+    expect(after.get("t8")?.start).toBe("2026-10-29");
   });
 
-  test("a start date before the predecessor's finish is refused, not corrected", () => {
-    const tasks = schedule(13);
+  test("shortening gives the reserve back, never more than the original", () => {
+    const base = schedule(4);
+    const grown = commit(base, extendBy(base, "t2", 3));
+    expect(byId(grown).get("t2")?.marginDaysConsumed).toBe(1);
+    const shortened = commit(grown, extendBy(grown, "t2", -3));
+    expect(byId(shortened).get("t2")?.marginDaysConsumed).toBe(0);
+    const tooShort = commit(shortened, extendBy(shortened, "t2", -2));
+    expect(byId(tooShort).get("t2")?.marginDaysConsumed).toBe(0);
+    expect(byId(tooShort).get("t2")?.marginDaysOriginal).toBe(1);
+  });
+
+  test("a start date before the predecessor's margin zone is refused, not corrected", () => {
+    const tasks = schedule(4);
     const displayIds = new Map(orderTasksForDisplay(tasks).map((task, index) => [task.id, index + 1]));
     const documentatie = tasks.find((task) => task.id === "t6")!;
-    expect(documentatie.start).toBe("2026-10-06");
+    expect(documentatie.start).toBe("2026-10-07");
     expect(startEditRestriction(documentatie, "2026-09-28", tasks, system, "base", displayIds))
-      .toBe("Cannot start before 2026-10-06: task 3 (Concept nakijken) must finish first (3FS).");
-    expect(startEditRestriction(documentatie, "2026-10-06", tasks, system, "base", displayIds)).toBeNull();
+      .toBe("Cannot start before 2026-10-07: task 3 (Concept nakijken) must finish first (3FS).");
+    expect(startEditRestriction(documentatie, "2026-10-07", tasks, system, "base", displayIds)).toBeNull();
     expect(startEditRestriction(documentatie, "2026-10-09", tasks, system, "base", displayIds)).toBeNull();
   });
 
   test("an anchored drag can never start before the predecessors allow", () => {
-    const tasks = byId(schedule(13, 50, { t6: { start: "2026-09-28", finish: "2026-10-28" } }, ["t6"]));
-    expect(tasks.get("t6")?.start).toBe("2026-10-06");
+    const tasks = byId(schedule(4, 50, { t6: { start: "2026-09-28", finish: "2026-10-14" } }, ["t6"]));
+    expect(tasks.get("t6")?.start).toBe("2026-10-07");
   });
 
-  test("extending Bouwen moves Testen and the milestone automatically", () => {
-    const tasks = byId(schedule(13, 50, { t5: { duration: 15, finish: "2026-10-26" } }));
-    expect(tasks.get("t5")?.finish).toBe("2026-10-26");
-    expect(tasks.get("t7")?.start).toBe("2026-10-27");
-    expect(tasks.get("t8")?.start).toBe("2026-10-30");
+  test("extending Bouwen eats its reserve first, then moves Testen and the milestone", () => {
+    const base = schedule(4);
+    const tasks = byId(commit(base, extendBy(base, "t5", 5)));
+    expect(tasks.get("t5")?.finish).toBe("2026-10-27");
+    expect(tasks.get("t5")?.marginDaysConsumed).toBe(1);
+    expect(tasks.get("t7")?.start).toBe("2026-10-28");
+    expect(tasks.get("t8")?.start).toBe("2026-11-02");
   });
 
   test("without predecessors the start date is free to edit", () => {
@@ -302,45 +339,62 @@ describe("critical path — TP-R2 test project", () => {
   });
 
   test("a hand-dragged Documentatie that reaches the last date is critical", () => {
-    const dragged = byId(schedule(13)).get("t6")!;
-    const moved = {
-      start: addWorkingDays(dragged.start, 4, "base", system),
-      finish: addWorkingDays(dragged.finish, 4, "base", system),
-    };
-    // Dragging anchors the task, so its own dates survive the recalculation.
-    const tasks = byId(schedule(13, 50, { t6: moved }, ["t6"]));
-    expect(tasks.get("t6")?.start).toBe("2026-10-12");
-    expect(tasks.get("t6")?.finish).toBe("2026-10-28");
+    // Dragging anchors the task, so its own dates survive the recalculation, and
+    // its reserve travels with it: 4 d work + 2 d margin now end the plan.
+    const tasks = byId(schedule(4, 50, { t6: { start: "2026-10-21", finish: "2026-10-26" } }, ["t6"]));
+    expect(tasks.get("t6")?.start).toBe("2026-10-21");
+    expect(tasks.get("t6")?.finish).toBe("2026-10-26");
+    expect(tasks.get("t6")?.totalFloat).toBe(0);
     expect(tasks.get("t6")?.isCritical).toBe(true);
     expect(tasks.get("t5")?.isCritical).toBe(false);
     expect(tasks.get("t7")?.isCritical).toBe(false);
   });
 
-  test("float — 2.2 at 4d has 9 d while the driving tasks have 0 d", () => {
+  test("float — 2.2 at 4d shows its reserve as slack; the driving chain shows 0 d", () => {
     const tasks = byId(schedule(4));
-    expect(tasks.get("t6")?.totalFloat).toBe(9);
+    expect(tasks.get("t6")?.totalFloat).toBe(8);
     for (const id of ["t2", "t3", "t5", "t7", "t8"]) expect(tasks.get(id)?.totalFloat).toBe(0);
   });
 
-  test("float — 2.2 at 13d has 0 d; at 16d 2.1 and 2.3 gain positive float", () => {
-    expect(byId(schedule(13)).get("t6")?.totalFloat).toBe(0);
+  test("float — a longer Documentatie pushes it onto the driving path", () => {
+    const thirteen = byId(schedule(13));
+    expect(thirteen.get("t6")?.totalFloat).toBe(0);
+    expect(thirteen.get("t6")?.isCritical).toBe(true);
+    expect(thirteen.get("t5")?.totalFloat).toBe(5);
+    expect(thirteen.get("t7")?.totalFloat).toBe(5);
     const sixteen = byId(schedule(16));
     expect(sixteen.get("t6")?.totalFloat).toBe(0);
-    expect(sixteen.get("t5")?.totalFloat).toBe(2);
-    expect(sixteen.get("t7")?.totalFloat).toBe(2);
+    expect(sixteen.get("t5")?.totalFloat).toBe(9);
+    expect(sixteen.get("t7")?.totalFloat).toBe(9);
   });
 
-  test("float never depends on margin", () => {
-    for (const duration of [4, 13, 16]) {
-      expect(floats(schedule(duration, 0))).toBe(floats(schedule(duration, 50)));
-      expect(floats(schedule(duration, 90))).toBe(floats(schedule(duration, 50)));
-    }
+  test("the reserve is counted exactly once in the float", () => {
+    const withoutReserve = byId(schedule(4, 0));
+    const withReserve = byId(schedule(4, 50));
+    // 4 d work + 2 d reserve is a six day slot: the slack drops by exactly the
+    // two days the reserve occupies, not by four.
+    expect(withoutReserve.get("t6")?.marginDaysOriginal).toBe(0);
+    expect(withReserve.get("t6")?.marginDaysOriginal).toBe(2);
+    expect(withoutReserve.get("t6")?.totalFloat).toBe(10);
+    expect(withReserve.get("t6")?.totalFloat).toBe(8);
   });
 
-  test("changing a margin never changes which tasks are critical", () => {
-    for (const duration of [4, 13, 16]) {
-      expect(criticalIds(schedule(duration, 0))).toBe(criticalIds(schedule(duration, 50)));
-      expect(criticalIds(schedule(duration, 90))).toBe(criticalIds(schedule(duration, 50)));
+  test("zero margins reproduce the classic schedule with no gaps", () => {
+    const noMargins = { t2: { marginPct: 0 }, t5: { marginPct: 0 }, t6: { marginPct: 0 } };
+    const tasks = byId(schedule(4, 0, noMargins));
+    expect(tasks.get("t2")?.marginDaysOriginal).toBe(0);
+    expect(tasks.get("t5")?.marginDaysOriginal).toBe(0);
+    expect(tasks.get("t3")?.start).toBe("2026-10-02");
+    expect(tasks.get("t5")?.start).toBe("2026-10-06");
+    expect(tasks.get("t6")?.start).toBe("2026-10-06");
+    expect(tasks.get("t7")?.start).toBe("2026-10-20");
+    expect(tasks.get("t8")?.start).toBe("2026-10-23");
+  });
+
+  test("the driving chain stays critical with and without reserves", () => {
+    // 1.1 → 1.2 → 2.1 → 2.3 → milestone drives the plan either way; 2.2 floats.
+    for (const marginPct of [0, 50, 90]) {
+      expect(criticalIds(schedule(4, marginPct))).toBe("t1,t2,t3,t4,t5,t7,t8");
     }
   });
 });

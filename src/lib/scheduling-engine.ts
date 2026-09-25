@@ -262,6 +262,10 @@ export interface ScheduleTask {
   calendarId?: string;
   resourceId?: string;
   isMilestone?: boolean;
+  /** Margin reserve after the work, sized when the margin was set (working days). */
+  marginDaysOriginal?: number;
+  /** Part of that reserve already eaten by the task's own growth. */
+  marginDaysConsumed?: number;
 }
 
 export interface ScheduleDependency {
@@ -284,6 +288,24 @@ export interface ScheduleOptions {
 
 interface ResolvedScheduleOptions extends ScheduleOptions {
   calendarSystem: CalendarSystem;
+  /** Tasks with children: roll-up rows, which never carry a margin of their own. */
+  summaryIds?: ReadonlySet<string>;
+}
+
+/**
+ * The reserve still following a task's work. Margin occupies real time: it sits
+ * in the slot after the work period and successors are scheduled from the end of
+ * that slot, so an extension first eats the reserve instead of pushing the plan.
+ * Milestones have no margin.
+ */
+export function remainingMarginDays(task: ScheduleTask) {
+  if (task.isMilestone || task.duration === 0) return 0;
+  return Math.max(0, Math.max(0, task.marginDaysOriginal ?? 0) - Math.max(0, task.marginDaysConsumed ?? 0));
+}
+
+/** Margin that belongs to the task itself; a summary only rolls up its children. */
+function slotMarginDays(task: ScheduleTask, options: ResolvedScheduleOptions) {
+  return options.summaryIds?.has(task.id) ? 0 : remainingMarginDays(task);
 }
 
 export function createDefaultCalendarSystem(): CalendarSystem {
@@ -326,6 +348,14 @@ function finishFromStart(task: ScheduleTask, options: ResolvedScheduleOptions) {
   );
 }
 
+/** End of a task's slot: its work finish plus the margin zone that follows it. */
+function slotFinish(task: ScheduleTask, options: ResolvedScheduleOptions) {
+  const work = finishFromStart(task, options);
+  const margin = slotMarginDays(task, options);
+  if (margin <= 0) return work;
+  return addWorkingDays(work, margin, calendarIdForTask(task, options), options.calendarSystem);
+}
+
 function startFromFinish(task: ScheduleTask, options: ResolvedScheduleOptions) {
   const calendarId = calendarIdForTask(task, options);
   if (task.isMilestone || durationInWorkingDays(task) <= 1) {
@@ -353,7 +383,7 @@ function dependencyStart(
   }
   if (dependency.type === "FF") {
     return addWorkingDays(
-      finishFromStart(predecessor, options),
+      slotFinish(predecessor, options),
       lag - (durationInWorkingDays(successor) - 1),
       calendarId,
       calendarSystem,
@@ -367,7 +397,9 @@ function dependencyStart(
       calendarSystem,
     );
   }
-  return addWorkingDays(finishFromStart(predecessor, options), lag + 1, calendarId, calendarSystem);
+  // FS: the successor starts the first working day after the predecessor's slot,
+  // so it lands after the predecessor's margin zone rather than after its work.
+  return addWorkingDays(slotFinish(predecessor, options), lag + 1, calendarId, calendarSystem);
 }
 
 export interface EarliestDependencyStart {
@@ -392,6 +424,9 @@ export function earliestDependencyStart(
   const resolved: ResolvedScheduleOptions = {
     ...options,
     calendarSystem: options.calendarSystem ?? createDefaultCalendarSystem(),
+    summaryIds: new Set(
+      tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id),
+    ),
   };
   const byId = new Map(tasks.map((item) => [item.id, item]));
   let binding: EarliestDependencyStart | null = null;
@@ -533,7 +568,12 @@ function scheduleBackward(
       }
       if (dependency.type === "SS") {
         successorConstraints.push(
-          addWorkingDays(successor.start, -lag + durationInWorkingDays(task) - 1, successorCalendar, calendarSystem),
+          addWorkingDays(
+            successor.start,
+            -lag + durationInWorkingDays(task) - 1 + slotMarginDays(task, options),
+            successorCalendar,
+            calendarSystem,
+          ),
         );
       }
       if (dependency.type === "FF") {
@@ -543,7 +583,12 @@ function scheduleBackward(
       }
       if (dependency.type === "SF") {
         successorConstraints.push(
-          addWorkingDays(successor.finish, -lag + durationInWorkingDays(task) - 1, successorCalendar, calendarSystem),
+          addWorkingDays(
+            successor.finish,
+            -lag + durationInWorkingDays(task) - 1 + slotMarginDays(task, options),
+            successorCalendar,
+            calendarSystem,
+          ),
         );
       }
     }
@@ -553,7 +598,11 @@ function scheduleBackward(
       const latest = successorConstraints.length
         ? successorConstraints.reduce((min, date) => (date < min ? date : min))
         : options.projectFinish ?? task.finish;
-      task.finish = ensureWorkingDay(latest, calendarId, options.calendarSystem, -1);
+      // The constraints bound the end of the slot; the reserve sits at its end, so
+      // the work itself has to finish before it.
+      const slotEnd = ensureWorkingDay(latest, calendarId, options.calendarSystem, -1);
+      const margin = slotMarginDays(task, options);
+      task.finish = margin > 0 ? addWorkingDays(slotEnd, -margin, calendarId, options.calendarSystem) : slotEnd;
       task.start = startFromFinish(task, options);
     }
     visiting.delete(task.id);
@@ -576,6 +625,9 @@ export function scheduleTasks(
   const resolved: ResolvedScheduleOptions = {
     ...options,
     calendarSystem: options.calendarSystem ?? createDefaultCalendarSystem(),
+    summaryIds: new Set(
+      tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id),
+    ),
   };
   return resolved.direction === "backward"
     ? scheduleBackward(tasks, dependencies, resolved)
@@ -596,8 +648,18 @@ export function rollupSummary(
     if (!parent) return;
     const children = result.filter((candidate) => candidate.parentId === parent.id);
     if (!children.length) return;
+    // The bracket covers each child's full slot, so a trailing margin zone is
+    // inside the roll-up instead of dangling past it.
+    const slotEnd = (child: ScheduleTask) => {
+      const margin = remainingMarginDays(child);
+      const childCalendar = child.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+      return margin > 0 ? addWorkingDays(child.finish, margin, childCalendar, system) : child.finish;
+    };
     parent.start = children.reduce((min, child) => (child.start < min ? child.start : min), children[0].start);
-    parent.finish = children.reduce((max, child) => (child.finish > max ? child.finish : max), children[0].finish);
+    parent.finish = children.reduce((max, child) => {
+      const end = slotEnd(child);
+      return end > max ? end : max;
+    }, slotEnd(children[0]));
     const calendarId = parent.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
     parent.duration = workingDaysBetween(parent.start, parent.finish, calendarId, system);
     parent.durationUnit = "days";
