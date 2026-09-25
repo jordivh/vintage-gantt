@@ -176,9 +176,18 @@ export function calculateCriticalPath(
     order.push(task);
   };
   tasks.forEach(visit);
+  const summaryIds = new Set(
+    tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id),
+  );
   const early = new Map<string, { start: number; finish: number }>();
   for (const task of order) {
-    let start = 0;
+    // A task that was placed manually (dragged, or planned later than its
+    // dependencies allow) is a real constraint: its planned start is the floor
+    // of its early start, expressed in working days from the project start.
+    let start = Math.max(
+      0,
+      workingDaysBetween(projectStart, task.start, task.calendarId ?? projectCalendarId, system) - 1,
+    );
     for (const dependency of incoming.get(task.id) ?? []) {
       const predecessor = early.get(dependency.predecessorId);
       if (!predecessor) continue;
@@ -194,7 +203,17 @@ export function calculateCriticalPath(
     }
     early.set(task.id, { start, finish: start + duration(task) - 1 });
   }
-  const projectFinish = Math.max(...[...early.values()].map((value) => value.finish));
+  // Float is measured against the finish of the *work* in the plan. Summary rows
+  // and milestones are markers, not work: a terminal milestone is placed one
+  // working day after its predecessor, and counting that day would inflate the
+  // float of every other task by one day and hide a genuinely critical path.
+  const workFinishes = tasks
+    .filter((task) => !summaryIds.has(task.id) && task.duration > 0)
+    .map((task) => early.get(task.id)?.finish)
+    .filter((finish): finish is number => finish !== undefined);
+  const projectFinish = workFinishes.length
+    ? Math.max(...workFinishes)
+    : Math.max(...[...early.values()].map((value) => value.finish));
   const late = new Map<string, { start: number; finish: number }>();
   for (const task of [...order].reverse()) {
     let finish = projectFinish;
@@ -228,11 +247,15 @@ export function calculateCriticalPath(
       isCritical: totalFloat === 0,
     });
   }
-  for (const task of tasks.filter((item) => tasks.some((child) => child.parentId === item.id))) {
+  for (const task of tasks.filter((item) => summaryIds.has(item.id))) {
     const children = tasks.filter((child) => child.parentId === task.id);
     const critical = children.some((child) => result.get(child.id)?.isCritical);
     const own = result.get(task.id);
-    if (own) result.set(task.id, { ...own, isCritical: critical, totalFloat: critical ? 0 : own.totalFloat });
+    if (!own) continue;
+    // A summary is a roll-up of its children, so it floats as far as its most
+    // constrained child does.
+    const childFloat = Math.min(...children.map((child) => result.get(child.id)?.totalFloat ?? own.totalFloat));
+    result.set(task.id, { ...own, isCritical: critical, totalFloat: critical ? 0 : childFloat });
   }
   return result;
 }
@@ -254,30 +277,14 @@ export function applyMarginAbsorption(
     : 0;
   const original = Math.ceil(Math.max(0, durationInWorkingDays({ ...after, isMilestone: after.duration === 0 })) * Math.max(0, after.marginPct ?? before.marginPct ?? 0) / 100);
   const previousConsumed = Math.max(0, before.marginDaysConsumed ?? 0);
-  const available = Math.max(0, original - previousConsumed);
   const consumed = after.finish < before.finish
     ? Math.max(0, Math.min(original, previousConsumed - workingDayDistance(after.finish, before.finish, calendarId, system)))
     : Math.min(original, previousConsumed + delay);
-  const absorbed = Math.min(delay, available);
-  if (!absorbed) return next.map((task) => task.id === changedTaskId ? { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed } : task);
-  const dependencies = dependenciesForTasks(next);
-  const downstream = new Set<string>();
-  const visit = (id: string) => {
-    dependencies.filter((dependency) => dependency.predecessorId === id).forEach((dependency) => {
-      if (!downstream.has(dependency.successorId)) { downstream.add(dependency.successorId); visit(dependency.successorId); }
-    });
-  };
-  visit(changedTaskId);
-  return next.map((task) => {
-    if (task.id === changedTaskId) return { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed };
-    if (!downstream.has(task.id)) return task;
-    const taskCalendar = task.calendarId ?? projectCalendarId;
-    return {
-      ...task,
-      start: addWorkingDays(task.start, -absorbed, taskCalendar, system),
-      finish: addWorkingDays(task.finish, -absorbed, taskCalendar, system),
-    };
-  });
+  // Margin records how much of a task's buffer a delay consumed, but it is
+  // bookkeeping only: it never moves a task and never delays a successor.
+  return next.map((task) => task.id === changedTaskId
+    ? { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed }
+    : task);
 }
 
 function workingDayDistance(from: string, to: string, calendarId: string | undefined, system: CalendarSystem) {

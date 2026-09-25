@@ -431,12 +431,20 @@ function scheduleForward(
   const visit = (task: ScheduleTask) => {
     if (visiting.has(task.id)) return;
     visiting.add(task.id);
+    const constraintStarts: string[] = [];
     for (const dependency of incoming.get(task.id) ?? []) {
       const predecessor = byId.get(dependency.predecessorId);
       if (!predecessor) continue;
       visit(predecessor);
-      const earliest = dependencyStart(predecessor, task, dependency, options);
-      if (earliest > task.start) task.start = earliest;
+      constraintStarts.push(dependencyStart(predecessor, task, dependency, options));
+    }
+    // The dependency network owns a constrained start: the latest predecessor
+    // constraint is authoritative, so an earlier pass result must be pushed out
+    // and a stale later start left over from an earlier edit must be pulled back.
+    // Margins are bookkeeping only and never move a task.
+    const isAnchored = options.anchoredTaskIds?.includes(task.id) ?? false;
+    if (!isAnchored && constraintStarts.length) {
+      task.start = constraintStarts.reduce((latest, date) => (date > latest ? date : latest));
     }
     const { projectStart } = options;
     if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
