@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { toast } from "sonner";
 import { useNavigate } from "react-router";
 import {
+  ArrowDown,
+  ArrowUp,
   CalendarDays,
   ChevronDown,
   ChevronRight,
@@ -54,6 +56,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "start", label: "Start", width: 112 },
   { key: "finish", label: "Finish", width: 112 },
   { key: "predecessors", label: "Predecessors", width: 128 },
+  { key: "totalFloat", label: "Float", width: 84 },
   { key: "resource", label: "Resource", width: 118 },
   { key: "percent", label: "% complete", width: 96 },
   { key: "notes", label: "Notes", width: 160 },
@@ -61,7 +64,6 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "marginOriginal", label: "Margin original", width: 112 },
   { key: "marginConsumed", label: "Margin consumed", width: 118 },
   { key: "marginRemaining", label: "Margin remaining", width: 120 },
-  { key: "totalFloat", label: "Total float", width: 96 },
   { key: "baselineStart", label: "Baseline start", width: 112 },
   { key: "baselineFinish", label: "Baseline finish", width: 120 },
   { key: "variance", label: "Variance", width: 88 },
@@ -148,17 +150,29 @@ export default function Dashboard() {
   });
   const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
   const [hidden, setHidden] = useState<ColumnKey[]>(() => {
-    const fallback: ColumnKey[] = ["margin", "marginOriginal", "marginConsumed", "marginRemaining", "totalFloat", "baselineStart", "baselineFinish", "variance"];
+    const fallback: ColumnKey[] = ["margin", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"];
     try {
-      const saved = JSON.parse(localStorage.getItem("vintage-gantt-hidden-columns") ?? "null");
-      return Array.isArray(saved) ? saved.filter((key): key is ColumnKey => columnDefs.some((column) => column.key === key)) : fallback;
+      // Float is visible by default, so legacy preferences (which always hid it)
+      // are migrated once; from the next save on, the current key wins.
+      const current = localStorage.getItem("vintage-gantt-hidden-columns-v2");
+      const legacy = localStorage.getItem("vintage-gantt-hidden-columns");
+      const saved = JSON.parse(current ?? legacy ?? "null");
+      if (!Array.isArray(saved)) return fallback;
+      const known = saved.filter((key): key is ColumnKey => columnDefs.some((column) => column.key === key));
+      return current ? known : known.filter((key) => key !== "totalFloat");
     } catch { return fallback; }
+  });
+  const [sort, setSort] = useState<{ key: ColumnKey; direction: "asc" | "desc" } | null>(null);
+  const toggleFloatSort = () => setSort((current) => {
+    if (current?.key !== "totalFloat") return { key: "totalFloat" as ColumnKey, direction: "asc" as const };
+    if (current.direction === "asc") return { key: "totalFloat" as ColumnKey, direction: "desc" as const };
+    return null;
   });
   const [viewOpen, setViewOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") === "true"; } catch { return false; } });
   const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
-  useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
+  useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns-v2", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
@@ -219,16 +233,26 @@ export default function Dashboard() {
 
   const visibleTasks = useMemo(() => {
     const visible: Task[] = [];
-    const walk = (parentId: string | null) =>
-      calculatedTasks
-        .filter((task) => task.parentId === parentId)
-        .forEach((task) => {
-          if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task);
-          if (!task.collapsed) walk(task.id);
-        });
+    // A summary has no float of its own, so it sorts on the tightest float in its
+    // subtree and keeps its children nested underneath it.
+    const sortableFloat = (task: Task): number => {
+      const children = calculatedTasks.filter((candidate) => candidate.parentId === task.id);
+      if (!children.length) return task.totalFloat ?? 0;
+      return Math.min(...children.map(sortableFloat));
+    };
+    const walk = (parentId: string | null) => {
+      const siblings = calculatedTasks.filter((task) => task.parentId === parentId);
+      const ordered = sort?.key === "totalFloat"
+        ? [...siblings].sort((left, right) => (sort.direction === "desc" ? -1 : 1) * (sortableFloat(left) - sortableFloat(right)))
+        : siblings;
+      ordered.forEach((task) => {
+        if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task);
+        if (!task.collapsed) walk(task.id);
+      });
+    };
     walk(null);
     return visible;
-  }, [calculatedTasks, query]);
+  }, [calculatedTasks, query, sort]);
   const taskDisplayIds = useMemo(
     () => new Map(orderTasksForDisplay(calculatedTasks).map((task, index) => [task.id, index + 1])),
     [calculatedTasks],
@@ -889,12 +913,18 @@ export default function Dashboard() {
                 .map((column) => (
                   <div
                     key={column.key}
-                    className="grid-head-cell"
+                    className={`grid-head-cell ${column.key === "totalFloat" ? "float-head" : ""}`}
                     style={{ width: column.width }}
+                    role={column.key === "totalFloat" ? "button" : undefined}
+                    aria-sort={sort?.key === column.key ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}
+                    title={column.key === "totalFloat" ? "Float: click to sort the tightest tasks first" : undefined}
+                    onClick={column.key === "totalFloat" ? toggleFloatSort : undefined}
                     onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}
                   >
                     {column.label}
-                    <ChevronsUpDown size={12} />
+                    {sort?.key === column.key
+                      ? (sort.direction === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />)
+                      : <ChevronsUpDown size={12} />}
                   </div>
                 ))}
             </div>
@@ -949,7 +979,7 @@ export default function Dashboard() {
                                 : column.key === "margin"
                                   ? `${displayTask.marginPct ?? 0}%`
                                   : column.key === "totalFloat"
-                                    ? `${displayTask.totalFloat ?? 0} d`
+                                    ? (summary ? "" : `${displayTask.totalFloat ?? 0} d`)
                                     : column.key === "marginOriginal"
                                       ? `${displayTask.marginDaysOriginal ?? 0} d`
                                       : column.key === "marginConsumed"
@@ -978,7 +1008,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {

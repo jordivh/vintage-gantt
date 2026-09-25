@@ -233,6 +233,7 @@ describe("critical path — TP-R2 test project", () => {
   };
   const byId = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
   const criticalIds = (tasks: PlannerTask[]) => tasks.filter((task) => task.isCritical).map((task) => task.id).sort().join(",");
+  const floats = (tasks: PlannerTask[]) => tasks.map((task) => `${task.id}=${task.totalFloat}`).join(" ");
 
   test("dependent tasks start the first working day after their predecessor", () => {
     const tasks = byId(schedule(13));
@@ -313,6 +314,27 @@ describe("critical path — TP-R2 test project", () => {
     expect(tasks.get("t6")?.isCritical).toBe(true);
     expect(tasks.get("t5")?.isCritical).toBe(false);
     expect(tasks.get("t7")?.isCritical).toBe(false);
+  });
+
+  test("float — 2.2 at 4d has 9 d while the driving tasks have 0 d", () => {
+    const tasks = byId(schedule(4));
+    expect(tasks.get("t6")?.totalFloat).toBe(9);
+    for (const id of ["t2", "t3", "t5", "t7", "t8"]) expect(tasks.get(id)?.totalFloat).toBe(0);
+  });
+
+  test("float — 2.2 at 13d has 0 d; at 16d 2.1 and 2.3 gain positive float", () => {
+    expect(byId(schedule(13)).get("t6")?.totalFloat).toBe(0);
+    const sixteen = byId(schedule(16));
+    expect(sixteen.get("t6")?.totalFloat).toBe(0);
+    expect(sixteen.get("t5")?.totalFloat).toBe(2);
+    expect(sixteen.get("t7")?.totalFloat).toBe(2);
+  });
+
+  test("float never depends on margin", () => {
+    for (const duration of [4, 13, 16]) {
+      expect(floats(schedule(duration, 0))).toBe(floats(schedule(duration, 50)));
+      expect(floats(schedule(duration, 90))).toBe(floats(schedule(duration, 50)));
+    }
   });
 
   test("changing a margin never changes which tasks are critical", () => {
