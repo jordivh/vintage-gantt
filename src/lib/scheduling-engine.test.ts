@@ -10,7 +10,9 @@ import {
   type PlannerCalendar,
 } from "./scheduling-engine";
 import {
+  orderTasksForDisplay,
   recalculateTasks,
+  startEditRestriction,
   withCalculatedPlanningFields,
   type PlannerTask,
 } from "./planner-model";
@@ -265,6 +267,37 @@ describe("critical path — TP-R2 test project", () => {
     expect(tasks.get("t6")?.isCritical).toBe(true);
     expect(tasks.get("t5")?.isCritical).toBe(false);
     expect(tasks.get("t7")?.isCritical).toBe(false);
+  });
+
+  test("a start date before the predecessor's finish is refused, not corrected", () => {
+    const tasks = schedule(13);
+    const displayIds = new Map(orderTasksForDisplay(tasks).map((task, index) => [task.id, index + 1]));
+    const documentatie = tasks.find((task) => task.id === "t6")!;
+    expect(documentatie.start).toBe("2026-10-06");
+    expect(startEditRestriction(documentatie, "2026-09-28", tasks, system, "base", displayIds))
+      .toBe("Cannot start before 2026-10-06: task 3 (Concept nakijken) must finish first (3FS).");
+    expect(startEditRestriction(documentatie, "2026-10-06", tasks, system, "base", displayIds)).toBeNull();
+    expect(startEditRestriction(documentatie, "2026-10-09", tasks, system, "base", displayIds)).toBeNull();
+  });
+
+  test("an anchored drag can never start before the predecessors allow", () => {
+    const tasks = byId(schedule(13, 50, { t6: { start: "2026-09-28", finish: "2026-10-28" } }, ["t6"]));
+    expect(tasks.get("t6")?.start).toBe("2026-10-06");
+  });
+
+  test("extending Bouwen moves Testen and the milestone automatically", () => {
+    const tasks = byId(schedule(13, 50, { t5: { duration: 15, finish: "2026-10-26" } }));
+    expect(tasks.get("t5")?.finish).toBe("2026-10-26");
+    expect(tasks.get("t7")?.start).toBe("2026-10-27");
+    expect(tasks.get("t8")?.start).toBe("2026-10-30");
+  });
+
+  test("without predecessors the start date is free to edit", () => {
+    const tasks = schedule(13, 50, { t6: { predecessors: "" } });
+    const displayIds = new Map(orderTasksForDisplay(tasks).map((task, index) => [task.id, index + 1]));
+    const documentatie = tasks.find((task) => task.id === "t6")!;
+    expect(startEditRestriction(documentatie, "2026-09-28", tasks, system, "base", displayIds)).toBeNull();
+    expect(startEditRestriction(documentatie, "2026-08-03", tasks, system, "base", displayIds)).toBeNull();
   });
 
   test("a hand-dragged Documentatie that reaches the last date is critical", () => {

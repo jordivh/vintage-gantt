@@ -36,7 +36,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyMarginAbsorption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
+import { applyMarginAbsorption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -137,7 +137,7 @@ export default function Dashboard() {
   const [split, setSplit] = useState(58);
   const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [modalTask, setModalTask] = useState<Task | null>(null);
-  const [predecessorError, setPredecessorError] = useState<{ taskId: string; message: string } | null>(null);
+  const [cellError, setCellError] = useState<{ taskId: string; column: ColumnKey; message: string } | null>(null);
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
   const [query, setQuery] = useState("");
@@ -335,15 +335,16 @@ export default function Dashboard() {
     if (field === "predecessors") {
       const resolved = resolvePredecessorInput(value, id, tasks, taskDisplayIds);
       if (resolved.error) {
-        setPredecessorError({ taskId: id, message: resolved.error });
+        setCellError({ taskId: id, column: "predecessors", message: resolved.error });
         setEditing(null);
         return;
       }
-      setPredecessorError(null);
+      setCellError(null);
       commit(tasks.map((task) => task.id === id ? { ...task, predecessors: resolved.value ?? "" } : task));
       setEditing(null);
       return;
     }
+    setCellError(null);
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
@@ -386,6 +387,19 @@ export default function Dashboard() {
       if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
     });
+    // Start and finish of a task with predecessors are derived from the network, so
+    // a date that breaks a dependency is refused rather than silently corrected.
+    if (field === "start" || field === "finish") {
+      const edited = next.find((task) => task.id === id);
+      const violation = edited
+        ? startEditRestriction(edited, edited.start, tasks, system, calendarId, taskDisplayIds)
+        : null;
+      if (violation) {
+        setCellError({ taskId: id, column: field, message: violation });
+        setEditing(null);
+        return;
+      }
+    }
     commit(next);
     setEditing(null);
   };
@@ -509,6 +523,7 @@ export default function Dashboard() {
   const handleKey = (event: ReactKeyboardEvent, task: Task, field: ColumnKey) => {
     if (event.key === "Escape") {
       setEditing(null);
+      setCellError(null);
       return;
     }
     if (event.key === "Enter" || event.key === "Tab") {
@@ -556,8 +571,15 @@ export default function Dashboard() {
       if (movedDays !== 0) {
         const start = addWorkingDays(task.start, movedDays, calendarId, system);
         const finish = addWorkingDays(task.finish, movedDays, calendarId, system);
-        commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish } : item)), task.id);
-        toast(`${task.name} moved to ${formatDate(start)}`);
+        // A drag may never pull a task before its predecessors allow: the bar snaps
+        // back to where it was and the reason is shown on the row.
+        const violation = startEditRestriction({ ...task, start, finish }, start, tasks, system, calendarId, taskDisplayIds);
+        if (violation) {
+          setCellError({ taskId: task.id, column: "start", message: violation });
+        } else {
+          commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish } : item)), task.id);
+          toast(`${task.name} moved to ${formatDate(start)}`);
+        }
       }
       setTimelineDrag(null);
       window.removeEventListener("pointermove", move);
@@ -586,8 +608,17 @@ export default function Dashboard() {
           else finish = addWorkingDays(start, 1, calendarId, system);
         }
         const duration = workingDaysBetween(start, finish, calendarId, system);
-        commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish, duration, durationUnit: "days" as const } : item)), task.id);
-        toast(`${task.name} duration set to ${duration} working days`);
+        const resized = { ...task, start, finish, duration, durationUnit: "days" as const };
+        // Only the start edge can break a dependency; the finish edge keeps the start.
+        const violation = edge === "start"
+          ? startEditRestriction(resized, start, tasks, system, calendarId, taskDisplayIds)
+          : null;
+        if (violation) {
+          setCellError({ taskId: task.id, column: "start", message: violation });
+        } else {
+          commit(tasks.map((item) => (item.id === task.id ? resized : item)), task.id);
+          toast(`${task.name} duration set to ${duration} working days`);
+        }
       }
       setTimelineResize(null);
       window.removeEventListener("pointermove", move);
@@ -947,7 +978,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${predecessorError?.taskId === task.id && column.key === "predecessors" ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
@@ -962,7 +993,7 @@ export default function Dashboard() {
                             }
                           }}
                         >
-                          {predecessorError?.taskId === task.id && column.key === "predecessors" && <span className="cell-validation-error" role="alert">{predecessorError.message}</span>}
+                          {cellError?.taskId === task.id && cellError.column === column.key && <span className="cell-validation-error" role="alert">{cellError.message}</span>}
                           {isName && <span className="row-handle"><GripVertical size={13} /></span>}
                           {isName && summary && (
                             <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>

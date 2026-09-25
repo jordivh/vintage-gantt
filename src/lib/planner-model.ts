@@ -1,6 +1,7 @@
 import {
   addWorkingDays,
   durationInWorkingDays,
+  earliestDependencyStart,
   findDependencyCycle,
   rollupSummary,
   scheduleTasks,
@@ -130,6 +131,79 @@ export function dependenciesForTasks(items: PlannerTask[]): ScheduleDependency[]
       successorId: task.id,
     })),
   );
+}
+
+export interface StartRestriction {
+  /** Earliest date the task may start, given its predecessors. */
+  earliestStart: string;
+  predecessorId: string;
+  predecessorName: string;
+  /** Sequential display ID of the binding predecessor, when known. */
+  predecessorDisplayId?: number;
+  type: DependencyType;
+  lagDays: number;
+}
+
+const dependencyConstraintWords: Record<DependencyType, string> = {
+  FS: "must finish first",
+  SS: "must start first",
+  FF: "must finish first",
+  SF: "must start first",
+};
+
+/**
+ * The binding predecessor dependency that fixes a task's earliest start, or null
+ * when the task has no predecessors and its start date is free to edit.
+ */
+export function startRestrictionFor(
+  task: PlannerTask,
+  tasks: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+  displayIds?: ReadonlyMap<string, number>,
+): StartRestriction | null {
+  const binding = earliestDependencyStart(task, tasks, dependenciesForTasks(tasks), {
+    calendarSystem: system,
+    projectCalendarId,
+  });
+  if (!binding) return null;
+  return {
+    earliestStart: binding.date,
+    predecessorId: binding.predecessor.id,
+    predecessorName: tasks.find((item) => item.id === binding.predecessor.id)?.name ?? "predecessor",
+    predecessorDisplayId: displayIds?.get(binding.predecessor.id),
+    type: binding.type,
+    lagDays: binding.lagDays,
+  };
+}
+
+/** The message shown when a date edit breaks a dependency. */
+export function formatStartRestrictionError(restriction: StartRestriction): string {
+  const lag = restriction.lagDays === 0 ? "" : `${restriction.lagDays > 0 ? "+" : ""}${restriction.lagDays}d`;
+  const label = restriction.predecessorDisplayId === undefined
+    ? restriction.predecessorName
+    : `task ${restriction.predecessorDisplayId} (${restriction.predecessorName})`;
+  const code = `${restriction.predecessorDisplayId ?? ""}${restriction.type}${lag}`;
+  return `Cannot start before ${restriction.earliestStart}: ${label} ${dependencyConstraintWords[restriction.type]} (${code}).`;
+}
+
+/**
+ * Validates a start date against the dependency network. Start and finish of a
+ * task with predecessors are derived from the network, so an earlier date is
+ * refused (with the reason to show inline) instead of being silently corrected.
+ * Returns null when the date is acceptable or the task has no predecessors.
+ */
+export function startEditRestriction(
+  task: PlannerTask,
+  requestedStart: string,
+  tasks: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+  displayIds?: ReadonlyMap<string, number>,
+): string | null {
+  const restriction = startRestrictionFor(task, tasks, system, projectCalendarId, displayIds);
+  if (!restriction || requestedStart >= restriction.earliestStart) return null;
+  return formatStartRestrictionError(restriction);
 }
 
 export interface CriticalPathTask {

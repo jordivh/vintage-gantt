@@ -370,6 +370,43 @@ function dependencyStart(
   return addWorkingDays(finishFromStart(predecessor, options), lag + 1, calendarId, calendarSystem);
 }
 
+export interface EarliestDependencyStart {
+  /** Earliest date the task may start given this dependency. */
+  date: string;
+  predecessor: ScheduleTask;
+  type: DependencyType;
+  lagDays: number;
+}
+
+/**
+ * The binding incoming dependency of a task, i.e. the predecessor that fixes its
+ * earliest start. Returns `null` when the task has no predecessors, in which case
+ * its start date is free. Uses the same FS/SS/FF/SF + lag rules as the schedule.
+ */
+export function earliestDependencyStart(
+  task: ScheduleTask,
+  tasks: ScheduleTask[],
+  dependencies: ScheduleDependency[],
+  options: ScheduleOptions = {},
+): EarliestDependencyStart | null {
+  const resolved: ResolvedScheduleOptions = {
+    ...options,
+    calendarSystem: options.calendarSystem ?? createDefaultCalendarSystem(),
+  };
+  const byId = new Map(tasks.map((item) => [item.id, item]));
+  let binding: EarliestDependencyStart | null = null;
+  for (const dependency of dependencies) {
+    if (dependency.successorId !== task.id) continue;
+    const predecessor = byId.get(dependency.predecessorId);
+    if (!predecessor) continue;
+    const date = dependencyStart(predecessor, task, dependency, resolved);
+    if (!binding || date > binding.date) {
+      binding = { date, predecessor, type: dependency.type, lagDays: dependency.lagDays };
+    }
+  }
+  return binding;
+}
+
 export function findDependencyCycle(tasks: ScheduleTask[], dependencies: ScheduleDependency[]) {
   const taskIds = new Set(tasks.map((task) => task.id));
   const edges = new Map<string, string[]>();
@@ -438,13 +475,15 @@ function scheduleForward(
       visit(predecessor);
       constraintStarts.push(dependencyStart(predecessor, task, dependency, options));
     }
-    // The dependency network owns a constrained start: the latest predecessor
-    // constraint is authoritative, so an earlier pass result must be pushed out
-    // and a stale later start left over from an earlier edit must be pulled back.
-    // Margins are bookkeeping only and never move a task.
+    // The dependency network is authoritative for the lower bound: a stale later
+    // start left over from an earlier edit is pulled back, and nothing (not even a
+    // manual drag) may place a task before its predecessors allow. Anchoring only
+    // keeps an edited task *later* than its dependencies allow. Margins are
+    // bookkeeping only and never move a task.
     const isAnchored = options.anchoredTaskIds?.includes(task.id) ?? false;
-    if (!isAnchored && constraintStarts.length) {
-      task.start = constraintStarts.reduce((latest, date) => (date > latest ? date : latest));
+    if (constraintStarts.length) {
+      const earliest = constraintStarts.reduce((latest, date) => (date > latest ? date : latest));
+      task.start = isAnchored && task.start > earliest ? task.start : earliest;
     }
     const { projectStart } = options;
     if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
