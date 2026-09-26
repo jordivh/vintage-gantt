@@ -11,8 +11,12 @@ import {
 } from "./scheduling-engine";
 import {
   applyMarginConsumption,
+  applyReplanMargins,
+  marginAfterPctChange,
   orderTasksForDisplay,
+  planFinishDate,
   recalculateTasks,
+  replanScopeIds,
   startEditRestriction,
   withCalculatedPlanningFields,
   type PlannerTask,
@@ -396,5 +400,117 @@ describe("critical path — TP-R2 test project", () => {
     for (const marginPct of [0, 50, 90]) {
       expect(criticalIds(schedule(4, marginPct))).toBe("t1,t2,t3,t4,t5,t7,t8");
     }
+  });
+});
+
+describe("replan — fresh reserve for the remaining work", () => {
+  const system = systemWith([]);
+  const plan = (overrides: Record<string, Partial<PlannerTask>> = {}): PlannerTask[] => {
+    const seeded = tpR2(4, 50).map((task) => ({ ...task, ...(overrides[task.id] ?? {}) }));
+    const recalculated = recalculateTasks(withCalculatedPlanningFields(seeded, system, "base"), {
+      direction: "forward",
+      calendarSystem: system,
+      projectCalendarId: "base",
+    });
+    expect(recalculated.error).toBeUndefined();
+    return withCalculatedPlanningFields(recalculated.tasks, system, "base");
+  };
+
+  test("20% on not-started tasks leaves started tasks untouched", () => {
+    const source = plan({ t2: { marginPct: 35, marginDaysConsumed: 1, percent: 40 } });
+    const beforeT2 = source.find((task) => task.id === "t2")!;
+    expect(beforeT2.marginDaysOriginal).toBe(2); // 5 d work · 35 %
+
+    const replanned = applyReplanMargins(source, { scope: "not-started", marginPct: 20 });
+    const afterT2 = replanned.find((task) => task.id === "t2")!;
+    const afterT5 = replanned.find((task) => task.id === "t5")!;
+
+    // Started work keeps its own percentage and consumption.
+    expect(afterT2.marginPct).toBe(35);
+    expect(afterT2.marginDaysOriginal).toBe(2);
+    expect(afterT2.marginDaysConsumed).toBe(1);
+    // Not-started work gets fresh reserve with nothing consumed.
+    expect(afterT5.marginPct).toBe(20);
+    expect(afterT5.marginDaysOriginal).toBe(2); // 10 d · 20 %
+    expect(afterT5.marginDaysConsumed).toBe(0);
+    // The version it was based on is not rewritten.
+    expect(source.find((task) => task.id === "t5")!.marginPct).toBe(10);
+    expect(source.find((task) => task.id === "t2")!.marginDaysConsumed).toBe(1);
+  });
+
+  test("the previous version keeps its own margins and consumption", () => {
+    const source = plan({ t2: { marginPct: 35, marginDaysConsumed: 1, percent: 40 } });
+    const snapshot = JSON.parse(JSON.stringify(source));
+    applyReplanMargins(source, { scope: "all", marginPct: 20 });
+    expect(JSON.parse(JSON.stringify(source))).toEqual(snapshot);
+  });
+
+  test("scope 'all' refreshes every leaf task and 'selected' only the chosen ones", () => {
+    // t6 is finished work: even scope 'all' must not rewrite it.
+    const source = plan({ t6: { percent: 100, marginDaysConsumed: 2 } });
+    const all = applyReplanMargins(source, { scope: "all", marginPct: 20 });
+    for (const id of ["t2", "t3", "t5", "t7"]) {
+      const task = all.find((item) => item.id === id)!;
+      expect(task.marginPct).toBe(20);
+      expect(task.marginDaysConsumed).toBe(0);
+    }
+    // Completed work keeps its percentage and its consumption.
+    expect(all.find((item) => item.id === "t6")!.marginPct).toBe(50);
+    expect(all.find((item) => item.id === "t6")!.marginDaysConsumed).toBe(2);
+    // Summaries and milestones never carry a reserve of their own.
+    expect(all.find((item) => item.id === "t1")!.marginPct).toBe(0);
+    expect(all.find((item) => item.id === "t8")!.marginDaysOriginal).toBe(0);
+
+    const selected = applyReplanMargins(source, { scope: "selected", selectedTaskIds: ["t5"], marginPct: 20 });
+    expect(selected.find((item) => item.id === "t5")!.marginPct).toBe(20);
+    expect(selected.find((item) => item.id === "t6")!.marginPct).toBe(50);
+    expect(replanScopeIds(source, { scope: "selected", selectedTaskIds: ["t5"], marginPct: 20 }).size).toBe(1);
+  });
+
+  test("the predicted finish is the finish the new version actually plans", () => {
+    const source = plan({ t2: { percent: 40, marginDaysConsumed: 1 } });
+    const input = { scope: "not-started" as const, marginPct: 20 };
+    // What the dialog previews: rewrite the margins, schedule, read the finish.
+    const predicted = planFinishDate(
+      withCalculatedPlanningFields(
+        recalculateTasks(applyReplanMargins(source, input), { direction: "forward", calendarSystem: system, projectCalendarId: "base" }).tasks,
+        system,
+        "base",
+      ),
+    );
+    // What confirming does: the same margins on a re-keyed copy of the version.
+    const idMap = new Map(source.map((task, index) => [task.id, `v2-${index}`]));
+    const copied = applyReplanMargins(source, input).map((task) => ({
+      ...task,
+      id: idMap.get(task.id)!,
+      parentId: task.parentId ? idMap.get(task.parentId)! : null,
+      predecessors: task.predecessors.split(",").map((part) => {
+        const trimmed = part.trim();
+        const predecessor = [...source].sort((a, b) => b.id.length - a.id.length).find((item) => trimmed.startsWith(item.id));
+        return predecessor ? `${idMap.get(predecessor.id)}${trimmed.slice(predecessor.id.length)}` : trimmed;
+      }).filter(Boolean).join(", "),
+    }));
+    const actual = planFinishDate(
+      withCalculatedPlanningFields(
+        recalculateTasks(copied, { direction: "forward", calendarSystem: system, projectCalendarId: "base" }).tasks,
+        system,
+        "base",
+      ),
+    );
+    expect(predicted).toBe(actual);
+    // Fresh reserve on the not-started work pushes the finish past the 27 Oct baseline.
+    expect(predicted > "2026-10-27").toBe(true);
+  });
+
+  test("a margin percentage edit sizes a new reserve and reports restored margin", () => {
+    const exhausted = { ...tpR2(4)[1], marginPct: 20, marginDaysOriginal: 1, marginDaysConsumed: 1 };
+    // No reserve left, so a same-size percentage stays at zero.
+    expect(marginAfterPctChange(exhausted, 20).remaining).toBe(0);
+    const restored = marginAfterPctChange(exhausted, 60);
+    expect(restored.original).toBe(3); // 5 d · 60 %
+    expect(restored.consumed).toBe(1);
+    expect(restored.remaining).toBe(2);
+    // A smaller percentage can never show a negative remainder.
+    expect(marginAfterPctChange(exhausted, 0).remaining).toBe(0);
   });
 });

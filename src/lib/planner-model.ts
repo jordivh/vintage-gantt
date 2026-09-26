@@ -345,12 +345,83 @@ export function calculateCriticalPath(
   return result;
 }
 
+/** The original reserve a task would carry at a given margin percentage. */
+export function marginOriginalDaysFor(task: PlannerTask, marginPct: number): number {
+  if (task.isMilestone || task.duration === 0) return 0;
+  const pct = Math.max(0, marginPct);
+  if (pct === 0) return 0;
+  return Math.ceil(Math.max(0, durationInWorkingDays(task)) * pct / 100);
+}
+
 /** A task's margin reserve: the stored value when it has one, else sized from its work. */
 function marginReserveDays(task: PlannerTask) {
-  if (task.isMilestone || task.duration === 0) return 0;
   const marginPct = Math.max(0, task.marginPct ?? 0);
   if (marginPct === 0) return 0;
-  return task.marginDaysOriginal ?? Math.ceil(Math.max(0, durationInWorkingDays(task)) * marginPct / 100);
+  return task.marginDaysOriginal ?? marginOriginalDaysFor(task, marginPct);
+}
+
+/**
+ * The margin bookkeeping after a single task's percentage is edited: the new
+ * percentage sets a fresh original reserve sized from the task's work, the
+ * consumed days stay put (capped so the remaining reserve never goes negative),
+ * and the remaining reserve is what a task that had spent its margin gets back.
+ */
+export function marginAfterPctChange(task: PlannerTask, marginPct: number) {
+  const original = marginOriginalDaysFor(task, marginPct);
+  const consumed = Math.min(original, Math.max(0, task.marginDaysConsumed ?? 0));
+  return { original, consumed, remaining: Math.max(0, original - consumed) };
+}
+
+/** The project finish as the planner shows it: the last task date in the plan. */
+export function planFinishDate(tasks: PlannerTask[]): string {
+  return tasks.reduce((latest, task) => (task.finish > latest ? task.finish : latest), "");
+}
+
+export type ReplanScope = "all" | "not-started" | "selected";
+
+export interface ReplanScopeInput {
+  scope: ReplanScope;
+  selectedTaskIds?: readonly string[];
+  marginPct: number;
+}
+
+/**
+ * The leaf tasks a replan refreshes its margin for. Summaries roll up their
+ * children and milestones carry no reserve, so both are ignored, and completed
+ * work (`percent` 100) is never rewritten even when the scope says "all".
+ * "Not started" means no reported progress yet (`percent` is still 0), which
+ * keeps in-flight and completed work out of scope.
+ */
+export function replanScopeIds(tasks: PlannerTask[], input: ReplanScopeInput): Set<string> {
+  const summaryIds = new Set(tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id));
+  const selected = new Set(input.selectedTaskIds ?? []);
+  return new Set(
+    tasks
+      .filter((task) => !summaryIds.has(task.id) && !task.isMilestone && task.duration > 0 && (task.percent ?? 0) < 100)
+      .filter((task) => {
+        if (input.scope === "all") return true;
+        if (input.scope === "selected") return selected.has(task.id);
+        return (task.percent ?? 0) === 0;
+      })
+      .map((task) => task.id),
+  );
+}
+
+/**
+ * Rewrites margin bookkeeping for the tasks in scope: the new percentage sets a
+ * fresh original reserve sized from the task's work, and consumed margin resets
+ * to zero. Tasks outside the scope — started or completed work — keep both their
+ * percentage and their consumption. The input is never mutated, so the version a
+ * replan is based on stays exactly as it was.
+ */
+export function applyReplanMargins(tasks: PlannerTask[], input: ReplanScopeInput): PlannerTask[] {
+  const scope = replanScopeIds(tasks, input);
+  const marginPct = Math.max(0, Math.min(100, input.marginPct));
+  return tasks.map((task) =>
+    scope.has(task.id)
+      ? { ...task, marginPct, marginDaysOriginal: marginOriginalDaysFor(task, marginPct), marginDaysConsumed: 0 }
+      : task,
+  );
 }
 
 /**
@@ -372,8 +443,8 @@ export function applyMarginConsumption(previous: PlannerTask[], next: PlannerTas
     const marginPct = Math.max(0, task.marginPct ?? 0);
     const resized = marginPct !== Math.max(0, before.marginPct ?? 0);
     const original = resized
-      ? Math.ceil(workDays * marginPct / 100)
-      : Math.max(0, before.marginDaysOriginal ?? Math.ceil(workDays * marginPct / 100));
+      ? marginOriginalDaysFor(task, marginPct)
+      : Math.max(0, before.marginDaysOriginal ?? marginOriginalDaysFor(task, marginPct));
     const consumed = resized
       ? Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0))
       : Math.max(0, Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0) + (workDays - beforeWorkDays)));

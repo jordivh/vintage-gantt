@@ -23,6 +23,7 @@ import {
   LogOut,
   Plus,
   Redo2,
+  RotateCcw,
   Search,
   Trash2,
   Undo2,
@@ -39,7 +40,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyMarginConsumption, dependenciesForTasks, formatPredecessorsForDisplay, orderTasksForDisplay, recalculateTasks, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask } from "@/lib/planner-model";
+import { applyMarginConsumption, applyReplanMargins, dependenciesForTasks, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type ReplanScope } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -120,6 +121,7 @@ export default function Dashboard() {
     activeVersionId,
     setActiveVersion,
     createPlanVersion,
+    replanProject,
     createBaseline,
     deleteBaseline,
     baselines,
@@ -141,6 +143,7 @@ export default function Dashboard() {
   const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [modalTask, setModalTask] = useState<Task | null>(null);
   const [cellError, setCellError] = useState<{ taskId: string; column: ColumnKey; message: string } | null>(null);
+  const [marginNotice, setMarginNotice] = useState<{ taskId: string; message: string } | null>(null);
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
   const [query, setQuery] = useState("");
@@ -179,6 +182,10 @@ export default function Dashboard() {
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
   const [recalcDialog, setRecalcDialog] = useState(false);
+  const [replanDialog, setReplanDialog] = useState(false);
+  const [replanName, setReplanName] = useState("");
+  const [replanScope, setReplanScope] = useState<ReplanScope>("not-started");
+  const [replanPct, setReplanPct] = useState("20");
   const [activeBaselineId, setActiveBaselineId] = useState("");
 
   useEffect(() => {
@@ -202,6 +209,12 @@ export default function Dashboard() {
   useEffect(() => {
     try { localStorage.setItem("vintage-gantt-project-sidebar-collapsed", String(sidebarCollapsed)); } catch { /* storage is optional */ }
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!marginNotice) return;
+    const timer = setTimeout(() => setMarginNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [marginNotice]);
 
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
@@ -371,6 +384,7 @@ export default function Dashboard() {
       return;
     }
     setCellError(null);
+    setMarginNotice(null);
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
@@ -408,7 +422,20 @@ export default function Dashboard() {
         const start = addWorkingDays(finish, -(duration - 1), calendarId, system);
         return { ...task, start, finish, duration, durationUnit: "days" as const };
       }
-      if (field === "margin") return { ...task, marginPct: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
+      if (field === "margin") {
+        const marginPct = Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0));
+        // A repeat of the same value (e.g. blur right after Enter) must not clear
+        // a restore notice that was just shown.
+        if ((task.marginPct ?? 0) === marginPct) return task;
+        const before = remainingMarginDays(task);
+        const after = marginAfterPctChange(task, marginPct);
+        // A task that had spent its whole reserve and gains real reserve back must
+        // say so instead of appearing to change silently.
+        setMarginNotice(before === 0 && after.remaining > 0
+          ? { taskId: task.id, message: `Margin restored: +${after.remaining} d reserve (${after.original} d original − ${after.consumed} d consumed).` }
+          : null);
+        return { ...task, marginPct };
+      }
       if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
       if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
@@ -550,6 +577,7 @@ export default function Dashboard() {
     if (event.key === "Escape") {
       setEditing(null);
       setCellError(null);
+      setMarginNotice(null);
       return;
     }
     if (event.key === "Enter" || event.key === "Tab") {
@@ -710,6 +738,33 @@ export default function Dashboard() {
     setRelinkConfirm({ calendarId: pendingCalendarId, projects: impact.projects, tasks: impact.tasks });
   };
 
+  const replanMarginPct = Math.max(0, Math.min(100, Number(replanPct.replace("%", "")) || 0));
+  // The dialog preview runs the same forward pass the store will: rewrite the
+  // margins in scope, then schedule. Only the ids differ afterwards, so the
+  // predicted finish here is the finish the confirmed replan actually plans.
+  const replanPreview = useMemo(() => {
+    if (!replanDialog) return null;
+    const input = { scope: replanScope, selectedTaskIds: selected, marginPct: replanMarginPct };
+    const adjusted = applyReplanMargins(tasks, input);
+    const result = recalculateTasks(adjusted, { direction: "forward", calendarSystem: system, projectCalendarId: calendarId });
+    const scheduled = result.error ? adjusted : withCalculatedPlanningFields(result.tasks, system, calendarId);
+    return { affected: replanScopeIds(tasks, input).size, finish: planFinishDate(scheduled) };
+  }, [replanDialog, replanScope, replanMarginPct, selected, tasks, system, calendarId]);
+  const openReplan = () => {
+    setReplanName(`Replan ${formatDate(todayLineDate)}`);
+    setReplanScope("not-started");
+    setReplanPct("20");
+    setReplanDialog(true);
+    setOverflowOpen(false);
+  };
+  const confirmReplan = () => {
+    const result = replanProject({ name: replanName, scope: replanScope, selectedTaskIds: selected, marginPct: replanMarginPct });
+    setHistory([]);
+    setFuture([]);
+    setReplanDialog(false);
+    toast.success(`Replanned ${result.affected} task${result.affected === 1 ? "" : "s"} · finish ${formatDate(result.finish)}`);
+  };
+
   return (
     <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
       <header className="planner-topbar planner-context-bar">
@@ -769,6 +824,7 @@ export default function Dashboard() {
             <button onClick={() => navigate("/reports/margins")}><Columns3 size={14} /> Margin report</button>
             <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
+            <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
             <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}><Copy size={14} /> New version</button>
             <div className="menu-rule" />
             <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}><FileSpreadsheet size={14} /> Set baseline</button>
@@ -835,6 +891,58 @@ export default function Dashboard() {
               >
                 Recalculate
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {replanDialog && (
+        <div className="modal-backdrop" onClick={() => setReplanDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">REPLAN FROM TODAY</div><h2>Build in fresh reserve</h2></div>
+              <button className="icon-button" onClick={() => setReplanDialog(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              The current version of <b>{activeProject.name}</b> is kept exactly as it is; the replan becomes a new plan
+              version, so every replan stays in the history. Started and completed work is never re-planned.
+            </p>
+            <div className="modal-grid">
+              <label>
+                New version name
+                <input value={replanName} onChange={(event) => setReplanName(event.target.value)} />
+              </label>
+              <label>
+                New margin %
+                <input type="number" min={0} max={100} value={replanPct} onChange={(event) => setReplanPct(event.target.value)} />
+              </label>
+            </div>
+            <div className="planning-mode">
+              <span>Apply the new margin to</span>
+              <div>
+                {([
+                  ["not-started", "Not started"],
+                  ["all", "All tasks"],
+                  ["selected", "Selected tasks"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    className={replanScope === value ? "selected" : ""}
+                    disabled={value === "selected" && !selected.length}
+                    onClick={() => setReplanScope(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="replan-summary">
+              <span><b>{replanPreview?.affected ?? 0}</b> task{(replanPreview?.affected ?? 0) === 1 ? "" : "s"} affected</span>
+              <span>Finish <b>{formatDate(replanPreview?.finish || projectFinishIso)}</b><small>current version: {formatDate(projectFinishIso)}</small></span>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setReplanDialog(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={confirmReplan} disabled={replanScope === "selected" && !selected.length}>Create replan</button>
             </div>
           </div>
         </div>
@@ -1016,7 +1124,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
@@ -1032,6 +1140,7 @@ export default function Dashboard() {
                           }}
                         >
                           {cellError?.taskId === task.id && cellError.column === column.key && <span className="cell-validation-error" role="alert">{cellError.message}</span>}
+                          {marginNotice?.taskId === task.id && column.key === "margin" && <span className="cell-margin-notice" role="status">{marginNotice.message}</span>}
                           {isName && <span className="row-handle"><GripVertical size={13} /></span>}
                           {isName && summary && (
                             <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>

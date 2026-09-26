@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { dependenciesForTasks, recalculateTasks, withCalculatedPlanningFields, type PlannerTask } from "./planner-model";
+import { applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, replanScopeIds, withCalculatedPlanningFields, type PlannerTask, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -209,6 +209,13 @@ interface CalendarStoreValue {
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
   createPlanVersion: (name: string, resetMargins: boolean) => string;
+  /**
+   * Builds fresh reserve for the remaining work: always creates a new plan
+   * version, leaving the current one untouched, then applies the new margin
+   * percentage to the tasks in scope and resets their consumed margin. Returns
+   * the new version id, how many tasks were affected and the finish it plans.
+   */
+  replanProject: (input: { name: string; scope: ReplanScope; selectedTaskIds?: string[]; marginPct: number }) => { versionId: string; affected: number; finish: string };
   deletePlanVersion: (versionId: string) => { ok: boolean; message?: string };
 }
 
@@ -411,6 +418,42 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveVersionId(id);
     return id;
   }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
+
+  const replanProject = useCallback<CalendarStoreValue["replanProject"]>((input) => {
+    const source = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
+    const id = `version-${uid()}`;
+    const affected = replanScopeIds(source, input).size;
+    const margined = applyReplanMargins(source, input);
+    const version: PlanVersion = { id, projectId: activeProjectId, name: input.name.trim() || `Replan ${input.marginPct}%`, isActive: true, createdAt: new Date().toISOString() };
+    const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
+    const rewritePredecessors = (text: string) => text.split(",").map((part) => {
+      const match = part.trim().match(/^(\d+)(.*)$/);
+      if (!match) return part.trim();
+      return `${idMap.get(match[1]) ?? match[1]}${match[2]}`;
+    }).filter(Boolean).join(", ");
+    const copied = margined.map((task) => ({
+      ...task,
+      id: idMap.get(task.id) ?? `task-${uid()}`,
+      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
+      predecessors: rewritePredecessors(task.predecessors),
+      versionId: id,
+    }));
+    const result = recalculateTasks(copied, {
+      direction: "forward",
+      calendarSystem: system,
+      projectCalendarId: activeProject.calendarId,
+    });
+    const scheduled = result.error ? copied : withCalculatedPlanningFields(result.tasks, system, activeProject.calendarId);
+    const sourceTaskIds = new Set(source.map((task) => task.id));
+    const copiedAssignments = assignments
+      .filter((assignment) => sourceTaskIds.has(assignment.taskId))
+      .map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
+    setPlanVersions((current) => [...current.map((item) => item.projectId === activeProjectId ? { ...item, isActive: false } : item), version]);
+    setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...scheduled] }));
+    setAssignments((current) => [...current, ...copiedAssignments]);
+    setActiveVersionId(id);
+    return { versionId: id, affected, finish: planFinishDate(scheduled) };
+  }, [activeProjectId, activeVersionId, assignments, tasksByProject, system, activeProject.calendarId]);
 
   const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
     const versions = planVersions.filter((version) => version.projectId === activeProjectId);
@@ -823,6 +866,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       activeVersionId,
       setActiveVersion,
       createPlanVersion,
+      replanProject,
       deletePlanVersion,
     }),
     [
@@ -830,7 +874,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, deletePlanVersion,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion,
     ],
   );
 
