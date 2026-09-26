@@ -507,7 +507,10 @@ export default function Dashboard() {
     setEditing(null);
   };
 
-  /** Drops a task's start constraint, so it returns to its earliest start. */
+  /**
+   * Drops a task's "start no earlier than" constraint, so the next pass returns
+   * it to the earliest start its dependencies allow.
+   */
   const removeConstraint = (id: string) => {
     commit(tasks.map((task) => (task.id === id ? { ...task, startConstraint: undefined, startConstraintActive: false } : task)));
     toast("Start constraint removed");
