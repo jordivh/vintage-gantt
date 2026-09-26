@@ -82,6 +82,31 @@ export function parseDependency(value: string, tasks: { id: string }[]): Schedul
   return value.split(",").map((part) => parseDependencyPart(part.trim(), tasks)).filter((dependency): dependency is ScheduleDependency => Boolean(dependency));
 }
 
+/** Serializes a dependency back to storage form: internal predecessor id + type + lag. */
+export function serializeDependency(dependency: ScheduleDependency): string {
+  const lag = dependency.lagDays === 0 ? "" : `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d`;
+  return `${dependency.predecessorId}${dependency.type}${lag}`;
+}
+
+/**
+ * Resolves one stored predecessor token. Internal task ids are matched directly;
+ * a legacy token that only carries a sequential display id is resolved through
+ * the task order, so older data keeps working.
+ */
+function resolvePredecessorReference(
+  part: string,
+  tasks: { id: string }[],
+  ordered: { id: string }[],
+): ScheduleDependency | null {
+  const internal = parseDependencyPart(part, tasks);
+  if (internal) return internal;
+  const legacy = part.match(displayDependencyPattern);
+  if (!legacy) return null;
+  const predecessor = ordered[Number(legacy[1]) - 1];
+  if (!predecessor) return null;
+  return { predecessorId: predecessor.id, successorId: "", type: (legacy[2]?.toUpperCase() ?? "FS") as DependencyType, lagDays: Number(legacy[3] ?? 0) };
+}
+
 /** Converts stored internal task references into the current sequential display IDs. */
 export function formatPredecessorsForDisplay(
   value: string,
@@ -90,22 +115,86 @@ export function formatPredecessorsForDisplay(
 ): string {
   const ordered = orderTasksForDisplay(tasks);
   return value.split(",").map((rawPart) => {
-    const part = rawPart.trim();
-    if (!part) return "";
-    const internal = parseDependencyPart(part, tasks);
-    const legacy = !internal ? part.match(displayDependencyPattern) : null;
-    const dependency = internal ?? (legacy ? {
-      predecessorId: ordered[Number(legacy[1]) - 1]?.id ?? "",
-      successorId: "",
-      type: (legacy[2]?.toUpperCase() ?? "FS") as DependencyType,
-      lagDays: Number(legacy[3] ?? 0),
-    } : null);
+    const dependency = resolvePredecessorReference(rawPart.trim(), tasks, ordered);
     if (!dependency?.predecessorId) return "";
     const displayId = displayIds.get(dependency.predecessorId);
     if (displayId === undefined) return "";
-    const lag = dependency.lagDays === 0 ? "" : `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d`;
-    return `${displayId}${dependency.type}${lag}`;
+    return `${displayId}${dependency.type}${dependency.lagDays === 0 ? "" : `${dependency.lagDays > 0 ? "+" : ""}${dependency.lagDays}d`}`;
   }).filter(Boolean).join(", ");
+}
+
+/** Anything a copy needs from a task to remap its references. */
+export interface RemapTaskShape {
+  id: string;
+  parentId?: string | null;
+  predecessors: string;
+  name?: string;
+}
+
+export interface PredecessorRemap {
+  value: string;
+  /** Tokens that could not be resolved to a source task, reported, never dropped silently. */
+  unmapped: string[];
+}
+
+/**
+ * Rewrites a stored predecessor string through `idMap`, keeping the dependency
+ * type and lag. A token that cannot be resolved to a source task is reported in
+ * `unmapped` instead of being silently removed.
+ */
+export function remapPredecessorText(
+  text: string,
+  idMap: ReadonlyMap<string, string>,
+  tasks: RemapTaskShape[],
+  ordered: { id: string }[] = orderTasksForDisplay(tasks),
+): PredecessorRemap {
+  const unmapped: string[] = [];
+  const value = text.split(",").map((rawPart) => rawPart.trim()).filter(Boolean).map((part) => {
+    const dependency = resolvePredecessorReference(part, tasks, ordered);
+    const mapped = dependency ? idMap.get(dependency.predecessorId) : undefined;
+    if (!dependency || !mapped) { unmapped.push(part); return ""; }
+    return serializeDependency({ ...dependency, predecessorId: mapped });
+  }).filter(Boolean).join(", ");
+  return { value, unmapped };
+}
+
+export interface RemapCopiedTasksResult<T> {
+  tasks: T[];
+  error?: string;
+}
+
+/**
+ * Copies tasks into a new version, remapping every reference through `idMap`:
+ * the parent chain, each predecessor (with its type and lag) and the start
+ * constraint. If even one reference cannot be remapped the whole copy fails with
+ * a clear message instead of producing a version with missing links.
+ *
+ * Margin figures, the start constraint (an absolute date) and all other fields
+ * travel along untouched, so the caller can apply its own mode-specific resets.
+ */
+export function remapCopiedTasks<T extends RemapTaskShape>(
+  tasks: T[],
+  idMap: ReadonlyMap<string, string>,
+  versionId?: string,
+): RemapCopiedTasksResult<T> {
+  const ordered = orderTasksForDisplay(tasks);
+  const missing: string[] = [];
+  const copied = tasks.map((task) => {
+    const newId = idMap.get(task.id);
+    if (!newId) missing.push(`task “${task.name ?? task.id}”`);
+    let parentId: string | null = null;
+    if (task.parentId) {
+      const mapped = idMap.get(task.parentId);
+      if (!mapped) missing.push(`parent of “${task.name ?? task.id}”`); else parentId = mapped;
+    }
+    const remapped = remapPredecessorText(task.predecessors, idMap, tasks, ordered);
+    for (const part of remapped.unmapped) missing.push(`predecessor ${part} on “${task.name ?? task.id}”`);
+    return { ...task, id: newId ?? task.id, parentId, predecessors: remapped.value, ...(versionId ? { versionId } : {}) } as T;
+  });
+  if (missing.length) {
+    return { tasks, error: `Could not copy: ${missing.length} reference${missing.length === 1 ? "" : "s"} could not be remapped (${missing.slice(0, 3).join("; ")}${missing.length > 3 ? "; …" : ""}).` };
+  }
+  return { tasks: copied };
 }
 
 export function resolvePredecessorInput(

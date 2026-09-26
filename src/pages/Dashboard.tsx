@@ -818,6 +818,7 @@ export default function Dashboard() {
   };
   const confirmReplan = () => {
     const result = replanProject({ name: replanName, scope: replanScope, selectedTaskIds: selected, marginPct: replanMarginPct });
+    if (!result.ok) { toast.error(result.message ?? "Could not create the replan."); return; }
     setHistory([]);
     setFuture([]);
     setReplanDialog(false);
@@ -855,7 +856,8 @@ export default function Dashboard() {
     setOverflowOpen(false);
   };
   const confirmNewVersion = () => {
-    createPlanVersion(versionName.trim() || `Version ${projectVersionCount + 1}`);
+    const result = createPlanVersion(versionName.trim() || `Version ${projectVersionCount + 1}`);
+    if (!result.ok) { toast.error(result.message ?? "Could not create the version."); return; }
     setHistory([]);
     setFuture([]);
     setVersionDialog(false);

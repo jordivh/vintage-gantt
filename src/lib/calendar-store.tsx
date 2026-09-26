@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, replanScopeIds, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, replanScopeIds, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -218,14 +218,14 @@ interface CalendarStoreValue {
    * in the version's history.
    */
   setPlanMode: (versionId: string, mode: PlanMode) => { ok: boolean; message?: string };
-  createPlanVersion: (name: string) => string;
+  createPlanVersion: (name: string) => { ok: boolean; message?: string; versionId?: string };
   /**
    * Builds fresh reserve for the remaining work: always creates a new plan
    * version, leaving the current one untouched, then applies the new margin
    * percentage to the tasks in scope and resets their consumed margin. Returns
    * the new version id, how many tasks were affected and the finish it plans.
    */
-  replanProject: (input: { name: string; scope: ReplanScope; selectedTaskIds?: string[]; marginPct: number }) => { versionId: string; affected: number; finish: string };
+  replanProject: (input: { name: string; scope: ReplanScope; selectedTaskIds?: string[]; marginPct: number }) => { ok: boolean; versionId: string; affected: number; finish: string; message?: string };
   deletePlanVersion: (versionId: string) => { ok: boolean; message?: string };
 }
 
@@ -437,17 +437,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // the reserve in days is re-derived from each percentage.
     const version: PlanVersion = { id, projectId: activeProjectId, name: name.trim() || `Version ${planVersions.filter((item) => item.projectId === activeProjectId).length + 1}`, isActive: true, createdAt: new Date().toISOString(), mode: "planning", modeHistory: [] };
     const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
-    const copied = applyPlanningModeMargins(source.map((task) => ({
-      ...task,
-      id: idMap.get(task.id) ?? `task-${uid()}`,
-      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
-      predecessors: task.predecessors.split(",").map((part) => {
-        const match = part.trim().match(/^(\d+)(.*)$/);
-        if (!match) return part.trim();
-        return `${idMap.get(match[1]) ?? match[1]}${match[2]}`;
-      }).filter(Boolean).join(", "),
-      versionId: id,
-    })));
+    // Remap parents, predecessors (type + lag) and the start constraint through
+    // the id map; a single unresolvable reference fails the whole copy.
+    const remapped = remapCopiedTasks(source, idMap, id);
+    if (remapped.error) return { ok: false, message: remapped.error };
+    const copied = applyPlanningModeMargins(remapped.tasks);
     const sourceTaskIds = new Set(source.map((task) => task.id));
     const copiedAssignments = assignments
       .filter((assignment) => sourceTaskIds.has(assignment.taskId))
@@ -456,7 +450,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...copied] }));
     setAssignments((current) => [...current, ...copiedAssignments]);
     setActiveVersionId(id);
-    return id;
+    return { ok: true, versionId: id };
   }, [activeProjectId, activeVersionId, assignments, planVersions, tasksByProject]);
 
   const replanProject = useCallback<CalendarStoreValue["replanProject"]>((input) => {
@@ -466,18 +460,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const margined = applyReplanMargins(source, input);
     const version: PlanVersion = { id, projectId: activeProjectId, name: input.name.trim() || `Replan ${input.marginPct}%`, isActive: true, createdAt: new Date().toISOString(), mode: "planning", modeHistory: [] };
     const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
-    const rewritePredecessors = (text: string) => text.split(",").map((part) => {
-      const match = part.trim().match(/^(\d+)(.*)$/);
-      if (!match) return part.trim();
-      return `${idMap.get(match[1]) ?? match[1]}${match[2]}`;
-    }).filter(Boolean).join(", ");
-    const copied = margined.map((task) => ({
-      ...task,
-      id: idMap.get(task.id) ?? `task-${uid()}`,
-      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
-      predecessors: rewritePredecessors(task.predecessors),
-      versionId: id,
-    }));
+    const remapped = remapCopiedTasks(margined, idMap, id);
+    if (remapped.error) return { ok: false, versionId: "", affected, finish: "", message: remapped.error };
+    const copied = remapped.tasks;
     const result = recalculateTasks(copied, {
       direction: "forward",
       calendarSystem: system,
@@ -492,7 +477,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...scheduled] }));
     setAssignments((current) => [...current, ...copiedAssignments]);
     setActiveVersionId(id);
-    return { versionId: id, affected, finish: planFinishDate(scheduled) };
+    return { ok: true, versionId: id, affected, finish: planFinishDate(scheduled) };
   }, [activeProjectId, activeVersionId, assignments, tasksByProject, system, activeProject.calendarId]);
 
   const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
@@ -635,18 +620,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const now = new Date().toISOString();
     if (!source) return id;
     const sourceTasks = tasksByProject[projectId] ?? [];
-    const allTaskIds = Object.values(tasksByProject).flat().map((task) => Number(task.id)).filter(Number.isFinite);
-    const idOffset = Math.max(0, ...allTaskIds) + 1;
-    const idMap = new Map(sourceTasks.map((task, index) => [task.id, String(idOffset + index)]));
-    const copiedTasks = sourceTasks.map((task) => ({
-      ...task,
-      id: idMap.get(task.id) ?? task.id,
-      parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
-      predecessors: task.predecessors.split(",").map((part) => {
-        const match = part.trim().match(/^(\d+)(.*)$/);
-        return match ? `${idMap.get(match[1]) ?? match[1]}${match[2]}` : part.trim();
-      }).filter(Boolean).join(", "),
-    }));
+    const idMap = new Map(sourceTasks.map((task) => [task.id, `task-${uid()}`]));
+    const remapped = remapCopiedTasks(sourceTasks, idMap);
+    if (remapped.error) { toast.error(remapped.error); return ""; }
+    const copiedTasks = remapped.tasks;
     const copiedAssignments = assignments.filter((assignment) => sourceTasks.some((task) => task.id === assignment.taskId)).map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
     const copy: ProjectRecord = { ...source, id, name: name.trim() || `${source.name} copy`, status: "active", kind: "project", isBuiltin: false, createdAt: now, updatedAt: now };
     setProjects((current) => [...current, copy]);

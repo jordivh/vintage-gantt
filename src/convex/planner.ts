@@ -2,6 +2,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
+import { remapPredecessorText } from "../lib/planner-model";
 
 const requireOwner = async (ctx: QueryCtx | MutationCtx) => {
   const userId = await getAuthUserId(ctx);
@@ -103,10 +104,20 @@ const finishDateFor = (start: string, duration: number, unit: string, calendarId
   const days = Math.max(0, unit === "weeks" ? duration * 5 : duration);
   return days <= 1 ? start : addWorkingDateOffset(start, days - 1, calendarId, calendars, exceptions);
 };
-const rewritePredecessors = (text: string, idMap: Map<string, string>) => text.split(",").map((part) => {
-  const match = part.trim().match(/^(\d+)(.*)$/);
-  return match ? `${idMap.get(match[1]) ?? match[1]}${match[2]}` : part.trim();
-}).filter(Boolean).join(", ");
+/**
+ * Remaps a stored predecessor string onto copied task ids, keeping type and lag.
+ * A token that cannot be resolved fails the whole copy instead of silently
+ * producing a template/project with missing links.
+ */
+const rewritePredecessors = (
+  text: string,
+  idMap: Map<string, string>,
+  tasks: { id: string; parentId?: string | null; predecessors: string }[],
+) => {
+  const remapped = remapPredecessorText(text, idMap, tasks);
+  if (remapped.unmapped.length) throw new Error(`Could not copy the plan: ${remapped.unmapped.length} predecessor reference(s) could not be remapped (${remapped.unmapped.slice(0, 3).join(", ")}).`);
+  return remapped.value;
+};
 
 const testTasks = (versionId: string) => [
   { id: "92026001", projectId: TEST_PROJECT_ID, parentId: null, sortOrder: 0, name: "Voorbereiding", startOffsetDays: 0, duration: 0, durationUnit: "days", start: "2026-10-05", finish: "2026-10-13", isMilestone: false, predecessors: "", resource: "", percent: 0, notes: "", color: "ochre", collapsed: false, versionId, marginPct: 0, marginDaysOriginal: 0, marginDaysConsumed: 0 },
@@ -206,7 +217,7 @@ export const saveAsTemplate = mutation({
         sortOrder: task.sortOrder, name: task.name, duration: task.duration, durationUnit: task.durationUnit,
         start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(templateAnchorDate, task.finish, source.calendarId, calendarRows, exceptionRows),
         constraintOffsetDays: task.startConstraint ? workingDateOffset(templateAnchorDate, task.startConstraint, source.calendarId, calendarRows, exceptionRows) : undefined,
-        isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap), resource: "",
+        isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap, sourceTasks), resource: "",
         percent: 0, notes: task.notes, color: task.color, collapsed: task.collapsed ?? false, versionId,
         marginPct: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : task.marginPct ?? 0,
         marginDaysOriginal: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : Math.ceil(Math.max(0, task.duration * (task.durationUnit === "weeks" ? 5 : 1)) * (task.marginPct ?? 0) / 100),
@@ -282,7 +293,7 @@ export const createProjectFromTemplate = mutation({
         id: taskId, projectId: id, parentId: sourceTask.parentId ? idMap.get(sourceTask.parentId) ?? null : null, sortOrder: sourceTask.sortOrder,
         name: sourceTask.name, duration, durationUnit: sourceTask.durationUnit, start, finish, isMilestone: duration === 0 && !hasChildren,
 
-        predecessors: rewritePredecessors(sourceTask.predecessors, idMap), resource: "", percent: 0, notes: sourceTask.notes,
+        predecessors: rewritePredecessors(sourceTask.predecessors, idMap, activeSourceTasks), resource: "", percent: 0, notes: sourceTask.notes,
         color: sourceTask.color, collapsed: sourceTask.collapsed ?? false, versionId, marginPct,
         marginDaysOriginal: hasChildren || duration === 0 ? 0 : Math.ceil(Math.max(0, duration * (sourceTask.durationUnit === "weeks" ? 5 : 1)) * marginPct / 100), marginDaysConsumed: 0,
         startOffsetDays, finishOffsetDays,

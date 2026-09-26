@@ -14,11 +14,14 @@ import {
   applyModeCommit,
   applyPlanningModeMargins,
   applyReplanMargins,
+  dependenciesForTasks,
   fieldModeReadOnly,
+  formatPredecessorsForDisplay,
   marginAfterPctChange,
   orderTasksForDisplay,
   planFinishDate,
   recalculateTasks,
+  remapCopiedTasks,
   replanScopeIds,
   startConstraintFor,
   startEditRestriction,
@@ -699,5 +702,92 @@ describe("start constraints — a manual start survives recalculation", () => {
     expect(startConstraintFor(t5, earliest, base, system, "base")).toBeUndefined();
     const later = addWorkingDays(earliest, 3, "base", system);
     expect(startConstraintFor(t5, later, base, system, "base")).toBe(later);
+  });
+});
+
+describe("version copy — references are remapped onto the new ids", () => {
+  const newIds = (tasks: PlannerTask[]) => new Map(tasks.map((task, index) => [task.id, `task-new-${index}`]));
+  const byNew = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
+
+  test("TP-R2 keeps every predecessor, its type and its lag", () => {
+    const source = tpR2(4);
+    const idMap = newIds(source);
+    const result = remapCopiedTasks(source, idMap, "version-2");
+    expect(result.error).toBeUndefined();
+    const copied = result.tasks;
+    const get = (id: string) => byNew(copied).get(idMap.get(id)!)!;
+    expect(get("t3").predecessors).toBe(`${idMap.get("t2")!}FS`);
+    expect(get("t5").predecessors).toBe(`${idMap.get("t3")!}FS`);
+    expect(get("t6").predecessors).toBe(`${idMap.get("t3")!}FS`);
+    expect(get("t7").predecessors).toBe(`${idMap.get("t5")!}FS`);
+    expect(get("t8").predecessors).toBe(`${idMap.get("t7")!}FS`);
+    // WBS parents are remapped and the version is stamped on every row.
+    expect(get("t3").parentId).toBe(idMap.get("t1")!);
+    expect(copied.every((task) => task.versionId === "version-2")).toBe(true);
+    // The whole network is intact: same number of links as the source.
+    expect(dependenciesForTasks(copied).length).toBe(dependenciesForTasks(source).length);
+  });
+
+  test("opaque task-… ids remap too (the old numeric-only rewrite failed here)", () => {
+    // Re-key TP-R2 to uuid-style ids, exactly like a version copied before.
+    const original = tpR2(4);
+    const opaqueMap = new Map(original.map((task) => [task.id, `task-${task.id}`]));
+    const source = original.map((task) => ({
+      ...task,
+      id: opaqueMap.get(task.id)!,
+      parentId: task.parentId ? opaqueMap.get(task.parentId)! : null,
+      predecessors: task.predecessors.split(",").map((part) => part.trim()).filter(Boolean).map((part) => {
+        const predecessor = [...original].sort((a, b) => b.id.length - a.id.length).find((candidate) => part.startsWith(candidate.id));
+        return predecessor ? `${opaqueMap.get(predecessor.id)}${part.slice(predecessor.id.length)}` : part;
+      }).join(", "),
+    }));
+    const idMap = newIds(source);
+    const result = remapCopiedTasks(source, idMap, "version-2");
+    expect(result.error).toBeUndefined();
+    const get = (id: string) => byNew(result.tasks).get(idMap.get(id)!)!;
+    expect(get("task-t3").predecessors).toBe(`${idMap.get("task-t2")!}FS`);
+    expect(get("task-t5").predecessors).toBe(`${idMap.get("task-t3")!}FS`);
+    expect(get("task-t6").predecessors).toBe(`${idMap.get("task-t3")!}FS`);
+  });
+
+  test("dependency type and lag survive the copy", () => {
+    const source = tpR2(4).map((task) => task.id === "t3" ? { ...task, predecessors: "t2SS+2d" } : task);
+    const idMap = newIds(source);
+    const result = remapCopiedTasks(source, idMap, "v");
+    expect(result.error).toBeUndefined();
+    expect(byNew(result.tasks).get(idMap.get("t3")!)!.predecessors).toBe(`${idMap.get("t2")!}SS+2d`);
+  });
+
+  test("an unresolvable reference fails the whole copy instead of dropping it", () => {
+    const source = tpR2(4).map((task) => task.id === "t5" ? { ...task, predecessors: "t3FS, t999FS" } : task);
+    const idMap = newIds(source);
+    const result = remapCopiedTasks(source, idMap, "v");
+    expect(result.error).toContain("could not be remapped");
+    // Nothing is emitted when validation fails.
+    expect(result.tasks).toBe(source);
+  });
+
+  test("the start constraint and margin figures travel with the copy", () => {
+    const source = tpR2(4).map((task) => task.id === "t5" ? { ...task, startConstraint: "2026-10-20", marginDaysConsumed: 1 } : task);
+    const idMap = newIds(source);
+    const result = remapCopiedTasks(source, idMap, "v").tasks;
+    const t5 = byNew(result).get(idMap.get("t5")!)!;
+    expect(t5.startConstraint).toBe("2026-10-20");
+    expect(t5.marginDaysConsumed).toBe(1);
+    expect(t5.marginPct).toBe(source.find((task) => task.id === "t5")!.marginPct);
+  });
+
+  test("display ids renumber 1..n and predecessors read 2FS, 3FS, 3FS, 5FS, 7FS", () => {
+    const source = tpR2(4);
+    const idMap = newIds(source);
+    const copied = remapCopiedTasks(source, idMap, "v").tasks;
+    const displayIds = new Map(orderTasksForDisplay(copied).map((task, index) => [task.id, index + 1]));
+    const get = (id: string) => byNew(copied).get(idMap.get(id)!)!;
+    expect(displayIds.get(idMap.get("t3")!)).toBe(3);
+    expect(formatPredecessorsForDisplay(get("t3").predecessors, copied, displayIds)).toBe("2FS");
+    expect(formatPredecessorsForDisplay(get("t5").predecessors, copied, displayIds)).toBe("3FS");
+    expect(formatPredecessorsForDisplay(get("t6").predecessors, copied, displayIds)).toBe("3FS");
+    expect(formatPredecessorsForDisplay(get("t7").predecessors, copied, displayIds)).toBe("5FS");
+    expect(formatPredecessorsForDisplay(get("t8").predecessors, copied, displayIds)).toBe("7FS");
   });
 });
