@@ -59,7 +59,7 @@ export interface ModeSwitch { at: string; from: PlanMode; to: PlanMode; }
 export interface VersionEvent { at: string; type: "mode-switch" | "baseline"; from?: PlanMode; to?: PlanMode; baselineId?: string; name?: string; }
 export interface PlanVersion { id: string; projectId: string; name: string; isActive: boolean; createdAt: string; mode?: PlanMode; history?: VersionEvent[]; modeHistory?: ModeSwitch[]; }
 export interface Baseline { id: string; projectId: string; versionId: string; name: string; note?: string; createdAt: string; captureDate?: string; }
-export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; totalFloat?: number; }
+export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; totalFloat?: number; startConstraint?: string; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -522,7 +522,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const baseline: Baseline = { id, projectId: activeProjectId, versionId, name: name.trim() || "Baseline", note, createdAt: at, captureDate: captureDate || at.slice(0, 10) };
     // A full, immutable snapshot of the version: dates, work, dependencies,
     // margin percentage, reserve in days and consumption.
-    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === versionId).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0, predecessors: task.predecessors, totalFloat: task.totalFloat ?? 0 }));
+    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === versionId).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0, predecessors: task.predecessors, totalFloat: task.totalFloat ?? 0, startConstraint: task.startConstraint }));
     setBaselines((current) => [...current, baseline]);
     setBaselineTasks((current) => [...current, ...snapshots]);
     // Capture is part of the version's history, timestamped like a mode switch.

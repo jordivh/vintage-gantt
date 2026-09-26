@@ -205,6 +205,7 @@ export const saveAsTemplate = mutation({
         id: idMap.get(task.id)!, projectId: id, parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
         sortOrder: task.sortOrder, name: task.name, duration: task.duration, durationUnit: task.durationUnit,
         start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(templateAnchorDate, task.finish, source.calendarId, calendarRows, exceptionRows),
+        constraintOffsetDays: task.startConstraint ? workingDateOffset(templateAnchorDate, task.startConstraint, source.calendarId, calendarRows, exceptionRows) : undefined,
         isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap), resource: "",
         percent: 0, notes: task.notes, color: task.color, collapsed: task.collapsed ?? false, versionId,
         marginPct: sourceTasks.some((candidate) => candidate.parentId === task.id) || task.duration === 0 ? 0 : task.marginPct ?? 0,
@@ -285,6 +286,7 @@ export const createProjectFromTemplate = mutation({
         color: sourceTask.color, collapsed: sourceTask.collapsed ?? false, versionId, marginPct,
         marginDaysOriginal: hasChildren || duration === 0 ? 0 : Math.ceil(Math.max(0, duration * (sourceTask.durationUnit === "weeks" ? 5 : 1)) * marginPct / 100), marginDaysConsumed: 0,
         startOffsetDays, finishOffsetDays,
+        startConstraint: typeof sourceTask.constraintOffsetDays === "number" ? addWorkingDateOffset(projectAnchorDate, sourceTask.constraintOffsetDays, calendarId, calendars, exceptions) : undefined,
       };
       await ctx.db.insert("tasks", { ownerId, ...task });
       createdTasks.push(task);

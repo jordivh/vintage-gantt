@@ -20,6 +20,7 @@ import {
   planFinishDate,
   recalculateTasks,
   replanScopeIds,
+  startConstraintFor,
   startEditRestriction,
   withCalculatedPlanningFields,
   type PlannerTask,
@@ -612,5 +613,91 @@ describe("plan modes — planning replans, monitoring tracks reality", () => {
     // The version the replan was built from keeps its own margins and consumption.
     expect(monitoredT2.marginDaysConsumed).toBe(1);
     expect(byId(monitored).get("t2")).toBe(monitoredT2);
+  });
+});
+
+describe("start constraints — a manual start survives recalculation", () => {
+  const system = systemWith([]);
+  const seed = (): PlannerTask[] => {
+    const seeded = withCalculatedPlanningFields(tpR2(4), system, "base");
+    const recalculated = recalculateTasks(seeded, { direction: "forward", calendarSystem: system, projectCalendarId: "base" });
+    return withCalculatedPlanningFields(recalculated.tasks, system, "base");
+  };
+  const recalc = (tasks: PlannerTask[]): PlannerTask[] => {
+    const result = recalculateTasks(tasks, { direction: "forward", calendarSystem: system, projectCalendarId: "base" });
+    expect(result.error).toBeUndefined();
+    return withCalculatedPlanningFields(result.tasks, system, "base");
+  };
+  const byId = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
+  const setConstraint = (tasks: PlannerTask[], id: string, date: string) =>
+    recalc(tasks.map((task) => (task.id === id ? { ...task, startConstraint: date } : task)));
+
+  test("a later start on 2.1 is kept and 2.2 does not move", () => {
+    const base = seed();
+    const t5Base = byId(base).get("t5")!.start;
+    const t6Base = byId(base).get("t6")!.start;
+    const later = addWorkingDays(t5Base, 4, "base", system);
+    const moved = setConstraint(base, "t5", later);
+    expect(byId(moved).get("t5")!.start).toBe(later);
+    expect(byId(moved).get("t5")!.startConstraintActive).toBe(true);
+    // 2.1's constraint must not leak into its sibling 2.2.
+    expect(byId(moved).get("t6")!.start).toBe(t6Base);
+  });
+
+  test("moving 2.2 later leaves 2.1 where the user put it, and the pass is stable", () => {
+    const base = seed();
+    const t5Base = byId(base).get("t5")!.start;
+    const t6Base = byId(base).get("t6")!.start;
+    const movedT5 = setConstraint(base, "t5", addWorkingDays(t5Base, 4, "base", system));
+    const movedBoth = setConstraint(movedT5, "t6", addWorkingDays(t6Base, 2, "base", system));
+    expect(byId(movedBoth).get("t5")!.start).toBe(addWorkingDays(t5Base, 4, "base", system));
+    expect(byId(movedBoth).get("t6")!.start).toBe(addWorkingDays(t6Base, 2, "base", system));
+    const stable = recalc(movedBoth);
+    expect(byId(stable).get("t5")!.start).toBe(byId(movedBoth).get("t5")!.start);
+    expect(byId(stable).get("t6")!.start).toBe(byId(movedBoth).get("t6")!.start);
+  });
+
+  test("a predecessor that overtakes the constraint wins, and the constraint turns inactive", () => {
+    const base = seed();
+    const t5Base = byId(base).get("t5")!.start;
+    const constraint = addWorkingDays(t5Base, 2, "base", system);
+    const moved = setConstraint(base, "t5", constraint);
+    expect(byId(moved).get("t5")!.start).toBe(constraint);
+    expect(byId(moved).get("t5")!.startConstraintActive).toBe(true);
+    // 1.2 grows until 2.1's earliest dependency start passes the constraint.
+    const pushed = recalc(moved.map((task) => task.id === "t3"
+      ? { ...task, duration: task.duration + 10, finish: addWorkingDays(task.start, task.duration + 10 - 1, "base", system) }
+      : task));
+    const t5 = byId(pushed).get("t5")!;
+    expect(t5.start > constraint).toBe(true);
+    expect(t5.startConstraint).toBe(constraint); // kept, not deleted
+    expect(t5.startConstraintActive).toBe(false);
+  });
+
+  test("a constraint behind the dependency earliest start is inactive from the start", () => {
+    const base = seed();
+    const t6Base = byId(base).get("t6")!.start;
+    const earlier = addWorkingDays(t6Base, -5, "base", system);
+    const withConstraint = setConstraint(base, "t6", earlier);
+    expect(byId(withConstraint).get("t6")!.start).toBe(t6Base);
+    expect(byId(withConstraint).get("t6")!.startConstraintActive).toBe(false);
+  });
+
+  test("clearing the constraint returns the task to its earliest start", () => {
+    const base = seed();
+    const t5Base = byId(base).get("t5")!.start;
+    const moved = setConstraint(base, "t5", addWorkingDays(t5Base, 4, "base", system));
+    const cleared = recalc(moved.map((task) => (task.id === "t5" ? { ...task, startConstraint: undefined } : task)));
+    expect(byId(cleared).get("t5")!.start).toBe(t5Base);
+    expect(byId(cleared).get("t5")!.startConstraint).toBeUndefined();
+  });
+
+  test("startConstraintFor only records intent later than the dependency allows", () => {
+    const base = seed();
+    const t5 = byId(base).get("t5")!;
+    const earliest = t5.start;
+    expect(startConstraintFor(t5, earliest, base, system, "base")).toBeUndefined();
+    const later = addWorkingDays(earliest, 3, "base", system);
+    expect(startConstraintFor(t5, later, base, system, "base")).toBe(later);
   });
 });

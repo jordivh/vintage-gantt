@@ -266,6 +266,19 @@ export interface ScheduleTask {
   marginDaysOriginal?: number;
   /** Part of that reserve already eaten by the task's own growth. */
   marginDaysConsumed?: number;
+  /**
+   * User intent for this task only: "start no earlier than" this date (ISO).
+   * The forward pass takes the later of the dependency earliest start and this
+   * date, so a manually chosen later start survives every recalculation without
+   * ever pulling a sibling around.
+   */
+  startConstraint?: string;
+  /**
+   * Whether the constraint is the binding floor. False once a predecessor has
+   * moved past it, in which case the dependency simply wins — the constraint is
+   * kept but inactive rather than deleted.
+   */
+  startConstraintActive?: boolean;
 }
 
 export interface ScheduleDependency {
@@ -516,10 +529,23 @@ function scheduleForward(
     // keeps an edited task *later* than its dependencies allow. Margins are
     // bookkeeping only and never move a task.
     const isAnchored = options.anchoredTaskIds?.includes(task.id) ?? false;
+    // A start constraint is user intent for this one task: the start is the later
+    // of what the dependencies allow and the constrained date. It never leaks to
+    // siblings, and it is only inactive (not removed) when a dependency overtakes it.
+    const constraint = task.startConstraint;
+    let constraintActive = false;
     if (constraintStarts.length) {
       const earliest = constraintStarts.reduce((latest, date) => (date > latest ? date : latest));
-      task.start = isAnchored && task.start > earliest ? task.start : earliest;
+      let next = isAnchored && task.start > earliest ? task.start : earliest;
+      if (constraint && constraint > next) next = constraint;
+      task.start = next;
+      constraintActive = Boolean(constraint) && (constraint as string) >= earliest;
+    } else if (constraint) {
+      // Free task: the constrained date is the plan.
+      task.start = constraint;
+      constraintActive = true;
     }
+    task.startConstraintActive = constraintActive;
     const { projectStart } = options;
     if (projectStart && !task.parentId && task.start < projectStart) task.start = projectStart;
     task.start = ensureWorkingDay(task.start, calendarIdForTask(task, options), options.calendarSystem);

@@ -29,6 +29,12 @@ export interface PlannerTask extends ScheduleTask {
   marginPct?: number;
   marginDaysOriginal?: number;
   marginDaysConsumed?: number;
+  /** Start no earlier than this date (ISO) — this task's own user intent. */
+  startConstraint?: string;
+  /** Whether the constraint currently binds (false once a predecessor overtakes it). */
+  startConstraintActive?: boolean;
+  /** Template rows store the constraint as a working-day offset like the dates. */
+  constraintOffsetDays?: number;
   totalFloat?: number;
   isCritical?: boolean;
   versionId?: string;
@@ -135,6 +141,25 @@ export function dependenciesForTasks(items: PlannerTask[]): ScheduleDependency[]
       successorId: task.id,
     })),
   );
+}
+
+/**
+ * The constraint a start-date edit should store. The user's chosen date is kept
+ * as intent only when it is strictly later than the earliest the dependencies
+ * allow; an earlier date is rejected elsewhere, and a date equal to the earliest
+ * (or a free task's own start) needs no constraint.
+ */
+export function startConstraintFor(
+  task: PlannerTask,
+  requestedStart: string,
+  tasks: PlannerTask[],
+  system: CalendarSystem,
+  projectCalendarId?: string,
+  displayIds?: ReadonlyMap<string, number>,
+): string | undefined {
+  const restriction = startRestrictionFor(task, tasks, system, projectCalendarId, displayIds);
+  if (!restriction) return requestedStart;
+  return requestedStart > restriction.earliestStart ? requestedStart : undefined;
 }
 
 export interface StartRestriction {
@@ -524,6 +549,8 @@ export function withCalculatedPlanningFields(
       marginPct: children ? 0 : marginPct,
       marginDaysOriginal,
       marginDaysConsumed,
+      // A summary rolls up its children; start intent belongs to leaves only.
+      startConstraintActive: children ? false : task.startConstraintActive,
       totalFloat: cpm?.totalFloat ?? 0,
       isCritical: cpm?.isCritical ?? false,
     };

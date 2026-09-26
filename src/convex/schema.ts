@@ -49,6 +49,9 @@ const schema = defineSchema(
       totalFloat: v.optional(v.number()), isCritical: v.optional(v.boolean()),
       startOffsetDays: v.optional(v.number()),
       finishOffsetDays: v.optional(v.number()),
+      startConstraint: v.optional(v.string()),
+      startConstraintActive: v.optional(v.boolean()),
+      constraintOffsetDays: v.optional(v.number()),
     }).index("by_owner_project", ["ownerId", "projectId"]).index("by_owner_project_version", ["ownerId", "projectId", "versionId"]),
     dependencies: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), predecessorId: v.string(), successorId: v.string(), type: v.string(), lagDays: v.number() }).index("by_owner", ["ownerId"]),
     calendars: defineTable({ ownerId: v.id("users"), id: v.string(), name: v.string(), type: v.string(), parentCalendarId: v.union(v.string(), v.null()), isDefault: v.boolean(), workingDays: v.optional(v.array(v.number())) }).index("by_owner", ["ownerId"]),
@@ -57,7 +60,7 @@ const schema = defineSchema(
     taskAssignments: defineTable({ ownerId: v.id("users"), id: v.string(), taskId: v.string(), resourceId: v.string() }).index("by_owner", ["ownerId"]),
     planVersions: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), name: v.string(), isActive: v.boolean(), createdAt: v.string(), mode: v.optional(v.string()), modeHistory: v.optional(v.array(v.object({ at: v.string(), from: v.string(), to: v.string() }))), history: v.optional(v.array(v.object({ at: v.string(), type: v.string(), from: v.optional(v.string()), to: v.optional(v.string()), baselineId: v.optional(v.string()), name: v.optional(v.string()) }))) }).index("by_owner_project", ["ownerId", "projectId"]),
     baselines: defineTable({ ownerId: v.id("users"), id: v.string(), projectId: v.string(), versionId: v.string(), name: v.string(), note: v.optional(v.string()), createdAt: v.string(), captureDate: v.optional(v.string()) }).index("by_owner_project", ["ownerId", "projectId"]),
-    baselineTasks: defineTable({ ownerId: v.id("users"), id: v.string(), baselineId: v.string(), taskId: v.string(), startDate: v.string(), finishDate: v.string(), durationDays: v.number(), marginPct: v.number(), marginDaysOriginal: v.number(), marginDaysConsumed: v.number(), predecessors: v.optional(v.string()), totalFloat: v.optional(v.number()) }).index("by_owner_baseline", ["ownerId", "baselineId"]),
+    baselineTasks: defineTable({ ownerId: v.id("users"), id: v.string(), baselineId: v.string(), taskId: v.string(), startDate: v.string(), finishDate: v.string(), durationDays: v.number(), marginPct: v.number(), marginDaysOriginal: v.number(), marginDaysConsumed: v.number(), predecessors: v.optional(v.string()), totalFloat: v.optional(v.number()), startConstraint: v.optional(v.string()) }).index("by_owner_baseline", ["ownerId", "baselineId"]),
     seedRuns: defineTable({ ownerId: v.id("users"), seedKey: v.string(), executedAt: v.string() }).index("by_owner_seed", ["ownerId", "seedKey"]),
   },
   {

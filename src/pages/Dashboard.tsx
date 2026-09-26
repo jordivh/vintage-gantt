@@ -35,6 +35,7 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import {
   addWorkingDays,
+  ensureWorkingDay,
   findDependencyCycle,
   isoDate,
   remainingMarginDays,
@@ -42,7 +43,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyModeCommit, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyModeCommit, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -447,10 +448,16 @@ export default function Dashboard() {
       if (field === "start") {
         const start = value || task.start;
         const milestone = task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id);
+        // A start later than the dependencies allow is the user's intent: store it
+        // as a "start no earlier than" constraint so recalculation keeps it. An
+        // earlier date is still rejected below.
+        const normalized = ensureWorkingDay(start, calendarId, system);
+        const startConstraint = startConstraintFor(task, normalized, tasks, system, calendarId, taskDisplayIds);
         return {
           ...task,
           start,
           isMilestone: milestone,
+          startConstraint,
           finish: milestone
             ? start
             : addWorkingDays(start, task.durationUnit === "weeks" ? task.duration * 5 - 1 : Math.max(0, task.duration - 1), calendarId, system),
@@ -498,6 +505,12 @@ export default function Dashboard() {
     }
     commit(next);
     setEditing(null);
+  };
+
+  /** Drops a task's start constraint, so it returns to its earliest start. */
+  const removeConstraint = (id: string) => {
+    commit(tasks.map((task) => (task.id === id ? { ...task, startConstraint: undefined, startConstraintActive: false } : task)));
+    toast("Start constraint removed");
   };
 
   const undo = () => {
@@ -674,7 +687,7 @@ export default function Dashboard() {
         if (violation) {
           setCellError({ taskId: task.id, column: "start", message: violation });
         } else {
-          commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish } : item)), task.id);
+          commit(tasks.map((item) => (item.id === task.id ? { ...item, start, finish, startConstraint: startConstraintFor(task, start, tasks, system, calendarId, taskDisplayIds) } : item)), task.id);
           toast(`${task.name} moved to ${formatDate(start)}`);
         }
       }
@@ -713,7 +726,7 @@ export default function Dashboard() {
         if (violation) {
           setCellError({ taskId: task.id, column: "start", message: violation });
         } else {
-          commit(tasks.map((item) => (item.id === task.id ? resized : item)), task.id);
+          commit(tasks.map((item) => (item.id === task.id ? { ...resized, startConstraint: edge === "start" ? startConstraintFor(task, start, tasks, system, calendarId, taskDisplayIds) : item.startConstraint } : item)), task.id);
           toast(`${task.name} duration set to ${duration} working days`);
         }
       }
@@ -1447,6 +1460,16 @@ export default function Dashboard() {
                               {value}
                             </span>
                           )}
+                          {column.key === "start" && task.startConstraint && (
+                            <button
+                              type="button"
+                              className={`constraint-flag ${task.startConstraintActive ? "active" : "inactive"}`}
+                              title={task.startConstraintActive
+                                ? `Start no earlier than ${formatDate(task.startConstraint)} — click to remove constraint.`
+                                : `Constraint ${formatDate(task.startConstraint)} is inactive: a predecessor now sets the start. Click to remove.`}
+                              onClick={(event) => { event.stopPropagation(); removeConstraint(task.id); }}
+                            >⚑</button>
+                          )}
                         </div>
                       );
                     })}
@@ -1605,6 +1628,7 @@ export default function Dashboard() {
           >
             <Copy size={14} /> Duplicate task
           </button>
+          {taskById.get(showMenu.id)?.startConstraint && <button onClick={() => { removeConstraint(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Remove constraint</button>}
           <button onClick={() => { setSelected([showMenu.id]); deleteSelected(); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button>
           <div className="menu-rule" />
           <button
