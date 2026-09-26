@@ -23,6 +23,7 @@ import {
   recalculateTasks,
   remapCopiedTasks,
   replanScopeIds,
+  settleMonitoringPlan,
   startConstraintFor,
   startEditRestriction,
   withCalculatedPlanningFields,
@@ -233,7 +234,7 @@ describe("critical path — TP-R2 test project", () => {
     next: PlannerTask[],
     anchoredTaskIds: string[] = [],
   ): PlannerTask[] => {
-    const recalculated = recalculateTasks(applyMarginConsumption(previous, next), {
+    const recalculated = recalculateTasks(applyMarginConsumption(previous, next, { calendarSystem: system, projectCalendarId: "base" }), {
       direction: "forward",
       calendarSystem: system,
       projectCalendarId: "base",
@@ -531,7 +532,7 @@ describe("plan modes — planning replans, monitoring tracks reality", () => {
   };
   /** Mirrors a commit in the app: the mode decides the margin bookkeeping. */
   const commit = (previous: PlannerTask[], next: PlannerTask[], mode: "planning" | "monitoring"): PlannerTask[] => {
-    const recalculated = recalculateTasks(applyModeCommit(previous, next, mode), {
+    const recalculated = recalculateTasks(applyModeCommit(previous, next, mode, { calendarSystem: system, projectCalendarId: "base" }), {
       direction: "forward",
       calendarSystem: system,
       projectCalendarId: "base",
@@ -789,5 +790,152 @@ describe("version copy — references are remapped onto the new ids", () => {
     expect(formatPredecessorsForDisplay(get("t6").predecessors, copied, displayIds)).toBe("3FS");
     expect(formatPredecessorsForDisplay(get("t7").predecessors, copied, displayIds)).toBe("5FS");
     expect(formatPredecessorsForDisplay(get("t8").predecessors, copied, displayIds)).toBe("7FS");
+  });
+});
+
+describe("finish-driven margin consumption — monitoring mode", () => {
+  const system = systemWith([]);
+  const context = { calendarSystem: system, projectCalendarId: "base" };
+  const byId = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
+  const seed = (): PlannerTask[] => {
+    const scheduled = recalculateTasks(withCalculatedPlanningFields(tpR2(4), system, "base"), { direction: "forward", calendarSystem: system, projectCalendarId: "base" });
+    return withCalculatedPlanningFields(scheduled.tasks, system, "base");
+  };
+  /** Mirrors the app: schedule once, absorb each finish move into its own reserve, reschedule. */
+  const commit = (previous: PlannerTask[], next: PlannerTask[]) => {
+    const settled = settleMonitoringPlan(previous, next, { calendarSystem: system, projectCalendarId: "base" });
+    const scheduled = recalculateTasks(settled.tasks, { direction: "forward", calendarSystem: system, projectCalendarId: "base" });
+    return { tasks: withCalculatedPlanningFields(scheduled.tasks, system, "base"), changes: settled.changes };
+  };
+  /** A start edit: the work moves and the finish follows. */
+  const moveStart = (tasks: PlannerTask[], id: string, days: number): PlannerTask[] =>
+    tasks.map((task) => {
+      if (task.id !== id) return task;
+      const start = addWorkingDays(task.start, days, "base", system);
+      return { ...task, start, finish: addWorkingDays(start, task.duration - 1, "base", system) };
+    });
+  const setStart = (tasks: PlannerTask[], id: string, start: string): PlannerTask[] =>
+    tasks.map((task) => task.id === id ? { ...task, start, finish: addWorkingDays(start, task.duration - 1, "base", system) } : task);
+  /** A duration edit: the work grows and the finish follows. */
+  const extend = (tasks: PlannerTask[], id: string, days: number): PlannerTask[] =>
+    tasks.map((task) => {
+      if (task.id !== id) return task;
+      const duration = task.duration + days;
+      return { ...task, duration, finish: addWorkingDays(task.start, duration - 1, "base", system) };
+    });
+
+  test("a dragged start (which anchors the bar) also absorbs margin", () => {
+    const base = seed();
+    const t3Start = byId(base).get("t3")!.start;
+    const settled = settleMonitoringPlan(base, moveStart(base, "t2", 1), { calendarSystem: system, projectCalendarId: "base", anchoredTaskIds: ["t2"] });
+    const scheduled = recalculateTasks(settled.tasks, { direction: "forward", calendarSystem: system, projectCalendarId: "base", anchoredTaskIds: ["t2"] });
+    const tasks = withCalculatedPlanningFields(scheduled.tasks, system, "base");
+    expect(byId(tasks).get("t2")!.marginDaysConsumed).toBe(1);
+    expect(byId(tasks).get("t3")!.start).toBe(t3Start);
+  });
+
+  test("a calendar change that pushes a finish spends that task's own reserve", () => {
+    // A working day removed inside 1.1 moves its finish although nobody edited it.
+    // The store re-plans every task after a calendar change, so every task answers
+    // for its own move — and 1.2 still does not shift.
+    const shutdown = exception({ id: "shutdown", calendarId: "base", startDate: "2026-09-29", endDate: "2026-09-29", label: "Site shutdown" });
+    const shifted = systemWith([shutdown]);
+    const base = seed();
+    const t3Start = byId(base).get("t3")!.start;
+    const finish = planFinishDate(base);
+    const moved = recalculateTasks(base, { direction: "forward", calendarSystem: shifted, projectCalendarId: "base" });
+    expect(byId(moved.tasks).get("t2")!.finish).not.toBe(byId(base).get("t2")!.finish);
+    const settled = settleMonitoringPlan(base, moved.tasks, {
+      calendarSystem: shifted,
+      projectCalendarId: "base",
+      changedTaskIds: new Set(base.map((task) => task.id)),
+    });
+    const rescheduled = recalculateTasks(settled.tasks, { direction: "forward", calendarSystem: shifted, projectCalendarId: "base" });
+    const tasks = withCalculatedPlanningFields(rescheduled.tasks, shifted, "base");
+    expect(byId(tasks).get("t2")!.marginDaysConsumed).toBe(1);
+    expect(byId(tasks).get("t3")!.start).toBe(t3Start);
+    expect(planFinishDate(tasks)).toBe(finish);
+  });
+
+  test("a later start is absorbed by margin: 1.2 and the finish stay put", () => {
+    const base = seed();
+    const baseFinish = planFinishDate(base);
+    const t3Start = byId(base).get("t3")!.start;
+    const result = commit(base, moveStart(base, "t2", 1));
+    const t2 = byId(result.tasks).get("t2")!;
+    expect(t2.marginDaysOriginal).toBe(1);
+    expect(t2.marginDaysConsumed).toBe(1);
+    expect((t2.marginDaysOriginal ?? 0) - (t2.marginDaysConsumed ?? 0)).toBe(0);
+    expect(byId(result.tasks).get("t3")!.start).toBe(t3Start);
+    expect(planFinishDate(result.tasks)).toBe(baseFinish);
+    expect(result.changes[0]).toEqual({ taskId: "t2", absorbed: 1, passed: 0, returned: 0 });
+  });
+
+  test("a second later day overflows: 1.2 and everything after shift exactly one day", () => {
+    const base = seed();
+    const step1 = commit(base, moveStart(base, "t2", 1)).tasks;
+    const result = commit(step1, moveStart(step1, "t2", 1));
+    const t2 = byId(result.tasks).get("t2")!;
+    expect(t2.marginDaysConsumed).toBe(1); // never above the original
+    for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
+      expect(byId(result.tasks).get(id)!.start).toBe(addWorkingDays(byId(step1).get(id)!.start, 1, "base", system));
+    }
+    expect(result.changes[0]).toEqual({ taskId: "t2", absorbed: 0, passed: 1, returned: 0 });
+  });
+
+  test("moving the start back returns the margin and the original plan", () => {
+    const base = seed();
+    const originalStart = byId(base).get("t2")!.start;
+    const step1 = commit(base, moveStart(base, "t2", 1)).tasks;
+    const step2 = commit(step1, moveStart(step1, "t2", 1)).tasks;
+    const result = commit(step2, setStart(step2, "t2", originalStart));
+    const t2 = byId(result.tasks).get("t2")!;
+    expect(t2.marginDaysConsumed).toBe(0);
+    expect((t2.marginDaysOriginal ?? 0) - (t2.marginDaysConsumed ?? 0)).toBe(1);
+    expect(result.changes[0]).toEqual({ taskId: "t2", absorbed: 0, passed: 0, returned: 1 });
+    // Back to the plan we started from.
+    for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
+      expect(byId(result.tasks).get(id)!.start).toBe(byId(base).get(id)!.start);
+    }
+    expect(planFinishDate(result.tasks)).toBe(planFinishDate(base));
+  });
+
+  test("changing the duration gives identical results to moving the start", () => {
+    const base = seed();
+    const t3Start = byId(base).get("t3")!.start;
+    const baseFinish = planFinishDate(base);
+    const first = commit(base, extend(base, "t2", 1));
+    expect(byId(first.tasks).get("t2")!.marginDaysConsumed).toBe(1);
+    expect(byId(first.tasks).get("t3")!.start).toBe(t3Start);
+    expect(planFinishDate(first.tasks)).toBe(baseFinish);
+    const second = commit(first.tasks, extend(first.tasks, "t2", 1));
+    expect(byId(second.tasks).get("t2")!.marginDaysConsumed).toBe(1);
+    for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
+      expect(byId(second.tasks).get(id)!.start).toBe(addWorkingDays(byId(first.tasks).get(id)!.start, 1, "base", system));
+    }
+    const back = commit(second.tasks, extend(second.tasks, "t2", -2));
+    expect(byId(back.tasks).get("t2")!.marginDaysConsumed).toBe(0);
+    expect(planFinishDate(back.tasks)).toBe(baseFinish);
+  });
+
+  test("a task whose own predecessor pushes it spends its own reserve", () => {
+    const base = seed();
+    // 2.1 (t5) depends on 1.2 (t3); adding +2 d lag pushes 2.1 two days later,
+    // so 2.1's own 1 d reserve takes one day and only the other passes on.
+    const result = commit(base, base.map((task) => task.id === "t5" ? { ...task, predecessors: "t3FS+2d" } : task));
+    const by = byId(result.tasks);
+    expect(by.get("t5")!.marginDaysConsumed).toBe(1);
+    expect(by.get("t7")!.start).toBe(addWorkingDays(byId(base).get("t7")!.start, 1, "base", system));
+  });
+
+  test("a task that merely moved with the network keeps its reserve", () => {
+    const base = seed();
+    // Change 1.2 only: 2.1 and 2.2 are pushed along but must not spend their own
+    // reserves, so the delay passes straight through to 2.3.
+    const result = commit(base, extend(base, "t3", 1));
+    const by = byId(result.tasks);
+    expect(by.get("t5")!.marginDaysConsumed).toBe(0);
+    expect(by.get("t6")!.marginDaysConsumed).toBe(0);
+    expect(by.get("t7")!.start).toBe(addWorkingDays(byId(base).get("t7")!.start, 1, "base", system));
   });
 });

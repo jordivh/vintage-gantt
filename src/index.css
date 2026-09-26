@@ -311,6 +311,8 @@
 .grid-cell.float-cell.critical-float { color: #7d3f32; font-weight: 700; }
 .grid-cell.margin-cell { position: relative; }
 .grid-cell.margin-cell.has-notice { overflow: visible; z-index: 14; }
+/* Any cell showing an inline notice (margin restore or finish absorption). */
+.grid-cell.has-notice { position: relative; overflow: visible; z-index: 14; }
 .cell-margin-notice { position: absolute; top: calc(100% + 2px); left: 0; z-index: 22; white-space: nowrap; background: #f4ecda; border: 1px solid #b08a52; color: #6b4b23; padding: 3px 7px; font-size: 10px; box-shadow: 3px 3px 0 rgba(80,54,31,.12); }
 .replan-summary { display: flex; justify-content: space-between; gap: 10px; margin-top: 16px; padding: 11px 12px; border: 1px solid #d0bea0; background: #eee3cf; color: #6b5741; font-size: 11px; }
 .replan-summary b { color: #9a593f; }

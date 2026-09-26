@@ -522,8 +522,8 @@ export function applyPlanningModeMargins(tasks: PlannerTask[]): PlannerTask[] {
  * Monitoring tracks reality: extending work eats the existing reserve first.
  * Neither branch mutates its inputs.
  */
-export function applyModeCommit(previous: PlannerTask[], next: PlannerTask[], mode: PlanMode): PlannerTask[] {
-  return mode === "planning" ? applyPlanningModeMargins(next) : applyMarginConsumption(previous, next);
+export function applyModeCommit(previous: PlannerTask[], next: PlannerTask[], mode: PlanMode, context?: MarginContext): PlannerTask[] {
+  return mode === "planning" ? applyPlanningModeMargins(next) : applyMarginConsumption(previous, next, context);
 }
 
 /**
@@ -589,32 +589,171 @@ export function applyReplanMargins(tasks: PlannerTask[], input: ReplanScopeInput
   );
 }
 
+/** The calendar needed to measure how far a finish moved, in working days. */
+export interface MarginContext {
+  calendarSystem: CalendarSystem;
+  projectCalendarId?: string;
+}
+
 /**
- * Keeps each task's reserve in step with its work. Margin occupies real time (see
- * `remainingMarginDays`), so this only maintains the bookkeeping: extending a task
- * eats its reserve first, shortening it gives those days back up to the original
- * amount, and the reserve is re-sized from the current work only when the margin
- * percentage itself changes.
+ * How far a task's work finish moved, in working days of its own calendar.
+ * Positive means later (the plan slipped), negative means earlier.
  */
-export function applyMarginConsumption(previous: PlannerTask[], next: PlannerTask[]): PlannerTask[] {
+function finishShiftDays(before: PlannerTask, after: PlannerTask, context?: MarginContext): number {
+  if (!context || before.finish === after.finish) return 0;
+  const calendarId = after.calendarId ?? context.projectCalendarId ?? context.calendarSystem.defaultCalendarId;
+  const system = context.calendarSystem;
+  return after.finish > before.finish
+    ? workingDaysBetween(before.finish, after.finish, calendarId, system) - 1
+    : -(workingDaysBetween(after.finish, before.finish, calendarId, system) - 1);
+}
+
+/** What a single task's margin did when its finish moved. */
+export interface MarginAbsorption {
+  taskId: string;
+  /** Working days the task's own remaining reserve soaked up. */
+  absorbed: number;
+  /** Working days that had to pass on to the successors. */
+  passed: number;
+  /** Working days given back to the reserve because the finish moved earlier. */
+  returned: number;
+}
+
+/**
+ * Margin consumption is driven by the FINISH date, whatever caused it — a longer
+ * duration, a later start, a later actual start, a calendar change, or a
+ * predecessor that pushed the task further than its own reserve could absorb.
+ * The task's own remaining reserve takes the movement first and only the excess
+ * passes on to successors; a task never borrows a successor's reserve.
+ *
+ * Compare `previous` (the plan before the change) with `next` (already scheduled
+ * with the old reserves) to learn how far each finish moved.
+ */
+/** The fields whose change makes a task responsible for its own finish move. */
+const SCHEDULING_FIELDS = ["duration", "durationUnit", "start", "finish", "isMilestone", "actualStart", "actualFinish", "predecessors", "calendarId"] as const;
+
+/**
+ * The tasks the user actually changed in this commit. Only these may spend their
+ * reserve: a task that merely moved because a predecessor slipped does not, so an
+ * upstream reserve that absorbs the delay also stops it eating a downstream one.
+ */
+export function changedTaskIds(previous: PlannerTask[], edited: PlannerTask[]): Set<string> {
   const previousById = new Map(previous.map((task) => [task.id, task]));
-  return next.map((task) => {
+  const changed = new Set<string>();
+  for (const task of edited) {
+    const before = previousById.get(task.id);
+    if (!before) { changed.add(task.id); continue; }
+    const record = task as unknown as Record<string, unknown>;
+    const previousRecord = before as unknown as Record<string, unknown>;
+    if (SCHEDULING_FIELDS.some((field) => record[field] !== previousRecord[field])) changed.add(task.id);
+  }
+  return changed;
+}
+
+export function absorbFinishShifts(
+  previous: PlannerTask[],
+  next: PlannerTask[],
+  context?: MarginContext,
+  /** When given, only these tasks may consume reserve (see `changedTaskIds`). */
+  eligible?: ReadonlySet<string>,
+): { tasks: PlannerTask[]; changes: MarginAbsorption[] } {
+  const previousById = new Map(previous.map((task) => [task.id, task]));
+  const changes: MarginAbsorption[] = [];
+  const tasks = next.map((task) => {
     const before = previousById.get(task.id);
     if (!before) return task;
     // Summaries roll up their children and never carry a reserve of their own.
     if (next.some((child) => child.parentId === task.id)) return task;
-    const workDays = task.isMilestone || task.duration === 0 ? 0 : Math.max(0, durationInWorkingDays(task));
-    const beforeWorkDays = before.isMilestone || before.duration === 0 ? 0 : Math.max(0, durationInWorkingDays(before));
+    // A task that only moved with the network keeps its reserve untouched.
+    if (eligible && !eligible.has(task.id)) return task;
     const marginPct = Math.max(0, task.marginPct ?? 0);
     const resized = marginPct !== Math.max(0, before.marginPct ?? 0);
     const original = resized
       ? marginOriginalDaysFor(task, marginPct)
       : Math.max(0, before.marginDaysOriginal ?? marginOriginalDaysFor(task, marginPct));
-    const consumed = resized
-      ? Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0))
-      : Math.max(0, Math.min(original, Math.max(0, before.marginDaysConsumed ?? 0) + (workDays - beforeWorkDays)));
+    const priorConsumed = Math.max(0, before.marginDaysConsumed ?? 0);
+    if (resized) return { ...task, marginDaysOriginal: original, marginDaysConsumed: Math.min(original, priorConsumed) };
+    const shift = finishShiftDays(before, task, context);
+    const remainingBefore = Math.max(0, original - priorConsumed);
+    const absorbed = shift > 0 ? Math.min(shift, remainingBefore) : 0;
+    const consumed = Math.max(0, Math.min(original, priorConsumed + shift));
+    const returned = Math.max(0, priorConsumed - consumed);
+    const passed = shift > 0 ? shift - absorbed : 0;
+    if (shift !== 0) changes.push({ taskId: task.id, absorbed, passed, returned });
     return { ...task, marginDaysOriginal: original, marginDaysConsumed: consumed };
   });
+  return { tasks, changes };
+}
+
+/**
+ * Keeps each task's reserve in step with its finish. Margin occupies real time
+ * (see `remainingMarginDays`), so this only maintains the bookkeeping; the
+ * reserve is re-sized from the current work only when the margin percentage
+ * itself changes.
+ */
+export function applyMarginConsumption(previous: PlannerTask[], next: PlannerTask[], context?: MarginContext): PlannerTask[] {
+  return absorbFinishShifts(previous, next, context).tasks;
+}
+
+const sameConsumption = (a: PlannerTask[], b: PlannerTask[]): boolean => {
+  const byId = new Map(b.map((task) => [task.id, task]));
+  return a.every((task) => {
+    const other = byId.get(task.id);
+    if (!other) return true;
+    return (task.marginDaysConsumed ?? 0) === (other.marginDaysConsumed ?? 0)
+      && (task.marginDaysOriginal ?? 0) === (other.marginDaysOriginal ?? 0);
+  });
+};
+
+export interface MonitoringPlanOptions {
+  calendarSystem: CalendarSystem;
+  projectCalendarId?: string;
+  anchoredTaskIds?: string[];
+  maxIterations?: number;
+  /** Defaults to the tasks whose scheduling fields differ from `previous`. */
+  changedTaskIds?: ReadonlySet<string>;
+}
+
+export interface MonitoringPlan {
+  tasks: PlannerTask[];
+  /** Net effect of each task's own finish move versus the previous plan. */
+  changes: MarginAbsorption[];
+}
+
+/**
+ * Settles a Monitoring-mode commit. Reserves are consumed by finish movement,
+ * and consuming one task's reserve cancels the delay it would otherwise pass on —
+ * which can change whether a later task ever moved. So we schedule, absorb the
+ * movement against the previous plan, and repeat until the reserves stop
+ * changing; only then do the dates reflect the final consumption.
+ */
+export function settleMonitoringPlan(
+  previous: PlannerTask[],
+  edited: PlannerTask[],
+  options: MonitoringPlanOptions,
+): MonitoringPlan {
+  const context: MarginContext = { calendarSystem: options.calendarSystem, projectCalendarId: options.projectCalendarId };
+  // Only the tasks the user changed may spend reserve; everything else follows.
+  const eligible = options.changedTaskIds ?? changedTaskIds(previous, edited);
+  const schedule = (tasks: PlannerTask[]): PlannerTask[] => {
+    const result = recalculateTasks(tasks, {
+      direction: "forward",
+      calendarSystem: options.calendarSystem,
+      projectCalendarId: options.projectCalendarId,
+      anchoredTaskIds: options.anchoredTaskIds,
+    });
+    return result.error ? tasks : result.tasks;
+  };
+  const maxIterations = options.maxIterations ?? 10;
+  let candidate = edited;
+  let changes: MarginAbsorption[] = [];
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const absorbed = absorbFinishShifts(previous, schedule(candidate), context, eligible);
+    changes = absorbed.changes;
+    if (sameConsumption(candidate, absorbed.tasks)) return { tasks: absorbed.tasks, changes };
+    candidate = absorbed.tasks;
+  }
+  return { tasks: candidate, changes };
 }
 
 export function withCalculatedPlanningFields(

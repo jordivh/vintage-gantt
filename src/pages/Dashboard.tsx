@@ -43,7 +43,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyModeCommit, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -57,6 +57,10 @@ const modeEmphasis: Record<PlanMode, ColumnKey[]> = {
   planning: ["duration", "predecessors", "margin", "totalFloat"],
   monitoring: ["percent", "actualStart", "actualFinish", "marginConsumed", "marginRemaining", "variance"],
 };
+
+/** The finish move that used the reserve is reported here, so the consumption is
+ *  visible whether you are looking at the finish date or at the margin columns. */
+const absorptionColumns: ColumnKey[] = ["finish", "margin", "marginConsumed", "marginRemaining"];
 
 const rowHeight = 42;
 const todayLineDate = isoDate(new Date());
@@ -112,6 +116,15 @@ const getWbs = (task: Task, tasks: Task[]) => {
   return parts.join(".");
 };
 
+/** The inline notice for a task whose finish moved and used its own reserve. */
+const formatAbsorption = (change: { absorbed: number; passed: number; returned: number }) => {
+  const parts: string[] = [];
+  if (change.absorbed) parts.push(`${change.absorbed} d absorbed by margin`);
+  if (change.passed) parts.push(`${change.passed} d passed on to successors`);
+  if (change.returned) parts.push(`${change.returned} d returned to margin`);
+  return `${parts.join(", ")}.`;
+};
+
 export default function Dashboard() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
@@ -163,6 +176,8 @@ export default function Dashboard() {
   const [modalTask, setModalTask] = useState<Task | null>(null);
   const [cellError, setCellError] = useState<{ taskId: string; column: ColumnKey; message: string } | null>(null);
   const [marginNotice, setMarginNotice] = useState<{ taskId: string; message: string } | null>(null);
+  // Reported under the Finish cell: how a task's finish move used its reserve.
+  const [absorptionNotice, setAbsorptionNotice] = useState<{ taskId: string; message: string } | null>(null);
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
   const [query, setQuery] = useState("");
@@ -197,6 +212,23 @@ export default function Dashboard() {
   const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") !== "false"; } catch { return true; } });
   const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
   useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns-v2", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
+  // A mode owns the columns it talks about: a version in Monitoring reveals the
+  // progress and consumption columns, so the effect of an edit is visible without
+  // hunting through the View menu. This runs once per version-and-mode, so hiding
+  // one of those columns again sticks for that mode.
+  useEffect(() => {
+    if (!activeVersionId) return;
+    const key = activeVersionId + ":" + activeMode;
+    try {
+      if (localStorage.getItem("vintage-gantt-mode-columns") === key) return;
+      localStorage.setItem("vintage-gantt-mode-columns", key);
+    } catch { /* view preferences are optional */ }
+    const emphasis = modeEmphasis[activeMode];
+    setHidden((current) => {
+      const next = current.filter((column) => !emphasis.includes(column));
+      return next.length === current.length ? current : next;
+    });
+  }, [activeVersionId, activeMode]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [timelineDrag, setTimelineDrag] = useState<{ id: string; days: number } | null>(null);
   const [timelineResize, setTimelineResize] = useState<{ id: string; days: number; edge: "start" | "finish" } | null>(null);
@@ -243,6 +275,12 @@ export default function Dashboard() {
     const timer = setTimeout(() => setMarginNotice(null), 6000);
     return () => clearTimeout(timer);
   }, [marginNotice]);
+
+  useEffect(() => {
+    if (!absorptionNotice) return;
+    const timer = setTimeout(() => setAbsorptionNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [absorptionNotice]);
 
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
@@ -402,10 +440,22 @@ export default function Dashboard() {
     }
     setHistory((items) => [...items.slice(-29), tasks]);
     setFuture([]);
-    // Planning re-plans (margin sized from the percentage, nothing consumed);
-    // monitoring tracks reality (an extension eats the existing reserve first).
-    const consumed = applyModeCommit(tasks, normalized, activeMode);
-    recalculate(consumed, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
+    const anchored = manuallyAnchoredId ? [manuallyAnchoredId] : [];
+    if (activeMode === "planning") {
+      // Planning re-plans: margin is sized from the percentage, nothing is consumed.
+      recalculate(applyPlanningModeMargins(normalized), "forward", false, "", anchored);
+      return true;
+    }
+    // Monitoring: margin is consumed by the FINISH move, whatever caused it. Each
+    // task's own remaining reserve absorbs the movement first and only the excess
+    // reaches its successors. Settling to a fixed point means a delay that an
+    // upstream reserve ultimately soaks up no longer eats a downstream reserve.
+    const settled = settleMonitoringPlan(tasks, normalized, { calendarSystem: system, projectCalendarId: calendarId, anchoredTaskIds: anchored });
+    recalculate(settled.tasks, "forward", false, "", anchored);
+    const relevant = settled.changes.filter((change) => change.absorbed || change.passed || change.returned);
+    const focus = relevant.find((change) => change.taskId === manuallyAnchoredId)
+      ?? [...relevant].sort((a, b) => (b.absorbed + b.passed + b.returned) - (a.absorbed + a.passed + a.returned))[0];
+    if (focus) setAbsorptionNotice({ taskId: focus.taskId, message: formatAbsorption(focus) });
     return true;
   };
 
@@ -427,6 +477,7 @@ export default function Dashboard() {
     }
     setCellError(null);
     setMarginNotice(null);
+    setAbsorptionNotice(null);
     const next = tasks.map((task) => {
       if (task.id !== id) return task;
       if (field === "duration") {
@@ -637,6 +688,7 @@ export default function Dashboard() {
       setEditing(null);
       setCellError(null);
       setMarginNotice(null);
+      setAbsorptionNotice(null);
       return;
     }
     if (event.key === "Enter" || event.key === "Tab") {
@@ -1388,7 +1440,7 @@ export default function Dashboard() {
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""} ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""} ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${absorptionNotice?.taskId === task.id && absorptionColumns.includes(column.key) ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
                           title={readOnlyReason}
                           onClick={() => {
@@ -1406,6 +1458,7 @@ export default function Dashboard() {
                         >
                           {cellError?.taskId === task.id && cellError.column === column.key && <span className="cell-validation-error" role="alert">{cellError.message}</span>}
                           {marginNotice?.taskId === task.id && column.key === "margin" && <span className="cell-margin-notice" role="status">{marginNotice.message}</span>}
+                          {absorptionNotice?.taskId === task.id && absorptionColumns.includes(column.key) && <span className="cell-margin-notice" role="status">{absorptionNotice.message}</span>}
                           {isName && <span className="row-handle"><GripVertical size={13} /></span>}
                           {isName && summary && (
                             <button className="collapse-button" onClick={(event) => { event.stopPropagation(); toggleCollapse(task.id); }}>

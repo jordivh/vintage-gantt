@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, replanScopeIds, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -231,17 +231,48 @@ interface CalendarStoreValue {
 
 const CalendarStoreContext = createContext<CalendarStoreValue | null>(null);
 
+/**
+ * Applies the Monitoring reserve rule when a project is re-planned for a reason
+ * other than a direct edit — a calendar change, say. Every task's own finish move
+ * is absorbed by its own reserve, so the plan only slips by the excess.
+ */
+function absorbMonitoringMargins(
+  rows: PlannerTask[],
+  projectId: string,
+  projectCalendarId: string,
+  system: CalendarSystem,
+  planVersionList: PlanVersion[],
+): PlannerTask[] {
+  let result = rows;
+  for (const version of planVersionList) {
+    if (version.projectId !== projectId || (version.mode ?? "planning") !== "monitoring") continue;
+    const versionTasks = result.filter((task) => task.versionId === version.id);
+    if (!versionTasks.length) continue;
+    const settled = settleMonitoringPlan(versionTasks, versionTasks, {
+      calendarSystem: system,
+      projectCalendarId,
+      // A calendar change affects every task's own finish, so all may spend reserve.
+      changedTaskIds: new Set(versionTasks.map((task) => task.id)),
+    });
+    const byId = new Map(settled.tasks.map((task) => [task.id, task]));
+    result = result.map((task) => byId.get(task.id) ?? task);
+  }
+  return result;
+}
+
 function recalculateProjects(
   current: Record<string, PlannerTask[]>,
   projectList: ProjectRecord[],
   system: CalendarSystem,
+  planVersionList: PlanVersion[] = [],
 ): Record<string, PlannerTask[]> {
   const next: Record<string, PlannerTask[]> = { ...current };
   for (const project of projectList) {
     if ((project.kind ?? (project.status === "template" ? "template" : "project")) !== "project") continue;
     const tasks = current[project.id];
     if (!tasks?.length) continue;
-    const result = recalculateTasks(tasks, {
+    const absorbed = absorbMonitoringMargins(tasks, project.id, project.calendarId, system, planVersionList);
+    const result = recalculateTasks(absorbed, {
       direction: "forward",
       calendarSystem: system,
       projectCalendarId: project.calendarId,
@@ -682,9 +713,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const applyCalendarSystem = useCallback(
     (nextSystem: CalendarSystem) => {
       setSystem(nextSystem);
-      setTasksByProject((current) => recalculateProjects(current, projects, nextSystem));
+      setTasksByProject((current) => recalculateProjects(current, projects, nextSystem, planVersions));
     },
-    [projects],
+    [projects, planVersions],
   );
 
   const calendarsUsingProjects = useCallback(
@@ -744,7 +775,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setTasksByProject((current) => {
         const projectTasks = current[projectId];
         if (!projectTasks?.length) return current;
-        const result = recalculateTasks(projectTasks, {
+        const absorbed = absorbMonitoringMargins(projectTasks, projectId, calendarId, effectiveSystem, planVersions);
+        const result = recalculateTasks(absorbed, {
           direction: "forward",
           calendarSystem: effectiveSystem,
           projectCalendarId: calendarId,
@@ -752,7 +784,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         return result.error ? current : { ...current, [projectId]: result.tasks };
       });
     },
-    [projects, system],
+    [projects, system, planVersions],
   );
 
   const createCalendar = useCallback<CalendarStoreValue["createCalendar"]>(
