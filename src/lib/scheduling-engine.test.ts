@@ -11,7 +11,10 @@ import {
 } from "./scheduling-engine";
 import {
   applyMarginConsumption,
+  applyModeCommit,
+  applyPlanningModeMargins,
   applyReplanMargins,
+  fieldModeReadOnly,
   marginAfterPctChange,
   orderTasksForDisplay,
   planFinishDate,
@@ -512,5 +515,99 @@ describe("replan — fresh reserve for the remaining work", () => {
     expect(restored.remaining).toBe(2);
     // A smaller percentage can never show a negative remainder.
     expect(marginAfterPctChange(exhausted, 0).remaining).toBe(0);
+  });
+});
+
+describe("plan modes — planning replans, monitoring tracks reality", () => {
+  const system = systemWith([]);
+  const seed = (): PlannerTask[] => {
+    const seeded = withCalculatedPlanningFields(tpR2(4), system, "base");
+    const recalculated = recalculateTasks(seeded, { direction: "forward", calendarSystem: system, projectCalendarId: "base" });
+    return withCalculatedPlanningFields(recalculated.tasks, system, "base");
+  };
+  /** Mirrors a commit in the app: the mode decides the margin bookkeeping. */
+  const commit = (previous: PlannerTask[], next: PlannerTask[], mode: "planning" | "monitoring"): PlannerTask[] => {
+    const recalculated = recalculateTasks(applyModeCommit(previous, next, mode), {
+      direction: "forward",
+      calendarSystem: system,
+      projectCalendarId: "base",
+    });
+    expect(recalculated.error).toBeUndefined();
+    return withCalculatedPlanningFields(recalculated.tasks, system, "base");
+  };
+  const extendBy = (tasks: PlannerTask[], id: string, days: number): PlannerTask[] =>
+    tasks.map((task) => {
+      if (task.id !== id) return task;
+      const duration = task.duration + days;
+      return { ...task, duration, finish: addWorkingDays(task.start, duration - 1, "base", system) };
+    });
+  const byId = (tasks: PlannerTask[]) => new Map(tasks.map((task) => [task.id, task]));
+
+  test("planning mode: extending 1.1 by a day re-plans and consumes nothing", () => {
+    const base = seed();
+    const planned = commit(base, extendBy(base, "t2", 1), "planning");
+    const t2 = byId(planned).get("t2")!;
+    expect(t2.duration).toBe(6);
+    // Nothing is consumed while planning, and the reserve follows the percentage.
+    expect(t2.marginDaysConsumed).toBe(0);
+    expect(t2.marginDaysOriginal).toBe(2); // ceil(6 d · 20 %)
+    // The plan moves as a whole: the whole chain shifts later.
+    expect(byId(planned).get("t2")!.finish).toBe("2026-10-02");
+    expect(byId(planned).get("t3")!.start).toBe("2026-10-07");
+    expect(byId(base).get("t3")!.start).toBe("2026-10-05");
+  });
+
+  test("monitoring mode: extending 1.1 by a day eats its reserve and moves nothing", () => {
+    const base = seed();
+    const monitored = commit(base, extendBy(base, "t2", 1), "monitoring");
+    const t2 = byId(monitored).get("t2")!;
+    expect(t2.duration).toBe(6);
+    expect(t2.marginDaysConsumed).toBe(1);
+    expect(t2.marginDaysOriginal).toBe(1);
+    // Same slot as the baseline, so the plan does not move.
+    for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
+      expect(byId(monitored).get(id)!.start).toBe(byId(base).get(id)!.start);
+    }
+  });
+
+  test("the same edit moves the plan in planning mode and not in monitoring mode", () => {
+    const base = seed();
+    const planned = commit(base, extendBy(base, "t2", 1), "planning");
+    const monitored = commit(base, extendBy(base, "t2", 1), "monitoring");
+    expect(byId(planned).get("t3")!.start).not.toBe(byId(base).get("t3")!.start);
+    expect(byId(monitored).get("t3")!.start).toBe(byId(base).get("t3")!.start);
+  });
+
+  test("the right fields are read-only in each mode, naming the mode", () => {
+    expect(fieldModeReadOnly("margin", "monitoring")).toContain("Monitoring");
+    expect(fieldModeReadOnly("margin", "planning")).toBeNull();
+    expect(fieldModeReadOnly("percent", "planning")).toContain("Monitoring");
+    expect(fieldModeReadOnly("percent", "monitoring")).toBeNull();
+    expect(fieldModeReadOnly("actualStart", "planning")).toContain("Monitoring");
+    expect(fieldModeReadOnly("actualFinish", "monitoring")).toBeNull();
+  });
+
+  test("float stays a pure network calculation in both modes", () => {
+    const base = seed();
+    const planned = commit(base, extendBy(base, "t2", 1), "planning");
+    const monitored = commit(base, extendBy(base, "t2", 1), "monitoring");
+    expect(typeof byId(planned).get("t6")!.totalFloat).toBe("number");
+    expect(typeof byId(monitored).get("t6")!.totalFloat).toBe("number");
+  });
+
+  test("a new version starts in planning with consumed margin reset, leaving the old one intact", () => {
+    const base = seed();
+    const monitored = commit(base, extendBy(base, "t2", 1), "monitoring");
+    const monitoredT2 = byId(monitored).get("t2")!;
+    expect(monitoredT2.marginDaysConsumed).toBe(1);
+
+    const nextVersion = applyPlanningModeMargins(monitored);
+    const nextT2 = byId(nextVersion).get("t2")!;
+    expect(nextT2.marginDaysConsumed).toBe(0);
+    expect(nextT2.marginDaysOriginal).toBe(2); // re-derived: ceil(6 d · 20 %)
+
+    // The version the replan was built from keeps its own margins and consumption.
+    expect(monitoredT2.marginDaysConsumed).toBe(1);
+    expect(byId(monitored).get("t2")).toBe(monitoredT2);
   });
 });

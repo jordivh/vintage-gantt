@@ -23,6 +23,9 @@ export interface PlannerTask extends ScheduleTask {
   notes: string;
   collapsed?: boolean;
   color: string;
+  /** Reported reality, entered in Monitoring mode. */
+  actualStart?: string;
+  actualFinish?: string;
   marginPct?: number;
   marginDaysOriginal?: number;
   marginDaysConsumed?: number;
@@ -375,6 +378,54 @@ export function marginAfterPctChange(task: PlannerTask, marginPct: number) {
 /** The project finish as the planner shows it: the last task date in the plan. */
 export function planFinishDate(tasks: PlannerTask[]): string {
   return tasks.reduce((latest, task) => (task.finish > latest ? task.finish : latest), "");
+}
+
+/**
+ * A plan version is either being planned or being monitored. Planning edits the
+ * plan (durations, dates, dependencies, margin percentages) and never consumes
+ * reserve; monitoring tracks reality, where extending work eats the reserve
+ * first. The mode belongs to the version, not the project.
+ */
+export type PlanMode = "planning" | "monitoring";
+
+/**
+ * Planning-mode margin bookkeeping: the percentage is the single source of
+ * truth, so the reserve in days is recomputed from the work every time and
+ * nothing is ever consumed. Used instead of `applyMarginConsumption` while a
+ * version is still being planned.
+ */
+export function applyPlanningModeMargins(tasks: PlannerTask[]): PlannerTask[] {
+  const summaryIds = new Set(tasks.filter((task) => tasks.some((child) => child.parentId === task.id)).map((task) => task.id));
+  return tasks.map((task) => summaryIds.has(task.id)
+    ? { ...task, marginDaysConsumed: 0 }
+    : { ...task, marginDaysOriginal: marginOriginalDaysFor(task, task.marginPct ?? 0), marginDaysConsumed: 0 },
+  );
+}
+
+/**
+ * The bookkeeping a commit applies, chosen by the active mode. Planning
+ * re-plans: margin is sized from the percentage and consumption stays at zero.
+ * Monitoring tracks reality: extending work eats the existing reserve first.
+ * Neither branch mutates its inputs.
+ */
+export function applyModeCommit(previous: PlannerTask[], next: PlannerTask[], mode: PlanMode): PlannerTask[] {
+  return mode === "planning" ? applyPlanningModeMargins(next) : applyMarginConsumption(previous, next);
+}
+
+/**
+ * Why a grid field cannot be edited in the current mode, or null when it can.
+ * Planning edits the plan (no progress); monitoring reports reality, so the
+ * reserve itself is fixed and rebuilt through a replan.
+ */
+export function fieldModeReadOnly(field: string, mode: PlanMode): string | null {
+  if (mode === "planning") {
+    if (field === "percent") return "Progress is entered in Monitoring mode.";
+    if (field === "actualStart" || field === "actualFinish") return "Actual dates are entered in Monitoring mode.";
+  }
+  if (mode === "monitoring" && field === "margin") {
+    return "Margin % is fixed in Monitoring mode — use Replan to build fresh reserve.";
+  }
+  return null;
 }
 
 export type ReplanScope = "all" | "not-started" | "selected";

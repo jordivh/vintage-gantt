@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { toast } from "sonner";
 import { useNavigate } from "react-router";
 import {
+  Activity,
   ArrowDown,
   ArrowUp,
   CalendarDays,
@@ -21,6 +22,7 @@ import {
   IndentDecrease,
   IndentIncrease,
   LogOut,
+  PencilRuler,
   Plus,
   Redo2,
   RotateCcw,
@@ -40,13 +42,20 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyMarginConsumption, applyReplanMargins, dependenciesForTasks, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type ReplanScope } from "@/lib/planner-model";
+import { applyModeCommit, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+
+/** The columns each mode puts the spotlight on. Planning is about the plan,
+ *  monitoring is about what really happened versus the baseline. */
+const modeEmphasis: Record<PlanMode, ColumnKey[]> = {
+  planning: ["duration", "predecessors", "margin", "totalFloat"],
+  monitoring: ["percent", "actualStart", "actualFinish", "marginConsumed", "marginRemaining", "variance"],
+};
 
 const rowHeight = 42;
 const todayLineDate = isoDate(new Date());
@@ -61,6 +70,8 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "totalFloat", label: "Float", width: 84 },
   { key: "resource", label: "Resource", width: 118 },
   { key: "percent", label: "% complete", width: 96 },
+  { key: "actualStart", label: "Actual start", width: 110 },
+  { key: "actualFinish", label: "Actual finish", width: 110 },
   { key: "notes", label: "Notes", width: 160 },
   { key: "margin", label: "Margin %", width: 92 },
   { key: "marginOriginal", label: "Margin original", width: 112 },
@@ -120,6 +131,7 @@ export default function Dashboard() {
     planVersions,
     activeVersionId,
     setActiveVersion,
+    setPlanMode,
     createPlanVersion,
     replanProject,
     createBaseline,
@@ -130,6 +142,12 @@ export default function Dashboard() {
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
+  // The mode belongs to the active version, not the project. A version with no
+  // stored mode is a version being planned.
+  const activePlanVersion = planVersions.find((version) => version.id === activeVersionId)
+    ?? planVersions.find((version) => version.projectId === activeProjectId && version.isActive);
+  const activeMode: PlanMode = activePlanVersion?.mode ?? "planning";
+  const versionHasBaseline = baselines.some((baseline) => baseline.versionId === activeVersionId);
   useEffect(() => {
     setPlanningDirection(activeProject.schedulingDirection);
   }, [activeProjectId, activeProject.schedulingDirection]);
@@ -154,7 +172,7 @@ export default function Dashboard() {
   });
   const [expandedGroups, setExpandedGroups] = useState<{ active: boolean; archived: boolean }>({ active: true, archived: false });
   const [hidden, setHidden] = useState<ColumnKey[]>(() => {
-    const fallback: ColumnKey[] = ["margin", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"];
+    const fallback: ColumnKey[] = ["actualStart", "actualFinish", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"];
     try {
       // Float is visible by default, so legacy preferences (which always hid it)
       // are migrated once; from the next save on, the current key wins.
@@ -365,12 +383,17 @@ export default function Dashboard() {
     }
     setHistory((items) => [...items.slice(-29), tasks]);
     setFuture([]);
-    const consumed = applyMarginConsumption(tasks, normalized);
+    // Planning re-plans (margin sized from the percentage, nothing consumed);
+    // monitoring tracks reality (an extension eats the existing reserve first).
+    const consumed = applyModeCommit(tasks, normalized, activeMode);
     recalculate(consumed, "forward", false, "", manuallyAnchoredId ? [manuallyAnchoredId] : []);
     return true;
   };
 
   const updateTask = (id: string, field: ColumnKey, value: string) => {
+    // A field owned by the other mode never changes here, even if some event
+    // slips through the readonly cells.
+    if (fieldModeReadOnly(field, activeMode)) { setEditing(null); return; }
     if (field === "predecessors") {
       const resolved = resolvePredecessorInput(value, id, tasks, taskDisplayIds);
       if (resolved.error) {
@@ -437,6 +460,8 @@ export default function Dashboard() {
         return { ...task, marginPct };
       }
       if (field === "percent") return { ...task, percent: Math.max(0, Math.min(100, Number(value.replace("%", "")) || 0)) };
+      if (field === "actualStart") return { ...task, actualStart: value.trim() || undefined };
+      if (field === "actualFinish") return { ...task, actualFinish: value.trim() || undefined };
       if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
     });
@@ -764,6 +789,18 @@ export default function Dashboard() {
     setReplanDialog(false);
     toast.success(`Replanned ${result.affected} task${result.affected === 1 ? "" : "s"} · finish ${formatDate(result.finish)}`);
   };
+  const switchToMonitoring = () => {
+    const result = setPlanMode(activeVersionId, "monitoring");
+    if (!result.ok) { toast.error(result.message ?? "Could not switch mode."); return; }
+    setHistory([]);
+    setFuture([]);
+    toast.success("This version is now in Monitoring mode");
+  };
+  const modeSwitches = activePlanVersion?.modeHistory ?? [];
+  const lastModeSwitch = modeSwitches[modeSwitches.length - 1];
+  const modeBadgeTitle = `${activeMode === "planning"
+    ? "Planning mode: durations, dates, dependencies and margin % are re-planning. The reserve is sized from the percentage and nothing is consumed."
+    : "Monitoring mode: duration and progress edits track reality and consume the reserve; margin % is fixed."}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
     <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
@@ -786,6 +823,16 @@ export default function Dashboard() {
             {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
           </select></label>
           <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select></label>
+          <span
+            className={`mode-badge ${activeMode}`}
+            title={modeBadgeTitle}
+          >
+            {activeMode === "planning" ? <PencilRuler size={13} /> : <Activity size={13} />}
+            {activeMode === "planning" ? "Planning" : "Monitoring"}
+          </span>
+          {activeMode === "planning" && (versionHasBaseline
+            ? <button className="mode-switch" onClick={switchToMonitoring}>Switch to Monitoring</button>
+            : <button className="mode-switch" disabled title="Monitoring needs a baseline — set one first.">Monitoring locked</button>)}
         </div>
         <div className="top-actions">
           <div className="save-state"><span className="live-dot" /> Saved just now</div>
@@ -814,7 +861,7 @@ export default function Dashboard() {
             <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margin zones</label>
             <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Baseline bars</label>
             <div className="popover-subheading">COLUMNS</div>
-            {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
+            {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "actualStart", "actualFinish", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
           </div>}</div>
           <select className="toolbar-zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value as "day" | "week" | "month" | "quarter")} aria-label="Zoom"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option><option value="quarter">Quarter</option></select>
           <div className="toolbar-popover-wrap"><button className="icon-button" title="More actions" aria-label="More actions" onClick={() => { setOverflowOpen((open) => !open); setViewOpen(false); }}><MoreHorizontal size={18} /></button>{overflowOpen && <div className="toolbar-popover overflow-popover" onClick={(event) => event.stopPropagation()}>
@@ -825,9 +872,9 @@ export default function Dashboard() {
             <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
-            <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { const reset = window.confirm("Reset all margins to their original values?"); createPlanVersion(name, reset); setHistory([]); setFuture([]); } }}><Copy size={14} /> New version</button>
+            <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { createPlanVersion(name); setHistory([]); setFuture([]); toast.success("New version created in Planning mode"); } }}><Copy size={14} /> New version</button>
             <div className="menu-rule" />
-            <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); } }}><FileSpreadsheet size={14} /> Set baseline</button>
+            <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); if (activeMode === "planning" && window.confirm("Baseline saved.\n\nSwitch this version to Monitoring mode now? In Monitoring a duration edit consumes the reserve first, and margin % becomes read-only.")) switchToMonitoring(); } }}><FileSpreadsheet size={14} /> Set baseline</button>
             <button onClick={() => { const name = window.prompt("Template name", `${activeProject.name} template`); if (name?.trim()) void saveAsTemplate(activeProject.id, activeVersionId, name.trim()).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template.")); }}><Copy size={14} /> Save as template</button>
             {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
           </div>}</div>
@@ -1029,7 +1076,7 @@ export default function Dashboard() {
                 .map((column) => (
                   <div
                     key={column.key}
-                    className={`grid-head-cell ${column.key === "totalFloat" ? "float-head" : ""}`}
+                    className={`grid-head-cell ${column.key === "totalFloat" ? "float-head" : ""} ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""}`}
                     style={{ width: column.width }}
                     role={column.key === "totalFloat" ? "button" : undefined}
                     aria-sort={sort?.key === column.key ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}
@@ -1092,10 +1139,20 @@ export default function Dashboard() {
                               ? `${displayTask.duration} ${displayTask.durationUnit === "days" ? "d" : "w"}`
                               : column.key === "percent"
                                 ? `${displayTask.percent}%`
+                                : column.key === "actualStart"
+                                  ? (displayTask.actualStart ?? "")
+                                  : column.key === "actualFinish"
+                                    ? (displayTask.actualFinish ?? "")
                                 : column.key === "margin"
                                   ? `${displayTask.marginPct ?? 0}%`
                                   : column.key === "totalFloat"
-                                    ? (summary ? "" : `${displayTask.totalFloat ?? 0} d`)
+                                    ? (summary ? "" : (() => {
+                                        const floatText = `${displayTask.totalFloat ?? 0} d`;
+                                        const baselineSnapshot = activeBaselineSnapshots.get(task.id);
+                                        if (activeMode !== "monitoring" || !baselineSnapshot || baselineSnapshot.totalFloat === undefined) return floatText;
+                                        const floatDelta = (displayTask.totalFloat ?? 0) - baselineSnapshot.totalFloat;
+                                        return `${floatText} (${floatDelta >= 0 ? "+" : ""}${floatDelta})`;
+                                      })())
                                     : column.key === "marginOriginal"
                                       ? `${displayTask.marginDaysOriginal ?? 0} d`
                                       : column.key === "marginConsumed"
@@ -1120,12 +1177,17 @@ export default function Dashboard() {
                                     : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
-                      const isName = column.key === "name";                          const canEdit = !["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) && !(summary && ["start", "finish", "duration", "margin"].includes(column.key));
+                      const isName = column.key === "name";
+                      const modeLock = fieldModeReadOnly(column.key, activeMode);
+                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin"].includes(column.key));
+                      const canEdit = !structuralLock && !modeLock;
+                      const readOnlyReason = modeLock ?? (summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
                         <div
                           key={column.key}
-                          className={`grid-cell ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
+                          className={`grid-cell ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""} ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
                           style={{ width: column.width }}
+                          title={readOnlyReason}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
                               setEditing({ id: task.id, field: column.key });
@@ -1188,7 +1250,7 @@ export default function Dashboard() {
                             <input
                               autoFocus
                               className="cell-input"
-                              type={column.key === "start" || column.key === "finish" ? "date" : "text"}
+                              type={["start", "finish", "actualStart", "actualFinish"].includes(column.key) ? "date" : "text"}
                               value={draft}
                               onChange={(event) => setDraft(event.target.value)}
                               onFocus={(event) => { if (isName && (task.name === "New task" || task.name === "Nieuwe taak")) event.currentTarget.select(); }}

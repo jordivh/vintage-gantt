@@ -137,7 +137,7 @@ const ensureStarterProject = async (ctx: MutationCtx, ownerId: Id<"users">, now:
     const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const calendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? "cal-base-belgium";
     await ctx.db.insert("projects", { ownerId, id: "proj-welcome", name: "New project", status: "active", kind: "project", startDate: new Date().toISOString().slice(0, 10), schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now });
-    await ctx.db.insert("planVersions", { ownerId, id: "version-proj-welcome-1", projectId: "proj-welcome", name: "Versie 1", isActive: true, createdAt: now });
+    await ctx.db.insert("planVersions", { ownerId, id: "version-proj-welcome-1", projectId: "proj-welcome", name: "Versie 1", isActive: true, createdAt: now, mode: "planning" });
   }
   await ctx.db.insert("seedRuns", { ownerId, seedKey: STARTER_SEED_KEY, executedAt: now });
   return !hasRealProject;
@@ -172,7 +172,7 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   const calendarId = base?.id ?? "cal-base-belgium";
   if (!base) await ctx.db.insert("calendars", { ownerId, id: calendarId, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] });
   await ctx.db.insert("projects", { ownerId, id: TEST_PROJECT_ID, name: "TP-R2 — Testproject", status: "template", kind: "template", isBuiltin: true, startDate: "2026-10-05", schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now, seedKey: TEST_SEED_KEY });
-  await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now });
+  await ctx.db.insert("planVersions", { ownerId, id: TEST_VERSION_ID, projectId: TEST_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now, mode: "planning" });
   for (const task of testTasks(TEST_VERSION_ID)) await ctx.db.insert("tasks", { ownerId, ...task });
   for (const dependency of testDependencies) await ctx.db.insert("dependencies", { ownerId, ...dependency });
   if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
@@ -195,7 +195,7 @@ export const saveAsTemplate = mutation({
     const exceptionRows = await ctx.db.query("calendarExceptions").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
     const idMap = new Map(sourceTasks.map((task) => [task.id, templateTaskId()]));
     await ctx.db.insert("projects", { ownerId, id, name: args.name.trim() || `${source.name} template`, status: "template", kind: "template", isBuiltin: false, startDate: source.startDate, schedulingDirection: "forward", calendarId: source.calendarId, createdAt: now, updatedAt: now });
-    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now };
+    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now, mode: "planning" as const, modeHistory: [] };
     await ctx.db.insert("planVersions", { ownerId, ...version });
     const copiedTasks: any[] = [];
     for (const task of sourceTasks) {
@@ -250,7 +250,7 @@ export const createProjectFromTemplate = mutation({
     const id = `proj-${crypto.randomUUID()}`;
     const now = new Date().toISOString();
     const versionId = `version-${id}-1`;
-    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now };
+    const version = { id: versionId, projectId: id, name: "Versie 1", isActive: true, createdAt: now, mode: "planning" as const, modeHistory: [] };
     const project = { id, name: args.name.trim() || "Untitled project", status: "active", kind: "project" as const, isBuiltin: false, startDate: args.startDate, schedulingDirection: (args.schedulingDirection === "backward" ? "backward" : "forward"), calendarId, createdAt: now, updatedAt: now };
     await ctx.db.insert("projects", { ownerId, ...project });
     await ctx.db.insert("planVersions", { ownerId, ...version });
