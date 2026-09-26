@@ -209,6 +209,11 @@ export default function Dashboard() {
   const [baselineName, setBaselineName] = useState("");
   const [baselineDate, setBaselineDate] = useState(todayLineDate);
   const [baselineSwitchPrompt, setBaselineSwitchPrompt] = useState(false);
+  const [versionDialog, setVersionDialog] = useState(false);
+  const [versionName, setVersionName] = useState("");
+  const [templateDialog, setTemplateDialog] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [deleteBaselineConfirm, setDeleteBaselineConfirm] = useState(false);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -825,6 +830,38 @@ export default function Dashboard() {
     toast.success(`Baseline captured: ${baselineName.trim() || "Baseline"}`);
     setBaselineSwitchPrompt(true);
   };
+  // Native prompts are blocked in the embedded preview, so new versions, saving
+  // templates and deleting a baseline all go through their own dialog.
+  const projectVersionCount = planVersions.filter((version) => version.projectId === activeProjectId).length;
+  const openNewVersion = () => {
+    setVersionName(`Version ${projectVersionCount + 1}`);
+    setVersionDialog(true);
+    setOverflowOpen(false);
+  };
+  const confirmNewVersion = () => {
+    createPlanVersion(versionName.trim() || `Version ${projectVersionCount + 1}`);
+    setHistory([]);
+    setFuture([]);
+    setVersionDialog(false);
+    toast.success("New version created in Planning mode");
+  };
+  const openSaveTemplate = () => {
+    setTemplateName(`${activeProject.name} template`);
+    setTemplateDialog(true);
+    setOverflowOpen(false);
+  };
+  const confirmSaveTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    setTemplateDialog(false);
+    void saveAsTemplate(activeProject.id, activeVersionId, name).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template."));
+  };
+  const confirmDeleteBaseline = () => {
+    deleteBaseline(activeBaselineId);
+    setActiveBaselineId("");
+    setDeleteBaselineConfirm(false);
+    toast.success("Baseline deleted");
+  };
   const versionHistory = activePlanVersion?.history ?? [];
   const modeEvents = versionHistory.filter((event) => event.type === "mode-switch");
   const lastModeSwitch = modeEvents[modeEvents.length - 1];
@@ -905,11 +942,11 @@ export default function Dashboard() {
             <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
-            <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { createPlanVersion(name); setHistory([]); setFuture([]); toast.success("New version created in Planning mode"); } }}><Copy size={14} /> New version</button>
+            <button onClick={openNewVersion}><Copy size={14} /> New version</button>
             <div className="menu-rule" />
             <button onClick={openBaseline}><FileSpreadsheet size={14} /> Set baseline</button>
-            <button onClick={() => { const name = window.prompt("Template name", `${activeProject.name} template`); if (name?.trim()) void saveAsTemplate(activeProject.id, activeVersionId, name.trim()).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template.")); }}><Copy size={14} /> Save as template</button>
-            {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
+            <button onClick={openSaveTemplate}><Copy size={14} /> Save as template</button>
+            {activeBaselineId && <button className="danger" onClick={() => { setDeleteBaselineConfirm(true); setOverflowOpen(false); }}><Trash2 size={14} /> Delete baseline</button>}
           </div>}</div>
         </div>
       </div>
@@ -971,6 +1008,72 @@ export default function Dashboard() {
               >
                 Recalculate
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {versionDialog && (
+        <div className="modal-backdrop" onClick={() => setVersionDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">NEW VERSION</div><h2>Start a fresh plan</h2></div>
+              <button className="icon-button" onClick={() => setVersionDialog(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              A new version is a copy of <b>{activePlanVersion?.name ?? "the current version"}</b>. It starts in
+              Planning mode with consumed margin reset, and the version it was copied from is left untouched.
+            </p>
+            <div className="modal-grid">
+              <label>
+                Version name
+                <input value={versionName} onChange={(event) => setVersionName(event.target.value)} />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setVersionDialog(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={confirmNewVersion}>Create version</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {templateDialog && (
+        <div className="modal-backdrop" onClick={() => setTemplateDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">SAVE AS TEMPLATE</div><h2>Reuse this plan</h2></div>
+              <button className="icon-button" onClick={() => setTemplateDialog(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              Saves <b>{activePlanVersion?.name ?? "the active version"}</b> of {activeProject.name} as a reusable template
+              that new projects can start from.
+            </p>
+            <div className="modal-grid">
+              <label>
+                Template name
+                <input value={templateName} onChange={(event) => setTemplateName(event.target.value)} />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setTemplateDialog(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={confirmSaveTemplate} disabled={!templateName.trim()}>Save template</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteBaselineConfirm && (
+        <div className="modal-backdrop" onClick={() => setDeleteBaselineConfirm(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">DELETE BASELINE</div><h2>Delete “{baselines.find((baseline) => baseline.id === activeBaselineId)?.name ?? "this baseline"}”?</h2></div>
+              <button className="icon-button" onClick={() => setDeleteBaselineConfirm(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">The captured snapshot is removed for good and cannot be restored.</p>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setDeleteBaselineConfirm(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={confirmDeleteBaseline}>Delete baseline</button>
             </div>
           </div>
         </div>
