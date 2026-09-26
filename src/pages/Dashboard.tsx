@@ -938,8 +938,8 @@ export default function Dashboard() {
   const baselineEvents = versionHistory.filter((event) => event.type === "baseline");
   const lastBaselineEvent = baselineEvents[baselineEvents.length - 1];
   const modeBadgeTitle = `${activeMode === "planning"
-    ? "Planning mode: durations, dates, dependencies and margin % are re-planning. The reserve is sized from the percentage and nothing is consumed."
-    : "Monitoring mode: duration and progress edits track reality and consume the reserve; margin % is fixed."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
+    ? "Planning mode: durations, dates, dependencies and margin % are re-planning. The reserve is sized from the percentage and nothing is consumed. Emphasised columns: Duration, Predecessors, Margin %, Float."
+    : "Monitoring mode: duration, start and progress edits track reality and consume the reserve; margin % is fixed. Emphasised columns: % complete, Margin consumed, Margin remaining, Variance."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
     <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
