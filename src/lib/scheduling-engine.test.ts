@@ -564,10 +564,13 @@ describe("plan modes — planning replans, monitoring tracks reality", () => {
     expect(t2.duration).toBe(6);
     expect(t2.marginDaysConsumed).toBe(1);
     expect(t2.marginDaysOriginal).toBe(1);
-    // Same slot as the baseline, so the plan does not move.
+    // The reserve is spent: consumed 1 d, remaining 0 d.
+    expect((t2.marginDaysOriginal ?? 0) - (t2.marginDaysConsumed ?? 0)).toBe(0);
+    // Same slot as the baseline, so the plan (and its finish) does not move.
     for (const id of ["t3", "t5", "t6", "t7", "t8"]) {
       expect(byId(monitored).get(id)!.start).toBe(byId(base).get(id)!.start);
     }
+    expect(planFinishDate(monitored)).toBe(planFinishDate(base));
   });
 
   test("the same edit moves the plan in planning mode and not in monitoring mode", () => {

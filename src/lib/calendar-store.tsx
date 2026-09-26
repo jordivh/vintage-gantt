@@ -55,8 +55,10 @@ export interface ResourceRecord {
 }
 export interface TaskAssignment { id: string; taskId: string; resourceId: string; }
 export interface ModeSwitch { at: string; from: PlanMode; to: PlanMode; }
-export interface PlanVersion { id: string; projectId: string; name: string; isActive: boolean; createdAt: string; mode?: PlanMode; modeHistory?: ModeSwitch[]; }
-export interface Baseline { id: string; projectId: string; versionId: string; name: string; note?: string; createdAt: string; }
+/** A timestamped entry in a version's history: a mode switch or a baseline capture. */
+export interface VersionEvent { at: string; type: "mode-switch" | "baseline"; from?: PlanMode; to?: PlanMode; baselineId?: string; name?: string; }
+export interface PlanVersion { id: string; projectId: string; name: string; isActive: boolean; createdAt: string; mode?: PlanMode; history?: VersionEvent[]; modeHistory?: ModeSwitch[]; }
+export interface Baseline { id: string; projectId: string; versionId: string; name: string; note?: string; createdAt: string; captureDate?: string; }
 export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; totalFloat?: number; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
@@ -205,7 +207,7 @@ interface CalendarStoreValue {
   planVersions: PlanVersion[];
   baselines: Baseline[];
   baselineTasks: BaselineTask[];
-  createBaseline: (name: string, note?: string) => string;
+  createBaseline: (name: string, note?: string, captureDate?: string) => string;
   deleteBaseline: (baselineId: string) => void;
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
@@ -312,7 +314,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const grouped: Record<string, PlannerTask[]> = {};
     const rawVersions: PlanVersion[] = (state.planVersions as PlanVersion[] | undefined) ?? (state.projects ?? []).map((project) => ({ id: `version-${project.id}-1`, projectId: project.id, name: "Versie 1", isActive: true, createdAt: project.createdAt }));
     // Versions saved before modes existed behave as the versions they were: planned.
-    const versions: PlanVersion[] = rawVersions.map((version) => ({ ...version, mode: (version.mode ?? "planning") as PlanMode, modeHistory: version.modeHistory ?? [] }));
+    const versions: PlanVersion[] = rawVersions.map((version) => {
+      // Versions saved before the history log existed keep their mode switches.
+      const legacyHistory: VersionEvent[] = (version.modeHistory ?? []).map((entry) => ({ at: entry.at, type: "mode-switch", from: entry.from, to: entry.to }));
+      return { ...version, mode: (version.mode ?? "planning") as PlanMode, history: version.history ?? legacyHistory, modeHistory: version.modeHistory ?? [] };
+    });
     for (const task of state.tasks ?? []) {
       const versionId = task.versionId ?? versions.find((version) => version.projectId === task.projectId && version.isActive)?.id ?? `version-${task.projectId}-1`;
       (grouped[task.projectId] ??= []).push({ ...task, versionId });
@@ -412,8 +418,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     if (mode === "planning") {
       return { ok: false, message: "A version cannot go back to Planning. Create a new version (Replan) instead." };
     }
+    const at = new Date().toISOString();
     setPlanVersions((current) => current.map((item) => item.id === versionId
-      ? { ...item, mode, modeHistory: [...(item.modeHistory ?? []), { at: new Date().toISOString(), from, to: mode }] }
+      ? {
+          ...item,
+          mode,
+          modeHistory: [...(item.modeHistory ?? []), { at, from, to: mode }],
+          history: [...(item.history ?? []), { at, type: "mode-switch" as const, from, to: mode }],
+        }
       : item));
     return { ok: true };
   }, [activeProjectId, planVersions, baselines]);
@@ -502,13 +514,21 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     if (version && version.id !== activeVersionId) setActiveVersionId(version.id);
   }, [activeProjectId, planVersions, activeVersionId]);
 
-  const createBaseline = useCallback<CalendarStoreValue["createBaseline"]>((name, note) => {
+  const createBaseline = useCallback<CalendarStoreValue["createBaseline"]>((name, note, captureDate) => {
     const version = planVersions.find((item) => item.projectId === activeProjectId && item.isActive) ?? planVersions.find((item) => item.projectId === activeProjectId);
+    const versionId = version?.id ?? activeVersionId;
     const id = `baseline-${uid()}`;
-    const baseline: Baseline = { id, projectId: activeProjectId, versionId: version?.id ?? `version-${activeProjectId}-1`, name: name.trim() || "Baseline", note, createdAt: new Date().toISOString() };
-    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === (version?.id ?? activeVersionId)).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0, predecessors: task.predecessors, totalFloat: task.totalFloat ?? 0 }));
+    const at = new Date().toISOString();
+    const baseline: Baseline = { id, projectId: activeProjectId, versionId, name: name.trim() || "Baseline", note, createdAt: at, captureDate: captureDate || at.slice(0, 10) };
+    // A full, immutable snapshot of the version: dates, work, dependencies,
+    // margin percentage, reserve in days and consumption.
+    const snapshots: BaselineTask[] = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === versionId).map((task) => ({ id: `baseline-task-${uid()}`, baselineId: id, taskId: task.id, startDate: task.start, finishDate: task.finish, durationDays: task.duration, marginPct: task.marginPct ?? 0, marginDaysOriginal: task.marginDaysOriginal ?? 0, marginDaysConsumed: task.marginDaysConsumed ?? 0, predecessors: task.predecessors, totalFloat: task.totalFloat ?? 0 }));
     setBaselines((current) => [...current, baseline]);
     setBaselineTasks((current) => [...current, ...snapshots]);
+    // Capture is part of the version's history, timestamped like a mode switch.
+    setPlanVersions((current) => current.map((item) => item.id === versionId
+      ? { ...item, history: [...(item.history ?? []), { at, type: "baseline" as const, baselineId: id, name: baseline.name }] }
+      : item));
     return id;
   }, [activeProjectId, activeVersionId, planVersions, tasksByProject]);
 

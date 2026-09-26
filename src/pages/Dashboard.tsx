@@ -147,7 +147,7 @@ export default function Dashboard() {
   const activePlanVersion = planVersions.find((version) => version.id === activeVersionId)
     ?? planVersions.find((version) => version.projectId === activeProjectId && version.isActive);
   const activeMode: PlanMode = activePlanVersion?.mode ?? "planning";
-  const versionHasBaseline = baselines.some((baseline) => baseline.versionId === activeVersionId);
+  const versionHasBaseline = baselines.some((baseline) => baseline.versionId === (activePlanVersion?.id ?? activeVersionId));
   useEffect(() => {
     setPlanningDirection(activeProject.schedulingDirection);
   }, [activeProjectId, activeProject.schedulingDirection]);
@@ -205,6 +205,10 @@ export default function Dashboard() {
   const [replanScope, setReplanScope] = useState<ReplanScope>("not-started");
   const [replanPct, setReplanPct] = useState("20");
   const [activeBaselineId, setActiveBaselineId] = useState("");
+  const [baselineDialog, setBaselineDialog] = useState(false);
+  const [baselineName, setBaselineName] = useState("");
+  const [baselineDate, setBaselineDate] = useState(todayLineDate);
+  const [baselineSwitchPrompt, setBaselineSwitchPrompt] = useState(false);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -263,6 +267,15 @@ export default function Dashboard() {
     () => new Map(baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId).map((snapshot) => [snapshot.taskId, snapshot])),
     [baselineTasks, activeBaselineId],
   );
+  // The chosen baseline is view state, not stored, so on load (or after
+  // switching versions) fall back to the newest baseline captured on the
+  // active version — the one the mode gate checks too.
+  useEffect(() => {
+    const versionBaselines = baselines.filter((baseline) => baseline.versionId === (activePlanVersion?.id ?? activeVersionId));
+    setActiveBaselineId((current) => versionBaselines.some((baseline) => baseline.id === current)
+      ? current
+      : versionBaselines[versionBaselines.length - 1]?.id ?? "");
+  }, [activeVersionId, activeProjectId, baselines, activePlanVersion?.id]);
 
   const visibleTasks = useMemo(() => {
     const visible: Task[] = [];
@@ -796,11 +809,30 @@ export default function Dashboard() {
     setFuture([]);
     toast.success("This version is now in Monitoring mode");
   };
-  const modeSwitches = activePlanVersion?.modeHistory ?? [];
-  const lastModeSwitch = modeSwitches[modeSwitches.length - 1];
+  // Capturing a baseline is the door into Monitoring: the plan is frozen as the
+  // reference, then we offer the switch. "Later" leaves it locked open.
+  const openBaseline = () => {
+    const count = baselines.filter((baseline) => baseline.projectId === activeProjectId).length + 1;
+    setBaselineName(`Baseline ${count}`);
+    setBaselineDate(todayLineDate);
+    setBaselineDialog(true);
+    setOverflowOpen(false);
+  };
+  const confirmBaseline = () => {
+    const id = createBaseline(baselineName.trim() || "Baseline", undefined, baselineDate);
+    setActiveBaselineId(id);
+    setBaselineDialog(false);
+    toast.success(`Baseline captured: ${baselineName.trim() || "Baseline"}`);
+    setBaselineSwitchPrompt(true);
+  };
+  const versionHistory = activePlanVersion?.history ?? [];
+  const modeEvents = versionHistory.filter((event) => event.type === "mode-switch");
+  const lastModeSwitch = modeEvents[modeEvents.length - 1];
+  const baselineEvents = versionHistory.filter((event) => event.type === "baseline");
+  const lastBaselineEvent = baselineEvents[baselineEvents.length - 1];
   const modeBadgeTitle = `${activeMode === "planning"
     ? "Planning mode: durations, dates, dependencies and margin % are re-planning. The reserve is sized from the percentage and nothing is consumed."
-    : "Monitoring mode: duration and progress edits track reality and consume the reserve; margin % is fixed."}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
+    : "Monitoring mode: duration and progress edits track reality and consume the reserve; margin % is fixed."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
     <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
@@ -822,7 +854,8 @@ export default function Dashboard() {
           <label>Version <select className="context-select" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }}>
             {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
           </select></label>
-          <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}</select></label>
+          <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}          </select></label>
+          <button className="tool-button quiet baseline-action" onClick={openBaseline} title="Capture the current version as a baseline"><FileSpreadsheet size={14} /> Set baseline</button>
           <span
             className={`mode-badge ${activeMode}`}
             title={modeBadgeTitle}
@@ -832,7 +865,7 @@ export default function Dashboard() {
           </span>
           {activeMode === "planning" && (versionHasBaseline
             ? <button className="mode-switch" onClick={switchToMonitoring}>Switch to Monitoring</button>
-            : <button className="mode-switch" disabled title="Monitoring needs a baseline — set one first.">Monitoring locked</button>)}
+            : <button className="mode-switch locked" aria-disabled title="Set a baseline first." onClick={() => toast("Set a baseline first.")}>Monitoring locked</button>)}
         </div>
         <div className="top-actions">
           <div className="save-state"><span className="live-dot" /> Saved just now</div>
@@ -874,7 +907,7 @@ export default function Dashboard() {
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
             <button onClick={() => { const name = window.prompt("Version name", `Version ${planVersions.length + 1}`); if (name) { createPlanVersion(name); setHistory([]); setFuture([]); toast.success("New version created in Planning mode"); } }}><Copy size={14} /> New version</button>
             <div className="menu-rule" />
-            <button onClick={() => { const name = window.prompt("Baseline name", "Baseline"); if (name) { const note = window.prompt("Optional note", "") ?? undefined; const id = createBaseline(name, note); setActiveBaselineId(id); toast.success("Baseline saved"); if (activeMode === "planning" && window.confirm("Baseline saved.\n\nSwitch this version to Monitoring mode now? In Monitoring a duration edit consumes the reserve first, and margin % becomes read-only.")) switchToMonitoring(); } }}><FileSpreadsheet size={14} /> Set baseline</button>
+            <button onClick={openBaseline}><FileSpreadsheet size={14} /> Set baseline</button>
             <button onClick={() => { const name = window.prompt("Template name", `${activeProject.name} template`); if (name?.trim()) void saveAsTemplate(activeProject.id, activeVersionId, name.trim()).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template.")); }}><Copy size={14} /> Save as template</button>
             {activeBaselineId && <button className="danger" onClick={() => { const baseline = baselines.find((item) => item.id === activeBaselineId); if (baseline && window.confirm(`Delete baseline “${baseline.name}”?`)) { deleteBaseline(activeBaselineId); setActiveBaselineId(""); toast.success("Baseline deleted"); } }}><Trash2 size={14} /> Delete baseline</button>}
           </div>}</div>
@@ -938,6 +971,55 @@ export default function Dashboard() {
               >
                 Recalculate
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {baselineDialog && (
+        <div className="modal-backdrop" onClick={() => setBaselineDialog(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">SET BASELINE</div><h2>Capture this version</h2></div>
+              <button className="icon-button" onClick={() => setBaselineDialog(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              A baseline freezes the current version exactly as it is — start, finish, duration, dependencies,
+              margin % and margin in days — so Monitoring can measure against it. It cannot be changed afterwards.
+            </p>
+            <div className="modal-grid">
+              <label>
+                Baseline name
+                <input value={baselineName} onChange={(event) => setBaselineName(event.target.value)} />
+              </label>
+              <label>
+                Capture date
+                <input type="date" value={baselineDate} onChange={(event) => setBaselineDate(event.target.value)} />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setBaselineDialog(false)}>Cancel</button>
+              <button className="tool-button primary" onClick={confirmBaseline}>Capture baseline</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {baselineSwitchPrompt && (
+        <div className="modal-backdrop" onClick={() => setBaselineSwitchPrompt(false)}>
+          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">BASELINE CAPTURED</div><h2>Switch to Monitoring mode now?</h2></div>
+              <button className="icon-button" onClick={() => setBaselineSwitchPrompt(false)}><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              In Monitoring mode a duration edit means reality changed: it consumes the task's remaining margin
+              before successors move, and margin % becomes read-only. Choose Later to keep planning — the toggle
+              stays unlocked, so you can switch whenever you want.
+            </p>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={() => setBaselineSwitchPrompt(false)}>Later</button>
+              <button className="tool-button primary" onClick={() => { setBaselineSwitchPrompt(false); switchToMonitoring(); }}>Yes, switch</button>
             </div>
           </div>
         </div>

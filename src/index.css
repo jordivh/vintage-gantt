@@ -322,8 +322,9 @@
 .mode-badge.planning { color: #4f5f47; background: #e3e8d8; border-color: #9aa986; }
 .mode-badge.monitoring { color: #fff6ec; background: #a2563b; border-color: #7f3f29; box-shadow: 0 0 0 2px #a2563b2e; }
 .mode-switch { height: 28px; padding: 0 10px; border: 1px dashed #b09572; background: transparent; color: #7c5f3f; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.context-selectors .baseline-action { height: 28px; padding: 0 10px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 .mode-switch:hover:not(:disabled) { background: #efe2ca; }
-.mode-switch:disabled { opacity: .55; cursor: not-allowed; }
+.mode-switch:disabled, .mode-switch.locked { opacity: .55; cursor: not-allowed; }
 /* The columns the active mode puts the spotlight on. */
 .grid-head-cell.mode-emphasis { background: #cdb994; color: #4a3a29; box-shadow: inset 0 -2px #9a593f; }
 .grid-cell.mode-emphasis { background: #f4ead3; }
