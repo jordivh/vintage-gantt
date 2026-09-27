@@ -63,6 +63,7 @@ export default function Resources() {
           <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
           <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
           <button className="tool-button primary" onClick={() => navigate("/resources")}>Resources</button>
+          <button className="tool-button" onClick={() => navigate("/capacity")}>Capacity</button>
         </nav>
         <div className="top-actions"><button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button><button className="icon-button" title="Sign out" onClick={() => { signOut(); navigate("/"); }}><LogOut size={17} /></button></div>
       </header>

@@ -20,6 +20,7 @@ const Calendars = lazy(() => import("./pages/Calendars.tsx"));
 const Resources = lazy(() => import("./pages/Resources.tsx"));
 const Projects = lazy(() => import("./pages/Projects.tsx"));
 const MarginReport = lazy(() => import("./pages/MarginReport.tsx"));
+const Capacity = lazy(() => import("./pages/Capacity.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -104,6 +105,14 @@ createRoot(document.getElementById("root")!).render(
                   element={
                     <RequireAuth>
                       <Projects />
+                    </RequireAuth>
+                  }
+                />
+                <Route
+                  path="/capacity"
+                  element={
+                    <RequireAuth>
+                      <Capacity />
                     </RequireAuth>
                   }
                 />
