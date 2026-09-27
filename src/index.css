@@ -466,3 +466,23 @@
 .conflict-date { color: #9a8464; font-size: 11px; }
 .capacity-empty { padding: 26px; text-align: center; color: #8b765d; }
 @media (max-width: 900px) { .capacity-layout { grid-template-columns: 1fr; } .capacity-heading { flex-direction: column; } }
+
+/* Capacity filters and the assignment list. */
+.capacity-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 12px 14px; margin-bottom: 14px; }
+.capacity-filters label { display: flex; flex-direction: column; gap: 4px; color: #8d795f; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.capacity-filters select { height: 32px; min-width: 160px; border: 1px solid #c4b292; background: #fff9eb; color: #4b3d2f; font-size: 12px; padding: 0 7px; }
+.capacity-filter-active { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-left: auto; }
+.capacity-filter-chip { border: 1px solid #a2664d; background: #f4e3d8; color: #7d3f32; border-radius: 99px; padding: 4px 10px; font-size: 11px; }
+.capacity-filter-chip:hover { background: #eed3c5; }
+.capacity-clear { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #c6b79d; background: #f4ead8; color: #6b5741; padding: 5px 10px; border-radius: 3px; font-size: 11px; }
+.capacity-clear:hover { background: #eddfc6; }
+.capacity-assignments { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e0cfb5; }
+.capacity-assignments > b { display: block; color: #654d38; font: 15px Georgia, serif; margin-bottom: 8px; }
+.capacity-assignment-table { font-size: 12px; }
+.capacity-assignment-row { cursor: pointer; }
+.capacity-assignment-row:hover td { background: #f4ead3; }
+.capacity-open-cell { width: 34px; text-align: right; }
+.capacity-open-cell button { border: 0; background: transparent; color: #9a593f; display: grid; place-items: center; }
+.project-settings-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; color: #887359; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.project-settings-field input { text-transform: none; letter-spacing: 0; font-size: 12px; }
+

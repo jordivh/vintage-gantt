@@ -40,6 +40,8 @@ export interface ProjectRecord {
   kind?: "project" | "template";
   isBuiltin?: boolean;
   hidden?: boolean;
+  /** Client / customer the project is for. Free text; drives the capacity filter. */
+  client?: string;
 }
 
 export type LeaveType = "holiday leave" | "sick leave" | "training" | "other";
@@ -192,6 +194,7 @@ interface CalendarStoreValue {
   setTemplateHidden: (templateId: string, hidden: boolean) => Promise<void>;
   deleteTemplate: (templateId: string) => Promise<void>;
   renameProject: (projectId: string, name: string) => void;
+  setProjectClient: (projectId: string, client: string) => void;
   duplicateProject: (projectId: string, name: string) => string;
   archiveProject: (projectId: string) => void;
   deleteProject: (projectId: string) => { ok: boolean; taskCount: number };
@@ -227,6 +230,11 @@ interface CalendarStoreValue {
   deleteBaseline: (baselineId: string) => BaselineDeleteResult;
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
+  /** Opens a task in its own project and version (used by the resource overview). */
+  openTask: (projectId: string, versionId: string, taskId: string) => void;
+  /** The task the planner should select next, set by `openTask` and cleared once used. */
+  focusTask: { projectId: string; versionId: string; taskId: string } | null;
+  clearFocusTask: () => void;
   /**
    * Switches a version between Planning and Monitoring. Monitoring requires a
    * baseline on that version, and a version can never go back to Planning —
@@ -309,6 +317,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [planVersions, setPlanVersions] = useState<PlanVersion[]>([]);
   const [baselines, setBaselines] = useState<Baseline[]>([]);
   const [baselineTasks, setBaselineTasks] = useState<BaselineTask[]>([]);
+  const [focusTask, setFocusTask] = useState<{ projectId: string; versionId: string; taskId: string } | null>(null);
 
   const { isAuthenticated } = useConvexAuth();
   const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
@@ -674,6 +683,20 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setProjects((current) => current.map((project) => project.id === projectId ? { ...project, name: name.trim(), updatedAt: new Date().toISOString() } : project));
   }, []);
 
+  const setProjectClient = useCallback((projectId: string, client: string) => {
+    setProjects((current) => current.map((project) => project.id === projectId ? { ...project, client: client.trim() || undefined, updatedAt: new Date().toISOString() } : project));
+  }, []);
+
+  /** Opens a task in its project and version, and asks the planner to select it. */
+  const openTask = useCallback((projectId: string, versionId: string, taskId: string) => {
+    setActiveProjectId(projectId);
+    setPlanVersions((current) => current.map((version) => version.projectId === projectId ? { ...version, isActive: version.id === versionId } : version));
+    setActiveVersionId(versionId);
+    setFocusTask({ projectId, versionId, taskId });
+  }, []);
+
+  const clearFocusTask = useCallback(() => setFocusTask(null), []);
+
   const duplicateProject = useCallback<CalendarStoreValue["duplicateProject"]>((projectId, name) => {
     const source = projects.find((project) => project.id === projectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project");
     const id = `proj-${uid()}`;
@@ -955,13 +978,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       replanProject,
       deletePlanVersion,
       setPlanMode,
+      setProjectClient,
+      openTask,
+      focusTask,
+      clearFocusTask,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
-      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode,
+      planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode, setProjectClient, openTask, focusTask, clearFocusTask,
     ],
   );
 

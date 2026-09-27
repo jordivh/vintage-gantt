@@ -37,6 +37,7 @@ const schema = defineSchema(
       schedulingDirection: v.string(), calendarId: v.string(),      createdAt: v.string(), updatedAt: v.string(),
       seedKey: v.optional(v.string()),
       kind: v.optional(v.union(v.literal("project"), v.literal("template"))), // Omitted on legacy rows means "project".
+      client: v.optional(v.string()),
       isBuiltin: v.optional(v.boolean()),
       hidden: v.optional(v.boolean()),
     }).index("by_owner", ["ownerId"]).index("by_owner_seed", ["ownerId", "seedKey"]),

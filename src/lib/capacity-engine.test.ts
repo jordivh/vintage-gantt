@@ -8,7 +8,7 @@ import {
 } from "./scheduling-engine";
 import type { PlannerTask } from "./planner-model";
 import { R3_CHRIS_LEAVE, R3_RESOURCES, r3AssignmentsA, r3AssignmentsB, r3TasksA, r3TasksB } from "./r3-fixture";
-import { aggregatePeriods, computeResourceLoads, overloadWarning, type CapacityInput } from "./capacity-engine";
+import { aggregatePeriods, capacityClients, computeResourceLoads, matchesResourceFilter, overloadWarning, selectCapacityProjects, type CapacityInput } from "./capacity-engine";
 
 const r3System = (): CalendarSystem => {
   const base = createDefaultCalendarSystem();
@@ -179,5 +179,36 @@ describe("capacity — breakdown, conflicts and aggregation", () => {
     expect(week.available).toBe(40);
     expect(week.allocated).toBe(0);
     expect(week.utilisation).toBe(0);
+  });
+});
+
+describe("capacity — overview filters", () => {
+  const projects = [
+    { id: "a", name: "TP-R3-A", status: "active", kind: "project" as const, client: "Gemeente" },
+    { id: "b", name: "TP-R3-B", status: "active", kind: "project" as const, client: "Acme" },
+    { id: "c", name: "Old", status: "archived", kind: "project" as const, client: "Gemeente" },
+    { id: "t", name: "Tpl", status: "template", kind: "template" as const, client: "Gemeente" },
+    { id: "d", name: "No client", status: "active", kind: "project" as const },
+  ];
+
+  test("excludes archived projects and templates, so no ghost load remains", () => {
+    expect(selectCapacityProjects(projects).map((project) => project.id)).toEqual(["a", "b", "d"]);
+  });
+
+  test("filters by project, by client, and by both", () => {
+    expect(selectCapacityProjects(projects, { projectId: "b" }).map((project) => project.id)).toEqual(["b"]);
+    expect(selectCapacityProjects(projects, { client: "Gemeente" }).map((project) => project.id)).toEqual(["a"]);
+    expect(selectCapacityProjects(projects, { client: "Gemeente", projectId: "b" })).toEqual([]);
+    expect(selectCapacityProjects(projects, { client: "Acme", projectId: "b" }).map((project) => project.id)).toEqual(["b"]);
+  });
+
+  test("clients are the distinct non-empty values of the selectable projects", () => {
+    expect(capacityClients(projects)).toEqual(["Acme", "Gemeente"]);
+  });
+
+  test("an unset resource filter passes every resource", () => {
+    expect(matchesResourceFilter("res-r3-anna", {})).toBe(true);
+    expect(matchesResourceFilter("res-r3-anna", { resourceId: "res-r3-anna" })).toBe(true);
+    expect(matchesResourceFilter("res-r3-bram", { resourceId: "res-r3-anna" })).toBe(false);
   });
 });

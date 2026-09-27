@@ -162,6 +162,8 @@ export default function Dashboard() {
     baselines,
     baselineTasks,
     saveAsTemplate,
+    focusTask,
+    clearFocusTask,
   } = useCalendarStore();
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
@@ -176,6 +178,13 @@ export default function Dashboard() {
   }, [activeProjectId, activeProject.schedulingDirection]);
 
   const [selected, setSelected] = useState<string[]>(["3"]);
+  // The resource overview can ask the planner to open one task in its project and
+  // version; select that task, then clear the request so it fires exactly once.
+  useEffect(() => {
+    if (!focusTask) return;
+    setSelected([focusTask.taskId]);
+    clearFocusTask();
+  }, [focusTask, clearFocusTask]);
   const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
   const [resourceEditor, setResourceEditor] = useState<{ taskId: string; query: string } | null>(null);
   const [draft, setDraft] = useState("");

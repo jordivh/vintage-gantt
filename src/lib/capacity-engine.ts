@@ -44,6 +44,47 @@ export interface CapacityInput {
   projects: CapacityProjectInput[];
 }
 
+/* --------------------------------------------------------------- filters */
+
+/** The project facts the overview filters need. */
+export interface CapacityProjectRef {
+  id: string;
+  name: string;
+  status: string;
+  kind?: "project" | "template";
+  client?: string;
+}
+
+export interface CapacityFilter {
+  resourceId?: string;
+  projectId?: string;
+  client?: string;
+}
+
+/**
+ * The projects that may contribute load: regular projects only (never a
+ * template) and never an archived one, narrowable by project and client. This is
+ * what keeps archived or deleted work from leaving ghost load behind. The
+ * resource filter does not change the project set.
+ */
+export function selectCapacityProjects<T extends CapacityProjectRef>(projects: T[], filter: CapacityFilter = {}): T[] {
+  return projects.filter((project) =>
+    (project.kind ?? (project.status === "template" ? "template" : "project")) === "project"
+    && project.status !== "archived"
+    && (!filter.projectId || project.id === filter.projectId)
+    && (!filter.client || project.client === filter.client));
+}
+
+/** The clients available to filter by: distinct, non-empty, sorted. */
+export function capacityClients(projects: CapacityProjectRef[]): string[] {
+  return [...new Set(selectCapacityProjects(projects).map((project) => project.client).filter((value): value is string => Boolean(value)))].sort((a, b) => a.localeCompare(b));
+}
+
+/** True when a resource passes the resource filter (an unset filter passes all). */
+export function matchesResourceFilter(resourceId: string, filter: CapacityFilter): boolean {
+  return !filter.resourceId || filter.resourceId === resourceId;
+}
+
 /* ---------------------------------------------------------------- output */
 
 export interface CapacityContribution {
