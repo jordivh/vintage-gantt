@@ -3,6 +3,7 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { remapPredecessorText } from "../lib/planner-model";
+import { R3_CHRIS_LEAVE, R3_PROJECTS, R3_RESOURCES, R3_SEED_KEY } from "../lib/r3-fixture";
 
 const requireOwner = async (ctx: QueryCtx | MutationCtx) => {
   const userId = await getAuthUserId(ctx);
@@ -189,6 +190,40 @@ const seedTestProject = async (ctx: MutationCtx, ownerId: Id<"users">) => {
   if (!executed) await ctx.db.insert("seedRuns", { ownerId, seedKey: TEST_SEED_KEY, executedAt: now });
   await ensureStarterProject(ctx, ownerId, now);
   return true;
+};
+
+/* --------------------------------------------------------------- R3 seed */
+
+/**
+ * Seeds the R3 scenario exactly once per workspace: three people (with their
+ * own weeks and Chris's leave) and TP-R3-A/B as a normal project *and* a
+ * template each, so the scenario can be recreated after testing. Deterministic
+ * ids plus a seed-run marker keep it idempotent — running it twice creates
+ * nothing new. TP-R2 is left untouched.
+ */
+const seedR3 = async (ctx: MutationCtx, ownerId: Id<"users">, now: string) => {
+  const executed = await ctx.db.query("seedRuns").withIndex("by_owner_seed", (q) => q.eq("ownerId", ownerId as never).eq("seedKey", R3_SEED_KEY)).first();
+  if (executed) return;
+  const calendars = await ctx.db.query("calendars").withIndex("by_owner", (q) => q.eq("ownerId", ownerId as never)).collect();
+  const base = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
+  const baseCalendarId = base?.id ?? "cal-base-belgium";
+  if (!base) await ctx.db.insert("calendars", { ownerId, id: baseCalendarId, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] });
+  for (const resource of R3_RESOURCES) {
+    await ctx.db.insert("calendars", { ownerId, id: resource.calendarId, name: `${resource.name} — leave`, type: "person", parentCalendarId: baseCalendarId, isDefault: false, workingDays: resource.workingDays });
+    await ctx.db.insert("resources", { ownerId, id: resource.id, name: resource.name, role: "", email: "", colour: resource.colour, hoursPerWeek: resource.hoursPerWeek, isActive: true, calendarId: resource.calendarId });
+  }
+  await ctx.db.insert("calendarExceptions", { ownerId, id: R3_CHRIS_LEAVE.id, calendarId: R3_CHRIS_LEAVE.calendarId, startDate: R3_CHRIS_LEAVE.startDate, endDate: R3_CHRIS_LEAVE.endDate, label: R3_CHRIS_LEAVE.label, type: "leave", isWorkingDay: false, source: "manual" });
+  for (const pair of R3_PROJECTS) {
+    for (const [projectId, prefix, isTemplate] of [[pair.projectId, pair.prefix, false], [pair.templateId, pair.templatePrefix, true]] as const) {
+      const versionId = `version-${projectId}-1`;
+      await ctx.db.insert("projects", { ownerId, id: projectId, name: isTemplate ? `${pair.name} (template)` : pair.name, status: isTemplate ? "template" : "active", kind: isTemplate ? "template" : "project", isBuiltin: isTemplate, startDate: "2026-10-05", schedulingDirection: "forward", calendarId: baseCalendarId, createdAt: now, updatedAt: now, seedKey: R3_SEED_KEY });
+      await ctx.db.insert("planVersions", { ownerId, id: versionId, projectId, name: "Versie 1", isActive: true, createdAt: now, mode: "planning" });
+      for (const task of pair.tasks(projectId, versionId, prefix)) await ctx.db.insert("tasks", { ownerId, ...task });
+      for (const dependency of pair.dependencies(projectId, prefix)) await ctx.db.insert("dependencies", { ownerId, ...dependency });
+      for (const assignment of pair.assignments(prefix)) await ctx.db.insert("taskAssignments", { ownerId, ...assignment });
+    }
+  }
+  await ctx.db.insert("seedRuns", { ownerId, seedKey: R3_SEED_KEY, executedAt: now });
 };
 
 export const saveAsTemplate = mutation({
@@ -380,6 +415,7 @@ export const initializeWorkspace = mutation({
   handler: async (ctx) => {
     const ownerId = await requireOwner(ctx);
     await seedTestProject(ctx, ownerId);
+    await seedR3(ctx, ownerId, new Date().toISOString());
   },
 });
 
@@ -387,7 +423,9 @@ export const ensureTestProject = mutation({
   args: {},
   handler: async (ctx) => {
     const ownerId = await requireOwner(ctx);
-    return await seedTestProject(ctx, ownerId);
+    const seeded = await seedTestProject(ctx, ownerId);
+    await seedR3(ctx, ownerId, new Date().toISOString());
+    return seeded;
   },
 });
 
