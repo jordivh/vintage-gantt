@@ -470,8 +470,14 @@ export function marginOriginalDaysFor(task: PlannerTask, marginPct: number): num
   return Math.ceil(Math.max(0, durationInWorkingDays(task)) * pct / 100);
 }
 
-/** A task's margin reserve: the stored value when it has one, else sized from its work. */
+/**
+ * A task's margin reserve: the stored value when it has one, else sized from its
+ * work. Milestones and zero-duration rows never carry a reserve, whatever a stale
+ * stored value says — the scheduling engine ignores theirs, and so must the grid,
+ * the summaries that roll them up and the margin report.
+ */
 function marginReserveDays(task: PlannerTask) {
+  if (task.isMilestone || task.duration === 0) return 0;
   const marginPct = Math.max(0, task.marginPct ?? 0);
   if (marginPct === 0) return 0;
   return task.marginDaysOriginal ?? marginOriginalDaysFor(task, marginPct);

@@ -44,6 +44,7 @@ import {
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -347,6 +348,9 @@ export default function Dashboard() {
     () => new Map(orderTasksForDisplay(calculatedTasks).map((task, index) => [task.id, index + 1])),
     [calculatedTasks],
   );
+  // Project-level margin totals (TC-42): the very same leaf-only figures the
+  // margin report shows, so the planner and the report can never disagree.
+  const marginTotals = useMemo(() => leafMarginTotals(marginRowsFor(calculatedTasks)), [calculatedTasks]);
 
   
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
@@ -883,6 +887,12 @@ export default function Dashboard() {
     setFuture([]);
     toast.success("This version is now in Monitoring mode");
   };
+  // The report looks at the active project and plan version only; when a baseline
+  // is being viewed, hand it over so "became critical" compares the right float.
+  const openMarginReport = () => {
+    setOverflowOpen(false);
+    navigate(activeBaselineId ? `/reports/margins?baseline=${encodeURIComponent(activeBaselineId)}` : "/reports/margins");
+  };
   // Capturing a baseline is the door into Monitoring: the plan is frozen as the
   // reference, then we offer the switch. "Later" leaves it locked open.
   const openBaseline = () => {
@@ -973,6 +983,9 @@ export default function Dashboard() {
           {activeMode === "planning" && (versionHasBaseline
             ? <button className="mode-switch" onClick={switchToMonitoring}>Switch to Monitoring</button>
             : <button className="mode-switch locked" aria-disabled title="Set a baseline first." onClick={() => toast("Set a baseline first.")}>Monitoring locked</button>)}
+          <button className="context-margin" onClick={openMarginReport} title="Project margin totals for this plan version — leaf tasks only, exactly what the margin report shows">
+            Margin <b>{marginTotals.planned} d</b> planned · <b>{marginTotals.consumed} d</b> consumed · <b>{marginTotals.remaining} d</b> remaining
+          </button>
         </div>
         <div className="top-actions">
           <div className="save-state"><span className="live-dot" /> Saved just now</div>
@@ -1008,7 +1021,7 @@ export default function Dashboard() {
             <div className="responsive-task-actions"><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={14} /> <span>Indent</span></button><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={14} /> <span>Outdent</span></button><button disabled={!selected.length} onClick={deleteSelected}><Trash2 size={14} /> Delete</button><button disabled={!history.length} onClick={undo}><Undo2 size={14} /> Undo</button><button disabled={!future.length} onClick={redo}><Redo2 size={14} /> Redo</button><div className="menu-rule" /></div>
             <button onClick={openRecalculate}><RefreshCw size={14} /> Recalculate</button>
             <button onClick={() => toast("Export ready")}><Download size={14} /> Export</button>
-            <button onClick={() => navigate("/reports/margins")}><Columns3 size={14} /> Margin report</button>
+            <button onClick={openMarginReport}><Columns3 size={14} /> Margin report</button>
             <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
