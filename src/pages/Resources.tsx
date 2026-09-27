@@ -4,7 +4,8 @@ import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
 import { useCalendarStore, type LeaveType, type ResourceRecord } from "@/lib/calendar-store";
-import { monthCells, parseIsoDate, resolveWorkingDay, WEEKDAY_LABELS, WEEK_ORDER, type Weekday } from "@/lib/scheduling-engine";
+import { monthCells, parseIsoDate, WEEKDAY_LABELS, WEEK_ORDER, type CalendarSystem, type Weekday } from "@/lib/scheduling-engine";
+import { resourceDayAvailability } from "@/lib/resource-capacity";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -15,6 +16,8 @@ const scheduleLabel = (days: Weekday[]) => {
   if (days.length === 5 && days.every((day) => [1, 2, 3, 4, 5].includes(day))) return "Mon–Fri";
   return days.length ? days.map((day) => WEEKDAY_LABELS[day].slice(0, 3)).join(", ") : "No working days";
 };
+/** Hours shown compactly in the year grid: 5h, 7.5h, … */
+const formatHours = (hours: number) => `${Math.round(hours * 100) / 100}h`;
 
 export default function Resources() {
   const { user, signOut } = useAuth();
@@ -83,8 +86,8 @@ export default function Resources() {
             <div className="detail-heading"><div className="detail-person"><span className="person-avatar" style={{ background: selected.colour }}>{selected.name.slice(0, 1).toUpperCase()}</span><div><div className="eyebrow">EMPLOYEE PROFILE</div><h3>{selected.name}</h3><span className="muted">{selected.role || "Role not set"}</span></div></div><button className="icon-button" onClick={() => updateResource(selected.id, { isActive: !selected.isActive })} title={selected.isActive ? "Deactivate" : "Activate"}>{selected.isActive ? <UserRound size={17} /> : <Check size={17} />}</button></div>
             <div className="detail-tabs">{(["details", "schedule", "leave"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "details" ? "Details" : value === "schedule" ? "Work schedule" : "Leave"}</button>)}</div>
             {tab === "details" && <Details resource={selected} onUpdate={(patch) => updateResource(selected.id, patch)} />}
-            {tab === "schedule" && <Schedule days={workingDays} onChange={(days) => updateResourceSchedule(selected.id, days)} />}
-            {tab === "leave" && <LeavePanel year={year} setYear={setYear} leaves={leaves} leaveDays={leaveDays} system={system} calendarId={selected.calendarId} newLeave={newLeave} setNewLeave={setNewLeave} onAdd={() => { if (newLeave.startDate > newLeave.endDate) return toast.error("Leave end date must be after its start date"); addResourceLeave(selected.id, newLeave); toast.success("Leave saved"); }} onRemove={removeResourceLeave} />}
+            {tab === "schedule" && <Schedule days={workingDays} hoursPerWeek={selected.hoursPerWeek} onChange={(days) => updateResourceSchedule(selected.id, days)} />}
+            {tab === "leave" && <LeavePanel year={year} setYear={setYear} leaves={leaves} leaveDays={leaveDays} system={system} resource={selected} newLeave={newLeave} setNewLeave={setNewLeave} onAdd={() => { if (newLeave.startDate > newLeave.endDate) return toast.error("Leave end date must be after its start date"); addResourceLeave(selected.id, newLeave); toast.success("Leave saved"); }} onRemove={removeResourceLeave} />}
           </aside>
         </div>
       </main>
@@ -97,13 +100,14 @@ function Details({ resource, onUpdate }: { resource: ResourceRecord; onUpdate: (
     <label>Full name<input value={resource.name} onChange={(event) => onUpdate({ name: event.target.value })} /></label>
     <label>Role<input value={resource.role} onChange={(event) => onUpdate({ role: event.target.value })} placeholder="e.g. Producer" /></label>
     <label>Email<input type="email" value={resource.email} onChange={(event) => onUpdate({ email: event.target.value })} /></label>
-    <label>Hours per week<input type="number" min="1" max="168" value={resource.hoursPerWeek} onChange={(event) => onUpdate({ hoursPerWeek: Number(event.target.value) || 40 })} /></label>
+    <label>Capacity (hours/week)<input type="number" min="0" max="168" value={resource.hoursPerWeek} onChange={(event) => onUpdate({ hoursPerWeek: Math.max(0, Number(event.target.value) || 0) })} /></label>
     <label>Label colour<div className="colour-input"><input type="color" value={resource.colour} onChange={(event) => onUpdate({ colour: event.target.value })} /><code>{resource.colour}</code></div></label>
   </div><label className="toggle-row"><span><b>Active employee</b><small>Inactive people remain on historical assignments.</small></span><input type="checkbox" checked={resource.isActive} onChange={(event) => onUpdate({ isActive: event.target.checked })} /></label></div>;
 }
 
-function Schedule({ days, onChange }: { days: Weekday[]; onChange: (days: Weekday[]) => void }) {
-  return <div className="detail-content"><p className="calendar-copy">This personal pattern is used by the person calendar. Leave remains visible here, but does not move project tasks yet.</p><div className="weekday-grid">{WEEK_ORDER.map((day) => <button key={day} className={days.includes(day) ? "selected" : ""} onClick={() => onChange(days.includes(day) ? days.filter((item) => item !== day) : [...days, day].sort((a, b) => a - b) as Weekday[])}><span>{WEEKDAY_LABELS[day].slice(0, 3)}</span>{days.includes(day) && <Check size={15} />}</button>)}</div><div className="schedule-summary"><CalendarDays size={17} /> {scheduleLabel(days)} · {days.length} working days each week</div></div>;
+function Schedule({ days, hoursPerWeek, onChange }: { days: Weekday[]; hoursPerWeek: number; onChange: (days: Weekday[]) => void }) {
+  const perDay = days.length ? Math.max(0, hoursPerWeek) / days.length : 0;
+  return <div className="detail-content"><p className="calendar-copy">This personal pattern is the resource's own working week. The weekly capacity is spread evenly over these days, so 20 h over Mon–Thu is 5 h a day. Leave does not move project tasks.</p><div className="weekday-grid">{WEEK_ORDER.map((day) => <button key={day} className={days.includes(day) ? "selected" : ""} onClick={() => onChange(days.includes(day) ? days.filter((item) => item !== day) : [...days, day].sort((a, b) => a - b) as Weekday[])}><span>{WEEKDAY_LABELS[day].slice(0, 3)}</span>{days.includes(day) && <Check size={15} />}</button>)}</div><div className="schedule-summary"><CalendarDays size={17} /> {scheduleLabel(days)} · {days.length} working days · {formatHours(perDay)}/day</div></div>;
 }
 
 function DatePickerField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -113,10 +117,11 @@ function DatePickerField({ value, onChange }: { value: string; onChange: (value:
   </Popover>;
 }
 
-function LeavePanel({ year, setYear, leaves, leaveDays, system, calendarId, newLeave, setNewLeave, onAdd, onRemove }: { year: number; setYear: (year: number) => void; leaves: { id: string; startDate: string; endDate: string; label: string }[]; leaveDays: Set<string>; system: Parameters<typeof resolveWorkingDay>[2]; calendarId: string; newLeave: { startDate: string; endDate: string; type: LeaveType; note: string }; setNewLeave: (value: { startDate: string; endDate: string; type: LeaveType; note: string }) => void; onAdd: () => void; onRemove: (id: string) => void }) {
+function LeavePanel({ year, setYear, leaves, leaveDays, system, resource, newLeave, setNewLeave, onAdd, onRemove }: { year: number; setYear: (year: number) => void; leaves: { id: string; startDate: string; endDate: string; label: string }[]; leaveDays: Set<string>; system: CalendarSystem; resource: ResourceRecord; newLeave: { startDate: string; endDate: string; type: LeaveType; note: string }; setNewLeave: (value: { startDate: string; endDate: string; type: LeaveType; note: string }) => void; onAdd: () => void; onRemove: (id: string) => void }) {
   return <div className="detail-content leave-content"><div className="leave-entry"><div className="leave-entry-title"><b>Add leave</b><span>Saved to this employee’s person calendar</span></div><div className="detail-grid"><label>From<DatePickerField value={newLeave.startDate} onChange={(value) => setNewLeave({ ...newLeave, startDate: value })} /></label><label>To<DatePickerField value={newLeave.endDate} onChange={(value) => setNewLeave({ ...newLeave, endDate: value })} /></label><label>Type<select value={newLeave.type} onChange={(event) => setNewLeave({ ...newLeave, type: event.target.value as LeaveType })}>{leaveTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>Note<input value={newLeave.note} onChange={(event) => setNewLeave({ ...newLeave, note: event.target.value })} placeholder="Optional note" /></label></div><button className="tool-button primary" onClick={onAdd}><Plus size={15} /> Save leave</button></div>
-    <div className="leave-calendar-head"><b>Leave calendar</b><div><button className="icon-button" onClick={() => setYear(year - 1)}><ChevronLeft size={15} /></button><span>{year}</span><button className="icon-button" onClick={() => setYear(year + 1)}><ChevronRight size={15} /></button></div></div>
-    <div className="resource-year-grid">{Array.from({ length: 12 }, (_, month) => <div className="mini-month" key={month}><b>{new Date(year, month, 1).toLocaleDateString("en-US", { month: "short" })}</b><div className="mini-weekdays">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div><div className="mini-days">{monthCells(year, month).map((date, index) => { if (!date) return <span key={`blank-${index}`} />; const resolution = resolveWorkingDay(date, calendarId, system); const leave = leaveDays.has(date); return <span key={date} className={`${leave ? "leave-day" : ""} ${!resolution.isWorkingDay ? "nonworking" : ""}`} title={`${date} · ${leave ? "Leave" : resolution.reason}`}>{Number(date.slice(-2))}</span>; })}</div></div>)}</div>
+    <div className="leave-calendar-head"><b>Effective working calendar</b><div><button className="icon-button" onClick={() => setYear(year - 1)}><ChevronLeft size={15} /></button><span>{year}</span><button className="icon-button" onClick={() => setYear(year + 1)}><ChevronRight size={15} /></button></div></div>
+    <div className="avail-legend">{([["person", "Person pattern"], ["project", "Project calendar"], ["base", "Base calendar"], ["pattern", "Weekly pattern"], ["leave", "Leave"]] as const).map(([level, label]) => <span key={level} className={`avail-${level}`}>{label}</span>)}</div>
+    <div className="resource-year-grid">{Array.from({ length: 12 }, (_, month) => <div className="mini-month" key={month}><b>{new Date(year, month, 1).toLocaleDateString("en-US", { month: "short" })}</b><div className="mini-weekdays">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div><div className="mini-days">{monthCells(year, month).map((date, index) => { if (!date) return <span key={`blank-${index}`} />; const availability = resourceDayAvailability(resource, date, system); const leave = leaveDays.has(date); const level = leave ? "leave" : availability.level; return <span key={date} className={`avail-${level} ${leave ? "leave-day" : ""} ${availability.hours === 0 ? "nonworking" : ""}`} title={`${date} · ${formatHours(availability.hours)} available · ${level}${leave ? " (leave)" : ""} · ${availability.reason}`}><b>{Number(date.slice(-2))}</b>{availability.hours > 0 && <small>{formatHours(availability.hours)}</small>}</span>; })}</div></div>)}</div>
     <div className="leave-list"><b>Leave entries</b>{leaves.length === 0 && <span className="muted">No leave entered for this employee.</span>}{leaves.map((leave) => <div className="leave-list-row" key={leave.id}><span><b>{leave.startDate === leave.endDate ? leave.startDate : `${leave.startDate} → ${leave.endDate}`}</b><small>{leave.label}</small></span><button className="icon-button" onClick={() => onRemove(leave.id)}><Trash2 size={15} /></button></div>)}</div>
   </div>;
 }
