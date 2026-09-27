@@ -47,12 +47,13 @@ import {
 } from "@/lib/scheduling-engine";
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
+import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "distribution" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "distribution" | "start" | "finish" | "predecessors" | "resource" | "availability" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 /** The columns each mode puts the spotlight on. Planning is about the plan,
  *  monitoring is about what really happened versus the baseline. */
@@ -79,6 +80,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "predecessors", label: "Predecessors", width: 128 },
   { key: "totalFloat", label: "Float", width: 84 },
   { key: "resource", label: "Resource", width: 118 },
+  { key: "availability", label: "Beschikbaarheid", width: 124 },
   { key: "percent", label: "% complete", width: 96 },
   { key: "actualStart", label: "Actual start", width: 110 },
   { key: "actualFinish", label: "Actual finish", width: 110 },
@@ -93,6 +95,11 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
 ];
 
 const parseDate = (date: string) => new Date(`${date}T12:00:00`);
+/** Availability hours: at most one decimal, no trailing .0. */
+const formatAvailableHours = (hours: number) => {
+  const rounded = Math.round(hours * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+};
 const formatDate = (date: string) =>
   new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parseDate(date));
 /** Baselines are dated in full: the capture date is how you tell two apart. */
@@ -236,7 +243,11 @@ export default function Dashboard() {
   // Margin occupies real time, so its zone is drawn on the timeline by default.
   const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") !== "false"; } catch { return true; } });
   const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
-  useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns-v2", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars]);
+  // Leave is visible on bars by default (it only informs); the availability
+  // column is an optional extra, off until switched on in View.
+  const [showLeave, setShowLeave] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-leave") !== "false"; } catch { return true; } });
+  const [showAvailability, setShowAvailability] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-availability") === "true"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("vintage-gantt-hidden-columns-v2", JSON.stringify(hidden)); localStorage.setItem("vintage-gantt-show-margins", String(showMarginsOnBars)); localStorage.setItem("vintage-gantt-show-baselines", String(showBaselineBars)); localStorage.setItem("vintage-gantt-show-leave", String(showLeave)); localStorage.setItem("vintage-gantt-show-availability", String(showAvailability)); } catch { /* view preferences are optional */ } }, [hidden, showMarginsOnBars, showBaselineBars, showLeave, showAvailability]);
   // A mode owns the columns it talks about: a version in Monitoring reveals the
   // progress and consumption columns, so the effect of an edit is visible without
   // hunting through the View menu. This runs once per version-and-mode, so hiding
@@ -335,6 +346,12 @@ export default function Dashboard() {
   const calculatedTasks = useMemo(
     () => withCalculatedPlanningFields(tasks, system, calendarId),
     [tasks, system, calendarId],
+  );
+  // Leave overlap and availability per task. Purely informational (BES-004):
+  // it never colours a row, blocks an edit or moves a date.
+  const leaveInfo = useMemo(
+    () => taskLeaveInfo(calculatedTasks, resources, assignments, system.exceptions, system),
+    [calculatedTasks, resources, assignments, system],
   );
   const activeBaselineSnapshots = useMemo(
     () => new Map(baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId).map((snapshot) => [snapshot.taskId, snapshot])),
@@ -1124,6 +1141,8 @@ export default function Dashboard() {
             <label><input type="checkbox" checked={showCriticalPath} onChange={(event) => setShowCriticalPath(event.target.checked)} /> Critical path</label>
             <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margin zones</label>
             <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Baseline bars</label>
+            <label><input type="checkbox" checked={showLeave} onChange={(event) => setShowLeave(event.target.checked)} /> Leave on bars</label>
+            <label><input type="checkbox" checked={showAvailability} onChange={(event) => setShowAvailability(event.target.checked)} /> Beschikbaarheid column</label>
             <div className="popover-subheading">COLUMNS</div>
             {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "actualStart", "actualFinish", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
           </div>}</div>
@@ -1471,7 +1490,7 @@ export default function Dashboard() {
           <div className="grid-scroll" ref={scrollRef}>
             <div className="grid-header">
               {columnDefs
-                .filter((column) => column.key === "id" || !hidden.includes(column.key) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
+                .filter((column) => column.key === "id" || (column.key === "availability" ? showAvailability : !hidden.includes(column.key)) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
                 .map((column) => (
                   <div
                     key={column.key}
@@ -1525,7 +1544,7 @@ export default function Dashboard() {
                   }}
                 >
                   {columnDefs
-                    .filter((column) => column.key === "id" || !hidden.includes(column.key) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
+                    .filter((column) => column.key === "id" || (column.key === "availability" ? showAvailability : !hidden.includes(column.key)) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
                     .map((column) => {
                       const value =
                         column.key === "id"
@@ -1579,11 +1598,13 @@ export default function Dashboard() {
                                             })()
                                     : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
+                                  : column.key === "availability"
+                                    ? `${formatAvailableHours(leaveInfo.get(task.id)?.availableHours ?? 0)} h`
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
                       const isName = column.key === "name";
                       const modeLock = fieldModeReadOnly(column.key, activeMode);
                       const milestone = isMilestone(task);
-                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || ((summary || milestone) && column.key === "distribution");
+                      const structuralLock = ["id", "wbs", "availability", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || ((summary || milestone) && column.key === "distribution");
                       const canEdit = !structuralLock && !modeLock;
                       const readOnlyReason = modeLock ?? (milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
@@ -1679,6 +1700,12 @@ export default function Dashboard() {
                               {value}
                             </span>
                           )}
+                          {column.key === "resource" && (() => {
+                            const info = leaveInfo.get(task.id);
+                            if (!info || info.leaveDays <= 0) return null;
+                            const labels = leaveLabels(info);
+                            return <span className="cell-leave-days" title={`${info.leaveDays} leave day${info.leaveDays === 1 ? "" : "s"} of the assigned resource fall inside this task${labels.length ? ` (${labels.join(", ")})` : ""}. Leave never moves dates.`}>{info.leaveDays} d leave</span>;
+                          })()}
                           {column.key === "start" && task.startConstraint && (
                             <button
                               type="button"
@@ -1793,7 +1820,7 @@ export default function Dashboard() {
                       <>
                         <span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} />
                         <span className="bar-label">{task.name}{assignedResources(task.id).length > 0 && <small className="bar-resources"> · {assignedResources(task.id).map((resource) => resource?.name).join(", ")}</small>}</span>
-                        {assignedResources(task.id).flatMap((resource) => resource ? resourceLeave(resource.id).filter((leave) => leave.endDate >= task.start && leave.startDate <= task.finish).map((leave) => {
+                        {showLeave && assignedResources(task.id).flatMap((resource) => resource ? resourceLeave(resource.id).filter((leave) => leave.endDate >= task.start && leave.startDate <= task.finish).map((leave) => {
                           const from = Math.max(0, (parseDate(leave.startDate).getTime() - parseDate(task.start).getTime()) / 86400000);
                           const to = Math.min((parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1, (parseDate(leave.endDate).getTime() - parseDate(task.start).getTime()) / 86400000 + 1);
                           return <span key={`${resource.id}-${leave.id}`} className="leave-shade" title={`${resource.name}: ${leave.label}`} style={{ left: `${(from / Math.max(1, (parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1)) * 100}%`, width: `${((to - from) / Math.max(1, (parseDate(task.finish).getTime() - parseDate(task.start).getTime()) / 86400000 + 1)) * 100}%`, background: resource.colour }} />;
