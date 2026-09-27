@@ -837,3 +837,55 @@ export function recalculateTasks(
   ).length;
   return { tasks: next, moved };
 }
+
+/** The baseline fields a delete needs: who it belongs to and when it was made. */
+export interface BaselineRecord {
+  id: string;
+  versionId: string;
+  createdAt: string;
+}
+
+/** A baseline snapshot row belongs to exactly one baseline. */
+export interface BaselineSnapshotRecord {
+  baselineId: string;
+}
+
+export interface BaselineRemoval<TBaseline extends BaselineRecord, TSnapshot extends BaselineSnapshotRecord> {
+  baselines: TBaseline[];
+  snapshots: TSnapshot[];
+  /** Snapshot rows dropped, including ones that were already orphaned. */
+  snapshotsRemoved: number;
+  /** What the comparison falls back to, or "" when nothing is left. */
+  fallbackBaselineId: string;
+}
+
+/**
+ * Removes a baseline and every snapshot row stored for it, and reports what the
+ * comparison falls back to: the most recent baseline left on the same plan
+ * version, or nothing at all. Snapshot rows without a baseline are swept too, so
+ * a deletion can never leave orphaned start/finish/duration/margin rows behind.
+ * Returns null when the baseline is not in the list, so the caller can say why.
+ * Planning data and the version's mode are not touched at all.
+ */
+export function removeBaselineAndSnapshots<TBaseline extends BaselineRecord, TSnapshot extends BaselineSnapshotRecord>(
+  baselines: TBaseline[],
+  snapshots: TSnapshot[],
+  baselineId: string,
+): BaselineRemoval<TBaseline, TSnapshot> | null {
+  const target = baselines.find((baseline) => baseline.id === baselineId);
+  if (!target) return null;
+  const remaining = baselines.filter((baseline) => baseline.id !== baselineId);
+  const remainingIds = new Set(remaining.map((baseline) => baseline.id));
+  const kept = snapshots.filter((snapshot) => snapshot.baselineId !== baselineId && remainingIds.has(snapshot.baselineId));
+  const fallback = remaining
+    .filter((baseline) => baseline.versionId === target.versionId)
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .pop();
+  return {
+    baselines: remaining,
+    snapshots: kept,
+    snapshotsRemoved: snapshots.length - kept.length,
+    fallbackBaselineId: fallback?.id ?? "",
+  };
+}

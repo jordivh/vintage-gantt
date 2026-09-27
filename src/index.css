@@ -357,3 +357,23 @@
 .constraint-flag.active { color: #6b4b23; box-shadow: inset 0 -2px #b08a52; }
 .constraint-flag.inactive { opacity: .5; border-style: dashed; }
 .constraint-flag:hover { background: #e9d8b6; }
+
+/* Baseline administration: the saved-baseline list in the context bar, and the
+   delete confirmation with its Monitoring warning block. */
+.baseline-popover { min-width: 268px; }
+.baseline-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 5px; border-top: 1px solid #e6d8c0; }
+.baseline-row:first-of-type { border-top: 0; }
+.baseline-row.current { background: #efe3cc; box-shadow: inset 3px 0 #9a593f; }
+.baseline-row-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.baseline-row-copy b { color: #4a3a29; font: 12px Georgia, serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.baseline-row-copy small { color: #8d795f; font-size: 10px; }
+.baseline-delete { display: grid; place-items: center; flex: none; width: 26px; height: 26px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #8b6d62; }
+.baseline-delete:hover { background: #eed9d2; border-color: #cfa595; color: #9a4f3d; }
+.baseline-empty { padding: 9px 5px; color: #8d795f; font-size: 11px; }
+.baseline-error { display: flex; align-items: flex-start; gap: 6px; margin: 6px 0 0; padding: 8px 9px; border: 1px solid #cfa595; border-left: 3px solid #a3502f; border-radius: 3px; background: #f6e5dd; color: #7d3f32; font-size: 11px; }
+.baseline-warning { display: flex; align-items: flex-start; gap: 9px; margin: 12px 0 0; padding: 11px 12px; border: 1px solid #d0a24a; border-left: 4px solid #b8722a; border-radius: 3px; background: #fbeed2; color: #6f4a17; }
+.baseline-warning p { margin: 0 0 6px; font-size: 11px; line-height: 1.55; }
+.baseline-warning p:last-child { margin-bottom: 0; }
+.baseline-warning svg { flex: none; margin-top: 1px; }
+.baseline-delete-confirm { background: #9a4f3d; border-color: #7f3f29; color: #fff6ec; }
+.baseline-delete-confirm:hover { background: #86412f; }

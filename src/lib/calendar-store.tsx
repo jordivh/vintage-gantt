@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -59,6 +59,16 @@ export interface ModeSwitch { at: string; from: PlanMode; to: PlanMode; }
 export interface VersionEvent { at: string; type: "mode-switch" | "baseline"; from?: PlanMode; to?: PlanMode; baselineId?: string; name?: string; }
 export interface PlanVersion { id: string; projectId: string; name: string; isActive: boolean; createdAt: string; mode?: PlanMode; history?: VersionEvent[]; modeHistory?: ModeSwitch[]; }
 export interface Baseline { id: string; projectId: string; versionId: string; name: string; note?: string; createdAt: string; captureDate?: string; }
+
+/** Outcome of deleting a baseline: the comparison falls back to another
+ *  baseline, or to none at all, and a failure always carries a reason. */
+export interface BaselineDeleteResult {
+  ok: boolean;
+  message?: string;
+  /** Baseline the comparison falls back to, or "" when none is left. */
+  fallbackBaselineId?: string;
+  snapshotsRemoved?: number;
+}
 export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; totalFloat?: number; startConstraint?: string; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
@@ -208,7 +218,13 @@ interface CalendarStoreValue {
   baselines: Baseline[];
   baselineTasks: BaselineTask[];
   createBaseline: (name: string, note?: string, captureDate?: string) => string;
-  deleteBaseline: (baselineId: string) => void;
+  /**
+   * Removes a baseline together with every snapshot row stored for it, in one
+   * state update (and therefore one persisted write). Never touches planning
+   * data or the version's mode. Returns the baseline the comparison should fall
+   * back to, or a reason when the baseline could not be deleted.
+   */
+  deleteBaseline: (baselineId: string) => BaselineDeleteResult;
   activeVersionId: string;
   setActiveVersion: (versionId: string) => void;
   /**
@@ -396,8 +412,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       baselines,
       baselineTasks,
     };
-    void replaceRemoteState({ state }).then(() => { lastServerStateRef.current = state; }).catch(() => {
-      toast.error("Could not save to the central planner database. The last saved data was restored.");
+    void replaceRemoteState({ state }).then(() => { lastServerStateRef.current = state; }).catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error("[vintage-gantt] could not persist planner state:", error);
+      toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
       const previous = lastServerStateRef.current as typeof state | null;
       if (!previous) return;
       suppressSaveRef.current = true;
@@ -548,10 +566,21 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     return id;
   }, [activeProjectId, activeVersionId, planVersions, tasksByProject]);
 
-  const deleteBaseline = useCallback((baselineId: string) => {
-    setBaselines((current) => current.filter((baseline) => baseline.id !== baselineId));
-    setBaselineTasks((current) => current.filter((snapshot) => snapshot.baselineId !== baselineId));
-  }, []);
+  const deleteBaseline = useCallback<CalendarStoreValue["deleteBaseline"]>((baselineId) => {
+    const baseline = baselines.find((item) => item.id === baselineId);
+    // Drop the baseline and its snapshots together — one state change, so they
+    // are also persisted together — and find what Monitoring compares next.
+    const removal = removeBaselineAndSnapshots(baselines, baselineTasks, baselineId);
+    if (!removal || !baseline) {
+      const message = `Baseline ${baselineId ? `"${baselineId}"` : "(no id)"} is not in this workspace, so there was nothing to delete.`;
+      console.error("[vintage-gantt] deleteBaseline failed:", message, { baselineId, knownBaselines: baselines.map((item) => item.id) });
+      return { ok: false, message };
+    }
+    setBaselines(removal.baselines);
+    setBaselineTasks(removal.snapshots);
+    console.info(`[vintage-gantt] deleted baseline "${baseline.name}" (${baselineId}) with ${removal.snapshotsRemoved} snapshot row(s)`);
+    return { ok: true, fallbackBaselineId: removal.fallbackBaselineId, snapshotsRemoved: removal.snapshotsRemoved };
+  }, [baselines, baselineTasks]);
 
   const resourceLeave = useCallback((resourceId: string) => {
     const resource = resources.find((item) => item.id === resourceId);

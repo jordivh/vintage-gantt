@@ -27,7 +27,9 @@ import {
   Redo2,
   RotateCcw,
   Search,
+  Layers,
   Trash2,
+  TriangleAlert,
   Undo2,
   UserRound,
   X,
@@ -45,7 +47,7 @@ import {
 } from "@/lib/scheduling-engine";
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
-import { CALENDAR_TYPE_LABELS, useCalendarStore } from "@/lib/calendar-store";
+import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -91,6 +93,10 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
 const parseDate = (date: string) => new Date(`${date}T12:00:00`);
 const formatDate = (date: string) =>
   new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parseDate(date));
+/** Baselines are dated in full: the capture date is how you tell two apart. */
+const formatFullDate = (date: string) =>
+  new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "numeric" }).format(parseDate(date));
+const baselineDateOf = (baseline: Baseline) => baseline.captureDate || baseline.createdAt.slice(0, 10);
 
 const parseDurationInput = (value: string, fallback: { amount: number; unit: "days" | "weeks" }) => {
   const match = value.trim().match(/^(\d+(?:[.,]\d+)?)\s*(d|day|days|w|week|weeks)?$/i);
@@ -247,7 +253,11 @@ export default function Dashboard() {
   const [versionName, setVersionName] = useState("");
   const [templateDialog, setTemplateDialog] = useState(false);
   const [templateName, setTemplateName] = useState("");
-  const [deleteBaselineConfirm, setDeleteBaselineConfirm] = useState(false);
+  // Deleting a baseline is a row action: the row is picked first, then the
+  // confirmation dialog (with the monitoring warning) works on that row.
+  const [baselinePendingDelete, setBaselinePendingDelete] = useState<Baseline | null>(null);
+  const [baselineError, setBaselineError] = useState<string | null>(null);
+  const [baselineListOpen, setBaselineListOpen] = useState(false);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -312,6 +322,20 @@ export default function Dashboard() {
     () => new Map(baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId).map((snapshot) => [snapshot.taskId, snapshot])),
     [baselineTasks, activeBaselineId],
   );
+  // Every saved baseline of this project, newest first. This is the list the
+  // per-row delete actions live in, so it deliberately spans all versions.
+  const projectBaselines = useMemo(
+    () => baselines.filter((baseline) => baseline.projectId === activeProjectId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [baselines, activeProjectId],
+  );
+  // What Monitoring compares against once the pending baseline is gone.
+  const deleteBaselineFallback = useMemo(() => {
+    if (!baselinePendingDelete) return null;
+    return baselines
+      .filter((baseline) => baseline.id !== baselinePendingDelete.id && baseline.versionId === baselinePendingDelete.versionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .pop() ?? null;
+  }, [baselines, baselinePendingDelete]);
   // The chosen baseline is view state, not stored, so on load (or after
   // switching versions) fall back to the newest baseline captured on the
   // active version — the one the mode gate checks too.
@@ -936,11 +960,30 @@ export default function Dashboard() {
     setTemplateDialog(false);
     void saveAsTemplate(activeProject.id, activeVersionId, name).then(() => toast.success("Template saved")).catch((error) => toast.error(error instanceof Error ? error.message : "Could not save template."));
   };
+  const requestDeleteBaseline = (baseline: Baseline) => {
+    setBaselineError(null);
+    setBaselinePendingDelete(baseline);
+    setBaselineListOpen(false);
+    setOverflowOpen(false);
+  };
+  const closeDeleteBaseline = () => {
+    setBaselinePendingDelete(null);
+    setBaselineError(null);
+  };
   const confirmDeleteBaseline = () => {
-    deleteBaseline(activeBaselineId);
-    setActiveBaselineId("");
-    setDeleteBaselineConfirm(false);
-    toast.success("Baseline deleted");
+    if (!baselinePendingDelete) return;
+    // Snapshot rows are removed in the same update as the baseline itself, and
+    // the comparison falls back to the newest baseline that is left.
+    const result = deleteBaseline(baselinePendingDelete.id);
+    if (!result.ok) {
+      // Deletion never fails silently: the reason stays visible in the dialog.
+      console.error("[vintage-gantt] could not delete baseline", baselinePendingDelete, result);
+      setBaselineError(result.message ?? "The baseline could not be deleted.");
+      return;
+    }
+    setActiveBaselineId(result.fallbackBaselineId ?? "");
+    toast.success(`Baseline “${baselinePendingDelete.name}” deleted`);
+    closeDeleteBaseline();
   };
   const versionHistory = activePlanVersion?.history ?? [];
   const modeEvents = versionHistory.filter((event) => event.type === "mode-switch");
@@ -952,7 +995,7 @@ export default function Dashboard() {
     : "Monitoring mode: duration, start and progress edits track reality and consume the reserve; margin % is fixed. Emphasised columns: % complete, Margin consumed, Margin remaining, Variance."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
-    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); }}>
+    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); setBaselineListOpen(false); }}>
       <header className="planner-topbar planner-context-bar">
         <div className="brand-lockup">
           <div className="brand-mark">⌁</div>
@@ -973,6 +1016,38 @@ export default function Dashboard() {
           </select></label>
           <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}          </select></label>
           <button className="tool-button quiet baseline-action" onClick={openBaseline} title="Capture the current version as a baseline"><FileSpreadsheet size={14} /> Set baseline</button>
+          <div className="toolbar-popover-wrap">
+            <button
+              className="tool-button quiet baseline-action"
+              onClick={(event) => { event.stopPropagation(); setBaselineError(null); setBaselineListOpen((open) => !open); }}
+              title="Saved baselines for this project — delete one from here"
+            ><Layers size={14} /> Baselines ({projectBaselines.length})</button>
+            {baselineListOpen && (
+              <div className="toolbar-popover baseline-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="popover-heading"><b>SAVED BASELINES</b><button onClick={() => setBaselineListOpen(false)}><X size={14} /></button></div>
+                {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
+                {projectBaselines.length === 0 && <p className="baseline-empty">No baseline captured for {activeProject.name} yet.</p>}
+                {projectBaselines.map((baseline) => {
+                  const version = planVersions.find((item) => item.id === baseline.versionId);
+                  const isCompared = baseline.id === activeBaselineId;
+                  return (
+                    <div className={`baseline-row${isCompared ? " current" : ""}`} key={baseline.id}>
+                      <div className="baseline-row-copy">
+                        <b>{baseline.name}</b>
+                        <small>{formatFullDate(baselineDateOf(baseline))} · {version?.name ?? "unknown version"}{isCompared ? " · compared" : ""}</small>
+                      </div>
+                      <button
+                        className="baseline-delete"
+                        title={`Delete ${baseline.name}`}
+                        aria-label={`Delete baseline ${baseline.name}`}
+                        onClick={() => requestDeleteBaseline(baseline)}
+                      ><Trash2 size={14} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <span
             className={`mode-badge ${activeMode}`}
             title={modeBadgeTitle}
@@ -1029,7 +1104,7 @@ export default function Dashboard() {
             <div className="menu-rule" />
             <button onClick={openBaseline}><FileSpreadsheet size={14} /> Set baseline</button>
             <button onClick={openSaveTemplate}><Copy size={14} /> Save as template</button>
-            {activeBaselineId && <button className="danger" onClick={() => { setDeleteBaselineConfirm(true); setOverflowOpen(false); }}><Trash2 size={14} /> Delete baseline</button>}
+            {activeBaselineId && <button className="danger" onClick={() => { const active = baselines.find((baseline) => baseline.id === activeBaselineId); if (active) requestDeleteBaseline(active); }}><Trash2 size={14} /> Delete baseline</button>}
           </div>}</div>
         </div>
       </div>
@@ -1146,17 +1221,37 @@ export default function Dashboard() {
         </div>
       )}
 
-      {deleteBaselineConfirm && (
-        <div className="modal-backdrop" onClick={() => setDeleteBaselineConfirm(false)}>
-          <div className="task-modal" onClick={(event) => event.stopPropagation()}>
+      {baselinePendingDelete && (
+        <div className="modal-backdrop" onClick={closeDeleteBaseline}>
+          <div className="task-modal baseline-delete-modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-heading">
-              <div><div className="eyebrow">DELETE BASELINE</div><h2>Delete “{baselines.find((baseline) => baseline.id === activeBaselineId)?.name ?? "this baseline"}”?</h2></div>
-              <button className="icon-button" onClick={() => setDeleteBaselineConfirm(false)}><X size={18} /></button>
+              <div>
+                <div className="eyebrow">DELETE BASELINE</div>
+                <h2>Delete "{baselinePendingDelete.name}"?</h2>
+              </div>
+              <button className="icon-button" onClick={closeDeleteBaseline}><X size={18} /></button>
             </div>
-            <p className="calendar-copy">The captured snapshot is removed for good and cannot be restored.</p>
+            <p className="calendar-copy">
+              Captured on {formatFullDate(baselineDateOf(baselinePendingDelete))} for{" "}
+              {planVersions.find((version) => version.id === baselinePendingDelete.versionId)?.name ?? activePlanVersion?.name ?? "this version"}.
+              The baseline and all of its stored task snapshots are removed for good and cannot be restored. Task dates,
+              durations, margins, dependencies and the version&apos;s mode stay exactly as they are.
+            </p>
+            {baselinePendingDelete.id === activeBaselineId && (
+              <div className="baseline-warning" role="alert">
+                <TriangleAlert size={16} />
+                <div>
+                  <p>Let op: dit is de baseline waartegen deze versie wordt opgevolgd. Na verwijderen is er geen vergelijking met de oorspronkelijke planning meer mogelijk in deze versie.</p>
+                  {deleteBaselineFallback
+                    ? <p>De opvolging valt terug op baseline {deleteBaselineFallback.name} ({formatFullDate(baselineDateOf(deleteBaselineFallback))}).</p>
+                    : <p>Er blijft geen baseline over in deze versie om tegen te vergelijken.</p>}
+                </div>
+              </div>
+            )}
+            {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
             <div className="modal-actions">
-              <button className="tool-button" onClick={() => setDeleteBaselineConfirm(false)}>Cancel</button>
-              <button className="tool-button primary" onClick={confirmDeleteBaseline}>Delete baseline</button>
+              <button className="tool-button" onClick={closeDeleteBaseline}>Annuleren</button>
+              <button className="tool-button primary baseline-delete-confirm" onClick={confirmDeleteBaseline}>Verwijderen</button>
             </div>
           </div>
         </div>
