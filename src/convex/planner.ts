@@ -215,6 +215,7 @@ export const saveAsTemplate = mutation({
       const copiedTask = {
         id: idMap.get(task.id)!, projectId: id, parentId: task.parentId ? idMap.get(task.parentId) ?? null : null,
         sortOrder: task.sortOrder, name: task.name, duration: task.duration, durationUnit: task.durationUnit,
+        work: task.work ?? 0,
         start: task.start, finish: task.finish, startOffsetDays, finishOffsetDays: workingDateOffset(templateAnchorDate, task.finish, source.calendarId, calendarRows, exceptionRows),
         constraintOffsetDays: task.startConstraint ? workingDateOffset(templateAnchorDate, task.startConstraint, source.calendarId, calendarRows, exceptionRows) : undefined,
         isMilestone: task.duration === 0 && !sourceTasks.some((candidate) => candidate.parentId === task.id), predecessors: rewritePredecessors(task.predecessors, idMap, sourceTasks), resource: "",
@@ -291,7 +292,7 @@ export const createProjectFromTemplate = mutation({
       const marginPct = hasChildren || duration === 0 ? 0 : sourceTask.marginPct ?? 0;
       const task = {
         id: taskId, projectId: id, parentId: sourceTask.parentId ? idMap.get(sourceTask.parentId) ?? null : null, sortOrder: sourceTask.sortOrder,
-        name: sourceTask.name, duration, durationUnit: sourceTask.durationUnit, start, finish, isMilestone: duration === 0 && !hasChildren,
+        name: sourceTask.name, duration, durationUnit: sourceTask.durationUnit, work: sourceTask.work ?? 0, start, finish, isMilestone: duration === 0 && !hasChildren,
 
         predecessors: rewritePredecessors(sourceTask.predecessors, idMap, activeSourceTasks), resource: "", percent: 0, notes: sourceTask.notes,
         color: sourceTask.color, collapsed: sourceTask.collapsed ?? false, versionId, marginPct,

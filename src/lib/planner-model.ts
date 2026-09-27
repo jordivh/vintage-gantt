@@ -23,6 +23,12 @@ export interface PlannerTask extends ScheduleTask {
   notes: string;
   collapsed?: boolean;
   color: string;
+  /**
+   * Work expressed in hours, independent of duration: a task can span 20
+   * working days with only 40 h of work. Data only for now — the capacity
+   * engine that consumes it comes later, so it never moves a date.
+   */
+  work?: number;
   /** Reported reality, entered in Monitoring mode. */
   actualStart?: string;
   actualFinish?: string;
@@ -495,6 +501,19 @@ export function marginAfterPctChange(task: PlannerTask, marginPct: number) {
   return { original, consumed, remaining: Math.max(0, original - consumed) };
 }
 
+/**
+ * Normalizes a Work entry: whole or half hours, minimum 0. Empty or unparsable
+ * input is 0, and a negative value is clamped to 0. Work is deliberately kept
+ * separate from duration, so this never touches any date.
+ */
+export function normalizeWorkHours(value: string | number): number {
+  const parsed = typeof value === "number"
+    ? value
+    : Number(value.trim().replace(",", ".").replace(/\s*h(ours?)?$/i, ""));
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.round(parsed * 2) / 2;
+}
+
 /** The project finish as the planner shows it: the last task date in the plan. */
 export function planFinishDate(tasks: PlannerTask[]): string {
   return tasks.reduce((latest, task) => (task.finish > latest ? task.finish : latest), "");
@@ -770,6 +789,25 @@ export function withCalculatedPlanningFields(
   const critical = calculateCriticalPath(tasks, system, projectCalendarId);
   const childrenByParent = new Map<string, PlannerTask[]>();
   tasks.forEach((task) => task.parentId && childrenByParent.set(task.parentId, [...(childrenByParent.get(task.parentId) ?? []), task]));
+  // A summary shows the sum of its children's work, evaluated leaf-first so
+  // nested summaries add up. Milestones carry no work at all.
+  const workCache = new Map<string, number>();
+  const workVisiting = new Set<string>();
+  const workOf = (task: PlannerTask): number => {
+    const cached = workCache.get(task.id);
+    if (cached !== undefined) return cached;
+    if (workVisiting.has(task.id)) return 0;
+    workVisiting.add(task.id);
+    const children = childrenByParent.get(task.id);
+    const value = children
+      ? children.reduce((sum, child) => sum + workOf(child), 0)
+      : task.isMilestone
+        ? 0
+        : Math.max(0, task.work ?? 0);
+    workVisiting.delete(task.id);
+    workCache.set(task.id, value);
+    return value;
+  };
   return tasks.map((task) => {
     const children = childrenByParent.get(task.id);
     const marginPct = Math.max(0, task.marginPct ?? 0);
@@ -783,6 +821,8 @@ export function withCalculatedPlanningFields(
       marginPct: children ? 0 : marginPct,
       marginDaysOriginal,
       marginDaysConsumed,
+      // A summary shows the sum of its children's work; milestones have none.
+      work: workOf(task),
       // A summary rolls up its children; start intent belongs to leaves only.
       startConstraintActive: children ? false : task.startConstraintActive,
       totalFloat: cpm?.totalFloat ?? 0,

@@ -45,14 +45,14 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 /** The columns each mode puts the spotlight on. Planning is about the plan,
  *  monitoring is about what really happened versus the baseline. */
@@ -72,6 +72,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "wbs", label: "WBS", width: 70 },
   { key: "name", label: "Task name", width: 238 },
   { key: "duration", label: "Duration", width: 105 },
+  { key: "work", label: "Work", width: 84 },
   { key: "start", label: "Start", width: 112 },
   { key: "finish", label: "Finish", width: 112 },
   { key: "predecessors", label: "Predecessors", width: 128 },
@@ -211,6 +212,13 @@ export default function Dashboard() {
   const toggleFloatSort = () => setSort((current) => {
     if (current?.key !== "totalFloat") return { key: "totalFloat" as ColumnKey, direction: "asc" as const };
     if (current.direction === "asc") return { key: "totalFloat" as ColumnKey, direction: "desc" as const };
+    return null;
+  });
+  // Work sorts like Float: click once for ascending total hours, again for
+  // descending, a third time to clear. Summaries sort on their rolled-up total.
+  const toggleWorkSort = () => setSort((current) => {
+    if (current?.key !== "work") return { key: "work" as ColumnKey, direction: "asc" as const };
+    if (current.direction === "asc") return { key: "work" as ColumnKey, direction: "desc" as const };
     return null;
   });
   const [viewOpen, setViewOpen] = useState(false);
@@ -355,11 +363,18 @@ export default function Dashboard() {
       if (!children.length) return task.totalFloat ?? 0;
       return Math.min(...children.map(sortableFloat));
     };
+    const sortableWork = (task: Task): number => {
+      const children = calculatedTasks.filter((candidate) => candidate.parentId === task.id);
+      if (!children.length) return task.isMilestone ? 0 : Math.max(0, task.work ?? 0);
+      return children.reduce((sum, child) => sum + sortableWork(child), 0);
+    };
     const walk = (parentId: string | null) => {
       const siblings = calculatedTasks.filter((task) => task.parentId === parentId);
       const ordered = sort?.key === "totalFloat"
         ? [...siblings].sort((left, right) => (sort.direction === "desc" ? -1 : 1) * (sortableFloat(left) - sortableFloat(right)))
-        : siblings;
+        : sort?.key === "work"
+          ? [...siblings].sort((left, right) => (sort.direction === "desc" ? -1 : 1) * (sortableWork(left) - sortableWork(right)))
+          : siblings;
       ordered.forEach((task) => {
         if (!query || task.name.toLowerCase().includes(query.toLowerCase())) visible.push(task);
         if (!task.collapsed) walk(task.id);
@@ -524,6 +539,12 @@ export default function Dashboard() {
             : addWorkingDays(task.start, weeks ? duration * 5 - 1 : Math.max(0, duration - 1), calendarId, system),
         };
       }
+      if (field === "work") {
+        // Work is data only: whole or half hours, minimum 0. It never changes
+        // duration or any date, and a milestone carries no work at all.
+        if (task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id)) return task;
+        return { ...task, work: normalizeWorkHours(value) };
+      }
       if (field === "start") {
         const start = value || task.start;
         const milestone = task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id);
@@ -619,6 +640,7 @@ export default function Dashboard() {
       name: "New task",
       duration: 1,
       durationUnit: "days",
+      work: 0,
       start: "2025-05-02",
       finish: "2025-05-02",
       isMilestone: false,
@@ -1441,10 +1463,10 @@ export default function Dashboard() {
                     key={column.key}
                     className={`grid-head-cell ${column.key === "totalFloat" ? "float-head" : ""} ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""}`}
                     style={{ width: column.width }}
-                    role={column.key === "totalFloat" ? "button" : undefined}
+                    role={column.key === "totalFloat" || column.key === "work" ? "button" : undefined}
                     aria-sort={sort?.key === column.key ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}
-                    title={column.key === "totalFloat" ? "Float: click to sort the tightest tasks first" : undefined}
-                    onClick={column.key === "totalFloat" ? toggleFloatSort : undefined}
+                    title={column.key === "totalFloat" ? "Float: click to sort the tightest tasks first" : column.key === "work" ? "Work: click to sort by total hours" : undefined}
+                    onClick={column.key === "totalFloat" ? toggleFloatSort : column.key === "work" ? toggleWorkSort : undefined}
                     onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}
                   >
                     {column.label}
@@ -1500,6 +1522,8 @@ export default function Dashboard() {
                             ? getWbs(task, tasks)
                             : column.key === "duration"
                               ? `${displayTask.duration} ${displayTask.durationUnit === "days" ? "d" : "w"}`
+                              : column.key === "work"
+                                ? (isMilestone(task) ? "—" : `${displayTask.work ?? 0} h`)
                               : column.key === "percent"
                                 ? `${displayTask.percent}%`
                                 : column.key === "actualStart"
@@ -1542,9 +1566,10 @@ export default function Dashboard() {
                                   : String((task as unknown as Record<string, unknown>)[column.key] ?? "");
                       const isName = column.key === "name";
                       const modeLock = fieldModeReadOnly(column.key, activeMode);
-                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin"].includes(column.key));
+                      const milestone = isMilestone(task);
+                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work");
                       const canEdit = !structuralLock && !modeLock;
-                      const readOnlyReason = modeLock ?? (summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
+                      const readOnlyReason = modeLock ?? (milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
                         <div
                           key={column.key}

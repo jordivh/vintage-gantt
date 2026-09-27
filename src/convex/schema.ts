@@ -43,6 +43,7 @@ const schema = defineSchema(
     tasks: defineTable({
       ownerId: v.id("users"), id: v.string(), projectId: v.string(), parentId: v.union(v.string(), v.null()), sortOrder: v.number(),
       name: v.string(), duration: v.number(), durationUnit: v.string(), start: v.string(), finish: v.string(),
+      work: v.optional(v.number()),
       isMilestone: v.boolean(), predecessors: v.string(), resource: v.string(), percent: v.number(), notes: v.string(),
       color: v.string(), collapsed: v.optional(v.boolean()), versionId: v.optional(v.string()),
       marginPct: v.optional(v.number()), marginDaysOriginal: v.optional(v.number()), marginDaysConsumed: v.optional(v.number()),
