@@ -2,6 +2,7 @@ import {
   addWorkingDays,
   durationInWorkingDays,
   earliestDependencyStart,
+  ensureWorkingDay,
   findDependencyCycle,
   remainingMarginDays,
   rollupSummary,
@@ -29,6 +30,8 @@ export interface PlannerTask extends ScheduleTask {
    * engine that consumes it comes later, so it never moves a date.
    */
   work?: number;
+  /** How the task's work is spread across its working days. Defaults to even. */
+  distribution?: Distribution;
   /** Reported reality, entered in Monitoring mode. */
   actualStart?: string;
   actualFinish?: string;
@@ -512,6 +515,105 @@ export function normalizeWorkHours(value: string | number): number {
     : Number(value.trim().replace(",", ".").replace(/\s*h(ours?)?$/i, ""));
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return Math.round(parsed * 2) / 2;
+}
+
+/** How a task's work is spread across its working days. */
+export type Distribution = "even" | "front" | "back" | "center";
+
+export const DISTRIBUTION_OPTIONS: { value: Distribution; label: string }[] = [
+  { value: "even", label: "Gelijk (even)" },
+  { value: "front", label: "Front-loaded" },
+  { value: "back", label: "Back-loaded" },
+  { value: "center", label: "Center-loaded" },
+];
+
+const DISTRIBUTION_VALUES = new Set<Distribution>(["even", "front", "back", "center"]);
+
+/** Falls back to the default profile (Gelijk/even) for anything unrecognized. */
+export function normalizeDistribution(value: string | null | undefined): Distribution {
+  return value && DISTRIBUTION_VALUES.has(value as Distribution) ? (value as Distribution) : "even";
+}
+
+/** One calendar day's share of a task's work. `date` is ISO (yyyy-mm-dd). */
+export interface DailyAllocation {
+  date: string;
+  hours: number;
+}
+
+/**
+ * The weighting rule behind each profile, applied over the task's working days
+ * (`i` runs 0…n-1, `n` is the number of working days, `c = (n-1)/2` the centre):
+ *
+ *   even   : w = 1                     — flat; every working day the same weight.
+ *   front  : w = n - i                 — a straight fall from n to 1, so the
+ *                                        first day is heaviest and the last lightest.
+ *   back   : w = i + 1                 — the exact mirror image of front-loaded.
+ *   center : w = 1 + (c - |i - c|)     — a triangle that peaks at the centre and
+ *                                        tapers symmetrically to 1 at both ends.
+ *
+ * Hours are the task's Work split in proportion to these weights.
+ */
+export function distributionWeights(profile: Distribution, count: number): number[] {
+  if (count <= 0) return [];
+  const centre = (count - 1) / 2;
+  return Array.from({ length: count }, (_, index) => {
+    if (profile === "front") return count - index;
+    if (profile === "back") return index + 1;
+    if (profile === "center") return 1 + (centre - Math.abs(index - centre));
+    return 1;
+  });
+}
+
+/** The `count` working days starting at `start`; non-working days are skipped. */
+function workingDaysFrom(start: string, count: number, calendarId: string, system: CalendarSystem): string[] {
+  const dates: string[] = [];
+  let cursor = start;
+  for (let index = 0; index < count; index += 1) {
+    dates.push(cursor);
+    cursor = addWorkingDays(cursor, 1, calendarId, system);
+  }
+  return dates;
+}
+
+/**
+ * The hours a task puts on each of its own working days.
+ *
+ * The span is the task's work duration only, so margin days — which occupy real
+ * time after the work but are never worked — receive no hours and are never
+ * reached. Non-working days are skipped, never padded. Daily hours are rounded
+ * to a quarter hour and any rounding remainder rides on the last working day, so
+ * the allocated total always equals the task's Work exactly.
+ *
+ * Everything is derived from the task (plus its calendar), so a change to
+ * Duration, Work, Distribution or the calendar is reflected the next time this
+ * is called. Exposed for the capacity engine; no charts or reports are built
+ * from it here.
+ */
+export function dailyAllocation(
+  task: PlannerTask,
+  system: CalendarSystem,
+  projectCalendarId?: string,
+): DailyAllocation[] {
+  // A milestone has no work at all, so there is nothing to distribute.
+  if (task.isMilestone || task.duration === 0) return [];
+  const calendarId = task.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+  const start = ensureWorkingDay(task.start, calendarId, system);
+  // The engine's work finish: the task's working days only, before any reserve.
+  const span = durationInWorkingDays(task);
+  const finish = span <= 1 ? start : addWorkingDays(start, span - 1, calendarId, system);
+  const count = workingDaysBetween(start, finish, calendarId, system);
+  const dates = workingDaysFrom(start, count, calendarId, system);
+  const work = Math.max(0, task.work ?? 0);
+  // Distribute in quarter-hour units so the split stays exact and integer.
+  const totalQuarters = Math.round(work * 4);
+  if (totalQuarters <= 0) return dates.map((date) => ({ date, hours: 0 }));
+  const weights = distributionWeights(normalizeDistribution(task.distribution), count);
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const quarters = weights.map((weight) => Math.round((totalQuarters * weight) / totalWeight));
+  const distributed = quarters.reduce((sum, value) => sum + value, 0);
+  // Keep the total exact: the rounding remainder rides on the last working day.
+  quarters[quarters.length - 1] += totalQuarters - distributed;
+  return dates.map((date, index) => ({ date, hours: quarters[index] / 4 }));
 }
 
 /** The project finish as the planner shows it: the last task date in the plan. */

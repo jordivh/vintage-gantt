@@ -377,3 +377,9 @@
 .baseline-warning svg { flex: none; margin-top: 1px; }
 .baseline-delete-confirm { background: #9a4f3d; border-color: #7f3f29; color: #fff6ec; }
 .baseline-delete-confirm:hover { background: #86412f; }
+
+/* Work distribution: an inline select in the task grid, styled to match the
+   spreadsheet cells so the column reads like every other one. */
+.cell-select { width: 100%; height: 27px; border: 1px solid #c4b292; background: #fff9eb; color: #44392d; font-size: 12px; padding: 0 4px; outline: 0; }
+.cell-select:hover { border-color: #9a593f; }
+.cell-select:focus { border-color: #a26b4d; outline: 2px solid rgba(162,107,77,.18); }

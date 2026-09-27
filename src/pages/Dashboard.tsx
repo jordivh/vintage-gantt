@@ -45,14 +45,14 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type Task = PlannerTask;
-type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
+type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "distribution" | "start" | "finish" | "predecessors" | "resource" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
 
 /** The columns each mode puts the spotlight on. Planning is about the plan,
  *  monitoring is about what really happened versus the baseline. */
@@ -73,6 +73,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "name", label: "Task name", width: 238 },
   { key: "duration", label: "Duration", width: 105 },
   { key: "work", label: "Work", width: 84 },
+  { key: "distribution", label: "Distribution", width: 138 },
   { key: "start", label: "Start", width: 112 },
   { key: "finish", label: "Finish", width: 112 },
   { key: "predecessors", label: "Predecessors", width: 128 },
@@ -544,6 +545,10 @@ export default function Dashboard() {
         // duration or any date, and a milestone carries no work at all.
         if (task.duration === 0 && !tasks.some((candidate) => candidate.parentId === task.id)) return task;
         return { ...task, work: normalizeWorkHours(value) };
+      }
+      if (field === "distribution") {
+        // Distribution is data only, like Work: it is never a scheduling input.
+        return { ...task, distribution: normalizeDistribution(value) };
       }
       if (field === "start") {
         const start = value || task.start;
@@ -1524,6 +1529,8 @@ export default function Dashboard() {
                               ? `${displayTask.duration} ${displayTask.durationUnit === "days" ? "d" : "w"}`
                               : column.key === "work"
                                 ? (isMilestone(task) ? "—" : `${displayTask.work ?? 0} h`)
+                              : column.key === "distribution"
+                                ? (summary || isMilestone(task) ? "—" : (DISTRIBUTION_OPTIONS.find((option) => option.value === normalizeDistribution(displayTask.distribution))?.label ?? "—"))
                               : column.key === "percent"
                                 ? `${displayTask.percent}%`
                                 : column.key === "actualStart"
@@ -1567,7 +1574,7 @@ export default function Dashboard() {
                       const isName = column.key === "name";
                       const modeLock = fieldModeReadOnly(column.key, activeMode);
                       const milestone = isMilestone(task);
-                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work");
+                      const structuralLock = ["id", "wbs", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || ((summary || milestone) && column.key === "distribution");
                       const canEdit = !structuralLock && !modeLock;
                       const readOnlyReason = modeLock ?? (milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
@@ -1599,7 +1606,19 @@ export default function Dashboard() {
                             </button>
                           )}
                           {isName && !summary && <span className="task-spacer" />}
-                          {column.key === "resource" ? (() => {
+                          {column.key === "distribution" && canEdit ? (
+                            <select
+                              className="cell-select"
+                              value={normalizeDistribution(displayTask.distribution)}
+                              onClick={(event) => event.stopPropagation()}
+                              onMouseDown={(event) => event.stopPropagation()}
+                              onChange={(event) => updateTask(task.id, "distribution", event.target.value)}
+                            >
+                              {DISTRIBUTION_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                          ) : column.key === "resource" ? (() => {
                             const selectedResourceIds = assignments.filter((assignment) => assignment.taskId === task.id).map((assignment) => assignment.resourceId);
                             const selectedResources = selectedResourceIds.map((id) => resources.find((resource) => resource.id === id)).filter(Boolean);
                             const resourceQuery = resourceEditor?.taskId === task.id ? resourceEditor.query : "";
