@@ -492,3 +492,93 @@
 .cell-leave-days { position: absolute; right: 6px; bottom: 3px; z-index: 9; padding: 0 4px; border: 1px solid #e0c08c; border-radius: 2px; background: #f7e8cd; color: #8a5a24; font-size: 9px; line-height: 14px; font-weight: 600; white-space: nowrap; cursor: help; }
 .leave-shade { border-left: 1px solid rgba(120,80,40,.35); border-right: 1px solid rgba(120,80,40,.35); }
 
+
+/* Header & toolbar cleanup: the Planner header is now three clearly separated
+   zones - app bar, project context bar and task toolbar. Layout and labelling
+   only; every rule here is presentation, no behaviour. */
+.planner-appbar { height: 56px; display: flex; align-items: center; gap: 18px; padding: 0 24px; border-bottom: 1px solid #cbbda4; background: rgba(245,239,225,.92); }
+.appbar-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.appbar-search { height: 32px; }
+.appbar-search input { width: 190px; }
+.brand-lockup .breadcrumb-button { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: #9a8464; font-weight: 700; }
+.brand-lockup .breadcrumb-button:hover { color: #9a593f; }
+.avatar-menu { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: transparent; color: #75634e; }
+.user-popover { min-width: 200px; }
+.user-save-state { display: flex; align-items: center; gap: 7px; padding: 8px 7px; color: #87765e; font-size: 11px; }
+
+/* The main navigation is one segmented control; the active item is filled. */
+.topnav.segmented { gap: 2px; padding: 3px; border: 1px solid #c6b79d; border-radius: 5px; background: #efe5d2; }
+.segment { height: 26px; display: inline-flex; align-items: center; padding: 0 12px; border: 0; border-radius: 3px; background: transparent; color: #6b5741; font-size: 11px; }
+.segment:hover { background: #e3d5bb; }
+.segment.active { background: #71543e; color: #f8f0df; box-shadow: inset 0 -1px #624632; }
+
+/* Zone 2 - project context bar: heading + version + one mode badge on the left,
+   one grouped baseline control in the centre, one margin chip on the right. */
+.planner-context-bar { height: 60px; min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #cbbda4; background: rgba(245,239,225,.92); }
+.context-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.context-center { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.context-right { display: flex; align-items: center; gap: 10px; }
+.planner-context-bar .planner-project-heading { max-width: 260px; font: 20px Georgia, serif; letter-spacing: -.01em; color: #44382c; }
+.context-field { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.context-field-label { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: #9a8464; font-weight: 700; white-space: nowrap; }
+.planner-context-bar .context-select { min-width: 104px; max-width: 150px; }
+.baseline-trigger { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid #c6b79d; border-radius: 4px; background: #f2eadb; color: #5a4d3e; font-size: 11px; }
+.baseline-trigger:hover { background: #e6d8bf; }
+.baseline-trigger-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #49372a; font-weight: 700; }
+.baseline-choices { display: grid; gap: 2px; max-height: 172px; overflow: auto; }
+.baseline-choice { width: 100%; border: 0; border-radius: 2px; background: transparent; color: #594a39; padding: 7px 8px; font-size: 11px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.baseline-choice:hover { background: #e7dac2; }
+.baseline-choice.current { background: #efe3cc; box-shadow: inset 3px 0 #9a593f; font-weight: 700; }
+.baseline-actions { display: grid; gap: 6px; margin-top: 9px; }
+.baseline-actions .tool-button { justify-content: flex-start; }
+.baseline-manage { margin-top: 6px; border-top: 1px solid #ded0b8; padding-top: 4px; }
+.mode-popover { min-width: 262px; }
+.mode-popover-copy { margin: 2px 4px 10px; color: #6b5741; font-size: 11px; line-height: 1.5; }
+.mode-popover-locked { color: #8b6d62; font-style: italic; }
+.mode-badge { cursor: pointer; }
+.mode-badge:hover { filter: brightness(.97); }
+
+/* Zone 3 - task toolbar: grouped controls with a thin rule between the groups,
+   the zoom segmented control, then View and the overflow menu. */
+.toolbar-right { margin-left: auto; }
+.toolbar-zoom.segmented { height: 32px; gap: 2px; padding: 3px; border: 1px solid #c6b79d; border-radius: 5px; background: #efe5d2; }
+.toolbar-zoom.segmented button { height: 24px; display: inline-flex; align-items: center; border-radius: 3px; padding: 0 10px; }
+.toolbar-zoom.segmented button:hover:not(.active) { background: #e3d5bb; }
+.toolbar-zoom.segmented button.active { background: #765640; color: #f5eedf; }
+
+/* The three header rows are exactly 56 + 60 + 52 px tall, plus the 32 px status
+   bar, so the workbench fills the rest of the viewport at every width. */
+.planner-body, .workbench { height: calc(100vh - 200px); }
+
+/* Progressive compaction, in the documented order: margin-chip details first,
+   then the chip itself. Nothing is clipped at 1280 px. */
+@media (max-width: 1180px) {
+  .context-margin-seg { display: none; }
+  .appbar-search input { width: 150px; }
+}
+@media (max-width: 1100px) {
+  .task-actions .toolbar-divider { display: none; }
+}
+@media (max-width: 900px) {
+  .context-margin { display: none; }
+  .planner-context-bar .planner-project-heading { max-width: 180px; font-size: 17px; }
+  .planner-context-bar .context-select { max-width: 120px; }
+  .baseline-trigger-name { max-width: 110px; }
+}
+
+/* The sidebar's own search field is gone - there is one global search in the app
+   bar now - so the project list starts below the collapse toggle. */
+.project-sidebar .sidebar-projects { padding-top: 38px; }
+
+/* One set of control metrics across all three zones: 32 px tall, 4 px radius on
+   plain controls (5 px on the segmented groups), 11 px labels. */
+.planner-appbar .search-box, .avatar-menu { height: 32px; }
+.planner-appbar .avatar { width: 26px; height: 26px; font-size: 11px; }
+.planner-context-bar .context-select,
+.baseline-trigger,
+.planner-context-bar .mode-badge,
+.planner-context-bar .context-margin { height: 32px; }
+.planner-context-bar .context-select { padding: 0 4px; }
+.action-toolbar .tool-button { height: 32px; }
+.action-toolbar .icon-button { width: 32px; height: 32px; }
+.toolbar-zoom.segmented button { height: 26px; }

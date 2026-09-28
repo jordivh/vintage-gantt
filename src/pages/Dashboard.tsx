@@ -240,6 +240,11 @@ export default function Dashboard() {
   });
   const [viewOpen, setViewOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  // Zone 1 app bar and Zone 2 context bar own their own menus; each closes the
+  // others so only one popover is open at a time.
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [baselineManageOpen, setBaselineManageOpen] = useState(false);
   // Margin occupies real time, so its zone is drawn on the timeline by default.
   const [showMarginsOnBars, setShowMarginsOnBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-margins") !== "false"; } catch { return true; } });
   const [showBaselineBars, setShowBaselineBars] = useState(() => { try { return localStorage.getItem("vintage-gantt-show-baselines") !== "false"; } catch { return true; } });
@@ -286,7 +291,7 @@ export default function Dashboard() {
   // confirmation dialog (with the monitoring warning) works on that row.
   const [baselinePendingDelete, setBaselinePendingDelete] = useState<Baseline | null>(null);
   const [baselineError, setBaselineError] = useState<string | null>(null);
-  const [baselineListOpen, setBaselineListOpen] = useState(false);
+  const [baselineOpen, setBaselineOpen] = useState(false);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -417,6 +422,8 @@ export default function Dashboard() {
   // Project-level margin totals (TC-42): the very same leaf-only figures the
   // margin report shows, so the planner and the report can never disagree.
   const marginTotals = useMemo(() => leafMarginTotals(marginRowsFor(calculatedTasks)), [calculatedTasks]);
+  // The baseline the context bar names and compares against.
+  const activeBaseline = baselines.find((baseline) => baseline.id === activeBaselineId) ?? null;
 
   
   const planningAnchor = new Date(`${todayLineDate}T12:00:00`);
@@ -469,6 +476,12 @@ export default function Dashboard() {
     setHistory([]);
     setFuture([]);
     setActiveProject(projectId);
+  };
+  // There is exactly one search field in the interface, so it drives both the
+  // project sidebar and the task grid. Its placeholder says so.
+  const applySearch = (value: string) => {
+    setQuery(value);
+    setProjectSearch(value);
   };
 
   const recalculate = (
@@ -962,6 +975,7 @@ export default function Dashboard() {
     if (!result.ok) { toast.error(result.message ?? "Could not switch mode."); return; }
     setHistory([]);
     setFuture([]);
+    setModeMenuOpen(false);
     toast.success("This version is now in Monitoring mode");
   };
   // The report looks at the active project and plan version only; when a baseline
@@ -978,6 +992,7 @@ export default function Dashboard() {
     setBaselineDate(todayLineDate);
     setBaselineDialog(true);
     setOverflowOpen(false);
+    setBaselineOpen(false);
   };
   const confirmBaseline = () => {
     const id = createBaseline(baselineName.trim() || "Baseline", undefined, baselineDate);
@@ -1016,7 +1031,7 @@ export default function Dashboard() {
   const requestDeleteBaseline = (baseline: Baseline) => {
     setBaselineError(null);
     setBaselinePendingDelete(baseline);
-    setBaselineListOpen(false);
+    setBaselineOpen(false);
     setOverflowOpen(false);
   };
   const closeDeleteBaseline = () => {
@@ -1048,78 +1063,159 @@ export default function Dashboard() {
     : "Monitoring mode: duration, start and progress edits track reality and consume the reserve; margin % is fixed. Emphasised columns: % complete, Margin consumed, Margin remaining, Variance."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
-    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); setBaselineListOpen(false); }}>
-      <header className="planner-topbar planner-context-bar">
+    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); setBaselineOpen(false); setBaselineManageOpen(false); setUserMenuOpen(false); setModeMenuOpen(false); }}>
+      <header className="planner-appbar">
         <div className="brand-lockup">
           <div className="brand-mark">⌁</div>
-          <div>
-            <button className="eyebrow breadcrumb-button" onClick={() => navigate("/projects")}>MY DASHBOARD / PROJECT CATALOG</button>
-            <h1 className="planner-project-heading" title={activeProject.name}>{activeProject.name}</h1>
-          </div>
+          <button className="eyebrow breadcrumb-button" onClick={() => navigate("/projects")} title="Back to the project catalog">My dashboard / Project catalog</button>
         </div>
-        <nav className="topnav">
-          <button className="tool-button primary" onClick={() => navigate("/dashboard")}>Planner</button>
-          <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
-          <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
-          <button className="tool-button" onClick={() => navigate("/resources")}>Resources</button>
+        <nav className="topnav segmented" aria-label="Main navigation">
+          <button className="segment active" aria-current="page" onClick={() => navigate("/dashboard")}>Planner</button>
+          <button className="segment" onClick={() => navigate("/projects")}>Projects</button>
+          <button className="segment" onClick={() => navigate("/calendars")}>Calendars</button>
+          <button className="segment" onClick={() => navigate("/resources")}>Resources</button>
         </nav>
-        <div className="context-selectors">
-          <label>Version <select className="context-select" value={activeVersionId} onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }}>
-            {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
-          </select></label>
-          <label>Baseline <select className="context-select" value={activeBaselineId} onChange={(event) => setActiveBaselineId(event.target.value)}><option value="">No baseline</option>{baselines.filter((baseline) => baseline.projectId === activeProjectId).map((baseline) => <option key={baseline.id} value={baseline.id}>{baseline.name}</option>)}          </select></label>
-          <button className="tool-button quiet baseline-action" onClick={openBaseline} title="Capture the current version as a baseline"><FileSpreadsheet size={14} /> Set baseline</button>
+        <div className="appbar-right">
+          <div className="search-box appbar-search">
+            <Search size={15} />
+            <input
+              autoComplete="off"
+              placeholder="Search projects and tasks"
+              aria-label="Search projects and tasks"
+              value={query}
+              onChange={(event) => applySearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") { event.preventDefault(); setProjectHighlight((index) => Math.min(projectResults.length - 1, index + 1)); }
+                if (event.key === "ArrowUp") { event.preventDefault(); setProjectHighlight((index) => Math.max(0, index - 1)); }
+                if (event.key === "Enter" && projectResults[projectHighlight]) { event.preventDefault(); selectProject(projectResults[projectHighlight].id); }
+                if (event.key === "Escape") applySearch("");
+              }}
+            />
+          </div>
           <div className="toolbar-popover-wrap">
             <button
-              className="tool-button quiet baseline-action"
-              onClick={(event) => { event.stopPropagation(); setBaselineError(null); setBaselineListOpen((open) => !open); }}
-              title="Saved baselines for this project — delete one from here"
-            ><Layers size={14} /> Baselines ({projectBaselines.length})</button>
-            {baselineListOpen && (
-              <div className="toolbar-popover baseline-popover" onClick={(event) => event.stopPropagation()}>
-                <div className="popover-heading"><b>SAVED BASELINES</b><button onClick={() => setBaselineListOpen(false)}><X size={14} /></button></div>
-                {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
-                {projectBaselines.length === 0 && <p className="baseline-empty">No baseline captured for {activeProject.name} yet.</p>}
-                {projectBaselines.map((baseline) => {
-                  const version = planVersions.find((item) => item.id === baseline.versionId);
-                  const isCompared = baseline.id === activeBaselineId;
-                  return (
-                    <div className={`baseline-row${isCompared ? " current" : ""}`} key={baseline.id}>
-                      <div className="baseline-row-copy">
-                        <b>{baseline.name}</b>
-                        <small>{formatFullDate(baselineDateOf(baseline))} · {version?.name ?? "unknown version"}{isCompared ? " · compared" : ""}</small>
-                      </div>
-                      <button
-                        className="baseline-delete"
-                        title={`Delete ${baseline.name}`}
-                        aria-label={`Delete baseline ${baseline.name}`}
-                        onClick={() => requestDeleteBaseline(baseline)}
-                      ><Trash2 size={14} /></button>
-                    </div>
-                  );
-                })}
+              className="avatar-menu"
+              title={user?.name ?? "Account"}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              onClick={(event) => { event.stopPropagation(); setUserMenuOpen((open) => !open); setViewOpen(false); setOverflowOpen(false); setBaselineOpen(false); setModeMenuOpen(false); }}
+            >
+              <span className="avatar">{user?.name?.slice(0, 1) ?? "M"}</span>
+              <ChevronDown size={13} />
+            </button>
+            {userMenuOpen && (
+              <div className="toolbar-popover overflow-popover user-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="popover-heading"><b>{user?.name ?? "Account"}</b><button onClick={() => setUserMenuOpen(false)}><X size={14} /></button></div>
+                <div className="user-save-state"><span className="live-dot" /> Saved just now</div>
+                <button title="Help"><CircleHelp size={14} /> Help</button>
+                <button onClick={() => { signOut(); navigate("/"); }}><LogOut size={14} /> Sign out</button>
               </div>
             )}
           </div>
-          <span
-            className={`mode-badge ${activeMode}`}
-            title={modeBadgeTitle}
-          >
-            {activeMode === "planning" ? <PencilRuler size={13} /> : <Activity size={13} />}
-            {activeMode === "planning" ? "Planning" : "Monitoring"}
-          </span>
-          {activeMode === "planning" && (versionHasBaseline
-            ? <button className="mode-switch" onClick={switchToMonitoring}>Switch to Monitoring</button>
-            : <button className="mode-switch locked" aria-disabled title="Set a baseline first." onClick={() => toast("Set a baseline first.")}>Monitoring locked</button>)}
-          <button className="context-margin" onClick={openMarginReport} title="Project margin totals for this plan version — leaf tasks only, exactly what the margin report shows">
-            Margin <b>{marginTotals.planned} d</b> planned · <b>{marginTotals.consumed} d</b> consumed · <b>{marginTotals.remaining} d</b> remaining
-          </button>
         </div>
-        <div className="top-actions">
-          <div className="save-state"><span className="live-dot" /> Saved just now</div>
-          <button className="icon-button" title="Help"><CircleHelp size={17} /></button>
-          <button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button>
-          <button className="icon-button" onClick={() => { signOut(); navigate("/"); }} title="Sign out"><LogOut size={17} /></button>
+      </header>
+
+      <header className="planner-context-bar">
+        <div className="context-left">
+          <h1 className="planner-project-heading" title={activeProject.name}>{activeProject.name}</h1>
+          <label className="context-field">
+            <span className="context-field-label">Version</span>
+            <select className="context-select" value={activeVersionId} aria-label="Plan version" onChange={(event) => { setHistory([]); setFuture([]); setActiveVersion(event.target.value); }}>
+              {planVersions.filter((version) => version.projectId === activeProjectId).map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}
+            </select>
+          </label>
+          <div className="toolbar-popover-wrap">
+            <button
+              className={`mode-badge ${activeMode}`}
+              title={modeBadgeTitle}
+              aria-haspopup="menu"
+              aria-expanded={modeMenuOpen}
+              onClick={(event) => { event.stopPropagation(); setModeMenuOpen((open) => !open); setBaselineOpen(false); setViewOpen(false); setOverflowOpen(false); setUserMenuOpen(false); }}
+            >
+              {activeMode === "planning" ? <PencilRuler size={13} /> : <Activity size={13} />}
+              {activeMode === "planning" ? "Planning" : "Monitoring"}
+            </button>
+            {modeMenuOpen && (
+              <div className="toolbar-popover mode-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="popover-heading"><b>{activeMode === "planning" ? "PLANNING MODE" : "MONITORING MODE"}</b><button onClick={() => setModeMenuOpen(false)}><X size={14} /></button></div>
+                <p className="mode-popover-copy">{activeMode === "planning"
+                  ? "Durations, dates, dependencies and margin % are re-planning. The reserve is sized from the percentage and nothing is consumed."
+                  : "Duration, start and progress edits track reality and consume the reserve; margin % is fixed."}</p>
+                {activeMode === "planning" && (versionHasBaseline
+                  ? <button className="tool-button" onClick={switchToMonitoring}><Activity size={14} /> Switch to Monitoring</button>
+                  : <p className="mode-popover-copy mode-popover-locked">Monitoring is locked until a baseline is captured.</p>)}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="context-center">
+          <div className="toolbar-popover-wrap">
+            <button
+              className="baseline-trigger"
+              title="Baseline for this project — capture, compare or manage saved baselines"
+              aria-haspopup="menu"
+              aria-expanded={baselineOpen}
+              onClick={(event) => { event.stopPropagation(); setBaselineError(null); setBaselineOpen((open) => !open); setBaselineManageOpen(false); setModeMenuOpen(false); setViewOpen(false); setOverflowOpen(false); setUserMenuOpen(false); }}
+            >
+              <Layers size={14} />
+              <span className="context-field-label">Baseline</span>
+              <b className="baseline-trigger-name">{activeBaseline ? activeBaseline.name : "Geen baseline"}</b>
+              <ChevronDown size={13} />
+            </button>
+            {baselineOpen && (
+              <div className="toolbar-popover baseline-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="popover-heading"><b>BASELINE</b><button onClick={() => setBaselineOpen(false)}><X size={14} /></button></div>
+                {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
+                <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Vergelijk met baseline</label>
+                <div className="popover-subheading">ACTIEVE BASELINE</div>
+                <div className="baseline-choices">
+                  <button className={`baseline-choice${activeBaselineId ? "" : " current"}`} onClick={() => setActiveBaselineId("")}>Geen baseline</button>
+                  {projectBaselines.map((baseline) => (
+                    <button
+                      key={baseline.id}
+                      className={`baseline-choice${baseline.id === activeBaselineId ? " current" : ""}`}
+                      title={`${baseline.name} · ${formatFullDate(baselineDateOf(baseline))}`}
+                      onClick={() => setActiveBaselineId(baseline.id)}
+                    >{baseline.name}</button>
+                  ))}
+                </div>
+                <div className="baseline-actions">
+                  <button className="tool-button" onClick={openBaseline}><FileSpreadsheet size={14} /> Baseline vastleggen</button>
+                  <button className="tool-button" aria-expanded={baselineManageOpen} onClick={() => setBaselineManageOpen((open) => !open)}><Layers size={14} /> Baselines beheren ({projectBaselines.length})</button>
+                </div>
+                {baselineManageOpen && (
+                  <div className="baseline-manage">
+                    {projectBaselines.length === 0 && <p className="baseline-empty">Nog geen baseline vastgelegd voor {activeProject.name}.</p>}
+                    {projectBaselines.map((baseline) => {
+                      const version = planVersions.find((item) => item.id === baseline.versionId);
+                      const isCompared = baseline.id === activeBaselineId;
+                      return (
+                        <div className={`baseline-row${isCompared ? " current" : ""}`} key={baseline.id}>
+                          <div className="baseline-row-copy">
+                            <b>{baseline.name}</b>
+                            <small>{formatFullDate(baselineDateOf(baseline))} · {version?.name ?? "unknown version"}{isCompared ? " · compared" : ""}</small>
+                          </div>
+                          <button
+                            className="baseline-delete"
+                            title={`Delete ${baseline.name}`}
+                            aria-label={`Delete baseline ${baseline.name}`}
+                            onClick={() => requestDeleteBaseline(baseline)}
+                          ><Trash2 size={14} /></button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="context-right">
+          <button className="context-margin" onClick={openMarginReport} title={`Planned ${marginTotals.planned} d · consumed ${marginTotals.consumed} d · remaining ${marginTotals.remaining} d for this plan version — leaf tasks only, exactly what the margin report shows`}>
+            Marge <b>{marginTotals.planned} d</b><span className="context-margin-seg"> · <b>{marginTotals.consumed} d</b> verbruikt</span><span className="context-margin-seg"> · <b>{marginTotals.remaining} d</b> over</span>
+          </button>
         </div>
       </header>
 
@@ -1130,17 +1226,18 @@ export default function Dashboard() {
           <button className="icon-button" title="Indent (Tab)" aria-label="Indent (Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={16} /></button>
           <button className="icon-button" title="Outdent (Shift+Tab)" aria-label="Outdent (Shift+Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={16} /></button>
           <button className="icon-button" title="Delete (Delete)" aria-label="Delete (Delete)" disabled={!selected.length} onClick={deleteSelected}><Trash2 size={15} /></button>
+          <span className="toolbar-divider" />
           <button className="icon-button" title="Undo (Ctrl/Cmd+Z)" aria-label="Undo" disabled={!history.length} onClick={undo}><Undo2 size={15} /></button>
           <button className="icon-button" title="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" disabled={!future.length} onClick={redo}><Redo2 size={15} /></button>
         </div>
         <div className="toolbar-right view-actions">
-          <div className="search-box"><Search size={15} /><input placeholder="Search projects and tasks" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-          <div className="toolbar-zoom" aria-label="Zoom"><span>Zoom</span>{(["day", "week", "month", "quarter"] as const).map((value) => <button key={value} className={zoom === value ? "active" : ""} onClick={() => setZoom(value)}>{value}</button>)}</div>
+          <div className="toolbar-zoom segmented" role="group" aria-label="Zoom">
+            {(["day", "week", "month", "quarter"] as const).map((value) => <button key={value} className={zoom === value ? "segment active" : "segment"} aria-pressed={zoom === value} onClick={() => setZoom(value)}>{value}</button>)}
+          </div>
           <div className="toolbar-popover-wrap"><button className="tool-button quiet" onClick={() => { setViewOpen((open) => !open); setOverflowOpen(false); }}><Eye size={15} /> View</button>{viewOpen && <div className="toolbar-popover view-popover" onClick={(event) => event.stopPropagation()}>
             <div className="popover-heading"><b>VIEW</b><button onClick={() => setViewOpen(false)}><X size={14} /></button></div>
             <label><input type="checkbox" checked={showCriticalPath} onChange={(event) => setShowCriticalPath(event.target.checked)} /> Critical path</label>
             <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margin zones</label>
-            <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Baseline bars</label>
             <label><input type="checkbox" checked={showLeave} onChange={(event) => setShowLeave(event.target.checked)} /> Leave on bars</label>
             <label><input type="checkbox" checked={showAvailability} onChange={(event) => setShowAvailability(event.target.checked)} /> Beschikbaarheid column</label>
             <div className="popover-subheading">COLUMNS</div>
@@ -1477,10 +1574,9 @@ export default function Dashboard() {
         <aside className={`project-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
           <button className="sidebar-toggle" title={sidebarCollapsed ? "Show projects (Ctrl/Cmd+B)" : "Hide projects (Ctrl/Cmd+B)"} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}>{sidebarCollapsed ? "›" : "‹"}</button>
           {!sidebarCollapsed && <>
-            <div className="sidebar-search"><Search size={14} /><input autoComplete="off" placeholder="Search projects" value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); setProjectHighlight((index) => Math.min(projectResults.length - 1, index + 1)); } if (event.key === "ArrowUp") { event.preventDefault(); setProjectHighlight((index) => Math.max(0, index - 1)); } if (event.key === "Enter" && projectResults[projectHighlight]) { event.preventDefault(); selectProject(projectResults[projectHighlight].id); } if (event.key === "Escape") setProjectSearch(""); }} /></div>
             <div className="sidebar-projects">
               {(["active", "archived"] as const).map((group) => { const list = filteredProjectGroups[group]; const expanded = expandedGroups[group]; return <div className="sidebar-group" key={group}><button className="sidebar-group-header" onClick={() => setExpandedGroups((current) => ({ ...current, [group]: !current[group] }))}><span>{expanded ? "⌄" : "›"} {group === "active" ? "Active" : "Archived"} <small>{list.length}</small></span></button>{expanded && <div className="sidebar-project-list">{list.map((project, index) => { const projectTaskList = projectTasks(project.id); const first = projectTaskList[0]; const finish = projectTaskList.length ? projectTaskList.reduce((latest, task) => task.finish > latest ? task.finish : latest, first.finish) : project.startDate; return <button key={project.id} title={project.name} className={`sidebar-project ${project.id === activeProjectId ? "current" : ""} ${index === projectHighlight && projectSearch ? "highlighted" : ""}`} onClick={() => selectProject(project.id)}><b>{project.name}</b><small>{new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" }).format(new Date(`${project.startDate}T12:00:00`))} - {new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${finish}T12:00:00`))} · {projectTaskList.length} tasks</small></button>; })}{!list.length && <span className="sidebar-empty">No projects match</span>}</div>}</div>; })}
-              {!filteredProjectGroups.active.length && !filteredProjectGroups.archived.length && <div className="sidebar-no-results">No projects match<button onClick={() => setProjectSearch("")}>Clear search</button></div>}
+              {!filteredProjectGroups.active.length && !filteredProjectGroups.archived.length && <div className="sidebar-no-results">No projects match<button onClick={() => applySearch("")}>Clear search</button></div>}
             </div>
             <div className="sidebar-actions"><button className="tool-button primary" onClick={() => navigate("/projects?new=1")}><Plus size={14} /> New project</button><button className="sidebar-all-projects" onClick={() => navigate("/projects")}>All projects →</button></div>
           </>}
