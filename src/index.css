@@ -591,3 +591,25 @@
   .appbar-search input { width: 130px; }
 }
 .planner-appbar .icon-button { width: 32px; height: 32px; }
+
+/* Overload warnings on the Planner (BES-008): a red signal that never moves a
+   date, a duration or the timeline - it only points at the capacity panel. */
+.planner-context-bar .context-overload { display: inline-flex; align-items: center; gap: 5px; height: 32px; padding: 0 11px; border: 1px solid #c98a76; border-radius: 99px; background: #f7ded5; color: #8f2f22; font-size: 10px; letter-spacing: .02em; font-weight: 700; white-space: nowrap; }
+.planner-context-bar .context-overload:hover { border-color: #a83a2a; background: #f2cdbf; }
+.cell-overload-flag { position: absolute; right: 6px; top: 3px; z-index: 10; display: inline-flex; align-items: center; gap: 1px; height: 16px; padding: 0 4px; border: 1px solid #c98a76; border-radius: 2px; background: #f7ded5; color: #a5341f; font-size: 9px; line-height: 14px; font-weight: 700; cursor: pointer; }
+.cell-overload-flag:hover, .cell-overload-flag:focus-visible { background: #f2cdbf; color: #8f2f22; outline: 2px solid rgba(168, 58, 42, .35); }
+.cell-overload-count { font-size: 9px; }
+.grid-cell.resource-cell:has(.cell-overload-flag):not(:has(.cell-leave-days)) { padding-right: 26px; }
+.capacity-row.focused { outline: 2px solid #a5341f; outline-offset: -2px; }
+
+/* Keep Zone 2 on one line at 1280 px even with the extra overload chip: the
+   project name and baseline name give way first, then the margin-chip details
+   - the documented compaction order. */
+@media (min-width: 901px) and (max-width: 1340px) {
+  .planner-context-bar .planner-project-heading { max-width: 200px; }
+  .baseline-trigger-name { max-width: 120px; }
+}
+@media (min-width: 901px) and (max-width: 1300px) {
+  .context-margin-seg { display: none; }
+}
+

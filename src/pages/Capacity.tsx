@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FilterX } from "lucide-react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { useCalendarStore } from "@/lib/calendar-store";
 import { AppBar } from "@/components/AppBar";
 import {
@@ -44,10 +44,14 @@ const peakUtilisation = (periods: CapacityPeriod[]): number | null => {
 export default function Capacity() {
   const navigate = useNavigate();
   const { system, resources, assignments, projects, projectTasks, planVersions, openTask } = useCalendarStore();
+  // The planner's overload indicators deep-link here: a resource (warning icon)
+  // or a project (context-bar chip), optionally scrolled to the first heavy week.
+  const [searchParams] = useSearchParams();
+  const focusWeek = searchParams.get("week") ?? "";
   const [granularity, setGranularity] = useState<CapacityGranularity>("week");
   const [selectedId, setSelectedId] = useState("");
-  const [filterResource, setFilterResource] = useState("");
-  const [filterProject, setFilterProject] = useState("");
+  const [filterResource, setFilterResource] = useState(() => searchParams.get("resource") ?? "");
+  const [filterProject, setFilterProject] = useState(() => searchParams.get("project") ?? "");
   const [filterClient, setFilterClient] = useState("");
 
   const clients = useMemo(() => capacityClients(projects), [projects]);
@@ -117,6 +121,12 @@ export default function Capacity() {
 
   const selected = visibleReports.find((report) => report.resourceId === selectedId) ?? visibleReports[0];
   const selectedPeriods = selected ? periodsByResource.get(selected.resourceId) ?? [] : [];
+  // Scroll the deep-linked week into view once the filtered person is rendered.
+  useEffect(() => {
+    if (!focusWeek || !selected) return;
+    const target = document.querySelector(`[data-capacity-week="${focusWeek}"]`);
+    if (target) target.scrollIntoView({ block: "center" });
+  }, [focusWeek, selected?.resourceId, granularity]);
   const selectedAssignments = selected ? assignmentsByResource.get(selected.resourceId) ?? [] : [];
   const activeFilters = [
     filterResource ? { label: `Resource: ${resources.find((resource) => resource.id === filterResource)?.name ?? filterResource}`, clear: () => setFilterResource("") } : null,
@@ -227,6 +237,7 @@ export default function Capacity() {
                     report={selected}
                     periods={selectedPeriods}
                     assignments={selectedAssignments}
+                    focusWeek={focusWeek}
                     onOpenAssignment={openAssignment}
                   />
                 )}
@@ -239,10 +250,11 @@ export default function Capacity() {
   );
 }
 
-function ResourceDetail({ report, periods, assignments, onOpenAssignment }: {
+function ResourceDetail({ report, periods, assignments, focusWeek, onOpenAssignment }: {
   report: ResourceCapacityReport;
   periods: CapacityPeriod[];
   assignments: AssignmentRow[];
+  focusWeek?: string;
   onOpenAssignment: (row: AssignmentRow) => void;
 }) {
   const conflicts = useMemo(() => {
@@ -271,7 +283,7 @@ function ResourceDetail({ report, periods, assignments, onOpenAssignment }: {
           <tbody>
             {periods.length === 0 && <tr><td colSpan={5} className="muted">No planned work in this project range.</td></tr>}
             {periods.map((period) => (
-              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} />
+              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} focus={period.key === focusWeek} />
             ))}
           </tbody>
         </table>
@@ -323,12 +335,12 @@ function ResourceDetail({ report, periods, assignments, onOpenAssignment }: {
   );
 }
 
-function PeriodRows({ period, resourceName }: { period: CapacityPeriod; resourceName: string }) {
+function PeriodRows({ period, resourceName, focus }: { period: CapacityPeriod; resourceName: string; focus?: boolean }) {
   const warning = overloadWarning(resourceName, period);
   const percent = period.utilisation === null ? null : Math.round(period.utilisation * 100);
   return (
     <>
-      <tr className={`capacity-row ${period.overload ? "overload" : ""}`}>
+      <tr data-capacity-week={period.key} className={`capacity-row ${period.overload ? "overload" : ""}${focus ? " focused" : ""}`}>
         <td><b>{period.label}</b></td>
         <td>{formatCapacityHours(period.available)} h</td>
         <td>{formatCapacityHours(period.allocated)} h</td>

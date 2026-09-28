@@ -44,6 +44,8 @@ import {
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
+import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
+import { selectCapacityProjects } from "@/lib/capacity-engine";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -355,6 +357,32 @@ export default function Dashboard() {
   const leaveInfo = useMemo(
     () => taskLeaveInfo(calculatedTasks, resources, assignments, system.exceptions, system),
     [calculatedTasks, resources, assignments, system],
+  );
+  // Overload is a cross-project figure and reuses the Capacity screen's own
+  // engine, so the planner warning and the capacity panel can never disagree.
+  // It is derived afresh from work, distribution, dates, assignments, capacity,
+  // schedule and leave, so it follows any edit — in any project — immediately.
+  const overloadIndex = useMemo(
+    () => buildOverloadIndex({
+      system,
+      resources: resources.map((resource) => ({ id: resource.id, name: resource.name, hoursPerWeek: resource.hoursPerWeek, calendarId: resource.calendarId })),
+      assignments,
+      projects: selectCapacityProjects(projects).map((project) => ({
+        projectId: project.id,
+        projectName: project.name,
+        projectCalendarId: project.calendarId,
+        tasks: projectTasks(project.id),
+      })),
+    }),
+    [system, resources, assignments, projects, projectTasks],
+  );
+  const taskOverload = useMemo(
+    () => overloadByTask(overloadIndex, calculatedTasks, assignments),
+    [overloadIndex, calculatedTasks, assignments],
+  );
+  const projectOverloadInfo = useMemo(
+    () => projectOverload(overloadIndex, calculatedTasks, assignments),
+    [overloadIndex, calculatedTasks, assignments],
   );
   const activeBaselineSnapshots = useMemo(
     () => new Map(baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId).map((snapshot) => [snapshot.taskId, snapshot])),
@@ -983,6 +1011,17 @@ export default function Dashboard() {
     setOverflowOpen(false);
     navigate(activeBaselineId ? `/reports/margins?baseline=${encodeURIComponent(activeBaselineId)}` : "/reports/margins");
   };
+  // The overload indicators open the same capacity panel, filtered on the person
+  // (clicking a warning icon) or the project (clicking the context-bar chip), so
+  // the user can see the cause. Nothing here changes the plan (BES-008).
+  const openResourceCapacity = (weeks: OverloadWeek[]) => {
+    const first = weeks[0];
+    if (!first) return;
+    navigate(`/capacity?resource=${encodeURIComponent(first.resourceId)}&week=${encodeURIComponent(first.weekStart)}`);
+  };
+  const openProjectCapacity = () => {
+    navigate(`/capacity?project=${encodeURIComponent(activeProjectId)}`);
+  };
   // Capturing a baseline is the door into Monitoring: the plan is frozen as the
   // reference, then we offer the switch. "Later" leaves it locked open.
   const openBaseline = () => {
@@ -1173,6 +1212,17 @@ export default function Dashboard() {
         </div>
 
         <div className="context-right">
+          {projectOverloadInfo.resourceIds.length > 0 && (
+            <button
+              className="context-overload"
+              onClick={openProjectCapacity}
+              aria-label={`${projectOverloadInfo.resourceIds.length} medewerker${projectOverloadInfo.resourceIds.length === 1 ? "" : "s"} overbelast — open de capaciteit`}
+              title={`${projectOverloadInfo.resourceIds.length} medewerker${projectOverloadInfo.resourceIds.length === 1 ? " is" : "s zijn"} van ${activeProject.name} overbelast in minstens één week. Klik om de capaciteit te openen.\n${overloadTooltip(projectOverloadInfo.weeks).join("\n")}`}
+            >
+              <TriangleAlert size={13} />
+              {projectOverloadInfo.resourceIds.length === 1 ? "1 medewerker overbelast" : `${projectOverloadInfo.resourceIds.length} medewerkers overbelast`}
+            </button>
+          )}
           <button className="context-margin" onClick={openMarginReport} title={`Planned ${marginTotals.planned} d · consumed ${marginTotals.consumed} d · remaining ${marginTotals.remaining} d for this plan version — leaf tasks only, exactly what the margin report shows`}>
             Marge <b>{marginTotals.planned} d</b><span className="context-margin-seg"> · <b>{marginTotals.consumed} d</b> verbruikt</span><span className="context-margin-seg"> · <b>{marginTotals.remaining} d</b> over</span>
           </button>
@@ -1756,6 +1806,28 @@ export default function Dashboard() {
                               {value}
                             </span>
                           )}
+                          {column.key === "resource" && (() => {
+                            const overload = taskOverload.get(task.id);
+                            if (!overload || !overload.count) return null;
+                            const leaf = !summary;
+                            // A leaf names each problem week; a summary only counts the
+                            // descendants that carry the flag, never a check of its own.
+                            const label = leaf
+                              ? overloadTooltip(overload.weeks).join("\n")
+                              : `${overload.count} subtask${overload.count === 1 ? "" : "s"} met een overbelaste resource.`;
+                            return (
+                              <button
+                                type="button"
+                                className="cell-overload-flag"
+                                title={label}
+                                aria-label={leaf ? "Overbelaste resource — open de capaciteit" : `${overload.count} subtaken met een overbelaste resource`}
+                                onClick={(event) => { event.stopPropagation(); openResourceCapacity(overload.weeks); }}
+                              >
+                                <TriangleAlert size={12} />
+                                {!leaf && <span className="cell-overload-count">{overload.count}</span>}
+                              </button>
+                            );
+                          })()}
                           {column.key === "resource" && (() => {
                             const info = leaveInfo.get(task.id);
                             if (!info || info.leaveDays <= 0) return null;
