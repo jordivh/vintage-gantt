@@ -10,6 +10,7 @@ import {
   type MarginReportRow,
 } from "@/lib/margin-report";
 import type { PlanMode } from "@/lib/planner-model";
+import { AppBar } from "@/components/AppBar";
 
 /**
  * Margin report — the project's reserve consumption for one plan version.
@@ -101,10 +102,7 @@ export default function MarginReport() {
   const hiddenNoMargin = allRows.length - rows.length;
 
   return <div className="planner-shell">
-    <header className="planner-topbar">
-      <div className="brand-lockup"><div className="brand-mark">⌁</div><div><div className="eyebrow">PLANNER / REPORTS</div><h1>Margin report</h1></div></div>
-      <nav className="topnav"><button className="tool-button" onClick={() => navigate("/dashboard")}>Planner</button><button className="tool-button" onClick={() => navigate("/projects")}>Projects</button><button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button><button className="tool-button" onClick={() => navigate("/resources")}>Resources</button></nav>
-    </header>
+    <AppBar activeKey="planner" label="Margin report" />
     <main className="projects-screen">
       <button className="link-button" onClick={() => navigate("/dashboard")}><ArrowLeft size={14} /> Back to planner</button>
       <div className="projects-heading">

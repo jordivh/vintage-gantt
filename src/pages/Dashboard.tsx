@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { toast } from "sonner";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   Activity,
   ArrowDown,
@@ -9,7 +9,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
-  CircleHelp,
   Columns3,
   Copy,
   Eye,
@@ -21,12 +20,10 @@ import {
   GripVertical,
   IndentDecrease,
   IndentIncrease,
-  LogOut,
   PencilRuler,
   Plus,
   Redo2,
   RotateCcw,
-  Search,
   Layers,
   Trash2,
   TriangleAlert,
@@ -34,7 +31,6 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { useAuth } from "@/hooks/use-auth";
 import {
   addWorkingDays,
   ensureWorkingDay,
@@ -51,6 +47,7 @@ import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { AppBar } from "@/components/AppBar";
 
 type Task = PlannerTask;
 type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "distribution" | "start" | "finish" | "predecessors" | "resource" | "availability" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
@@ -142,8 +139,10 @@ const formatAbsorption = (change: { absorbed: number; passed: number; returned: 
 };
 
 export default function Dashboard() {
-  const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  // The shared app bar searches everywhere; a ?q= on the URL is how another
+  // screen hands its query over to the planner.
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     system,      activeProject,
       tasks,
@@ -205,8 +204,8 @@ export default function Dashboard() {
   const [absorptionNotice, setAbsorptionNotice] = useState<{ taskId: string; message: string } | null>(null);
   const [history, setHistory] = useState<Task[][]>([]);
   const [future, setFuture] = useState<Task[][]>([]);
-  const [query, setQuery] = useState("");
-  const [projectSearch, setProjectSearch] = useState("");
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  const [projectSearch, setProjectSearch] = useState(() => searchParams.get("q") ?? "");
   const [projectHighlight, setProjectHighlight] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("vintage-gantt-project-sidebar-collapsed") === "true"; } catch { return false; }
@@ -240,9 +239,8 @@ export default function Dashboard() {
   });
   const [viewOpen, setViewOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
-  // Zone 1 app bar and Zone 2 context bar own their own menus; each closes the
-  // others so only one popover is open at a time.
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // The context bar owns its menus; each closes the others so only one popover
+  // is open at a time. (Zone 1 is the shared <AppBar/>.)
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [baselineManageOpen, setBaselineManageOpen] = useState(false);
   // Margin occupies real time, so its zone is drawn on the timeline by default.
@@ -482,6 +480,7 @@ export default function Dashboard() {
   const applySearch = (value: string) => {
     setQuery(value);
     setProjectSearch(value);
+    setSearchParams(value ? { q: value } : {}, { replace: true });
   };
 
   const recalculate = (
@@ -1063,57 +1062,18 @@ export default function Dashboard() {
     : "Monitoring mode: duration, start and progress edits track reality and consume the reserve; margin % is fixed. Emphasised columns: % complete, Margin consumed, Margin remaining, Variance."}${lastBaselineEvent ? ` Baseline captured on ${formatDate(lastBaselineEvent.at.slice(0, 10))}.` : ""}${lastModeSwitch ? ` Switched to Monitoring on ${formatDate(lastModeSwitch.at.slice(0, 10))}.` : ""}`;
 
   return (
-    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); setBaselineOpen(false); setBaselineManageOpen(false); setUserMenuOpen(false); setModeMenuOpen(false); }}>
-      <header className="planner-appbar">
-        <div className="brand-lockup">
-          <div className="brand-mark">⌁</div>
-          <button className="eyebrow breadcrumb-button" onClick={() => navigate("/projects")} title="Back to the project catalog">My dashboard / Project catalog</button>
-        </div>
-        <nav className="topnav segmented" aria-label="Main navigation">
-          <button className="segment active" aria-current="page" onClick={() => navigate("/dashboard")}>Planner</button>
-          <button className="segment" onClick={() => navigate("/projects")}>Projects</button>
-          <button className="segment" onClick={() => navigate("/calendars")}>Calendars</button>
-          <button className="segment" onClick={() => navigate("/resources")}>Resources</button>
-        </nav>
-        <div className="appbar-right">
-          <div className="search-box appbar-search">
-            <Search size={15} />
-            <input
-              autoComplete="off"
-              placeholder="Search projects and tasks"
-              aria-label="Search projects and tasks"
-              value={query}
-              onChange={(event) => applySearch(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") { event.preventDefault(); setProjectHighlight((index) => Math.min(projectResults.length - 1, index + 1)); }
-                if (event.key === "ArrowUp") { event.preventDefault(); setProjectHighlight((index) => Math.max(0, index - 1)); }
-                if (event.key === "Enter" && projectResults[projectHighlight]) { event.preventDefault(); selectProject(projectResults[projectHighlight].id); }
-                if (event.key === "Escape") applySearch("");
-              }}
-            />
-          </div>
-          <div className="toolbar-popover-wrap">
-            <button
-              className="avatar-menu"
-              title={user?.name ?? "Account"}
-              aria-haspopup="menu"
-              aria-expanded={userMenuOpen}
-              onClick={(event) => { event.stopPropagation(); setUserMenuOpen((open) => !open); setViewOpen(false); setOverflowOpen(false); setBaselineOpen(false); setModeMenuOpen(false); }}
-            >
-              <span className="avatar">{user?.name?.slice(0, 1) ?? "M"}</span>
-              <ChevronDown size={13} />
-            </button>
-            {userMenuOpen && (
-              <div className="toolbar-popover overflow-popover user-popover" onClick={(event) => event.stopPropagation()}>
-                <div className="popover-heading"><b>{user?.name ?? "Account"}</b><button onClick={() => setUserMenuOpen(false)}><X size={14} /></button></div>
-                <div className="user-save-state"><span className="live-dot" /> Saved just now</div>
-                <button title="Help"><CircleHelp size={14} /> Help</button>
-                <button onClick={() => { signOut(); navigate("/"); }}><LogOut size={14} /> Sign out</button>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+    <div className="planner-shell" onClick={() => { setShowMenu(null); setViewOpen(false); setOverflowOpen(false); setBaselineOpen(false); setBaselineManageOpen(false); setModeMenuOpen(false); }}>
+      <AppBar
+        activeKey="planner"
+        searchValue={query}
+        onSearchChange={applySearch}
+        onSearchKeyDown={(event) => {
+          if (event.key === "ArrowDown") { event.preventDefault(); setProjectHighlight((index) => Math.min(projectResults.length - 1, index + 1)); }
+          if (event.key === "ArrowUp") { event.preventDefault(); setProjectHighlight((index) => Math.max(0, index - 1)); }
+          if (event.key === "Enter" && projectResults[projectHighlight]) { event.preventDefault(); selectProject(projectResults[projectHighlight].id); }
+          if (event.key === "Escape") applySearch("");
+        }}
+      />
 
       <header className="planner-context-bar">
         <div className="context-left">
@@ -1130,7 +1090,7 @@ export default function Dashboard() {
               title={modeBadgeTitle}
               aria-haspopup="menu"
               aria-expanded={modeMenuOpen}
-              onClick={(event) => { event.stopPropagation(); setModeMenuOpen((open) => !open); setBaselineOpen(false); setViewOpen(false); setOverflowOpen(false); setUserMenuOpen(false); }}
+              onClick={(event) => { event.stopPropagation(); setModeMenuOpen((open) => !open); setBaselineOpen(false); setViewOpen(false); setOverflowOpen(false); }}
             >
               {activeMode === "planning" ? <PencilRuler size={13} /> : <Activity size={13} />}
               {activeMode === "planning" ? "Planning" : "Monitoring"}
@@ -1156,7 +1116,7 @@ export default function Dashboard() {
               title="Baseline for this project — capture, compare or manage saved baselines"
               aria-haspopup="menu"
               aria-expanded={baselineOpen}
-              onClick={(event) => { event.stopPropagation(); setBaselineError(null); setBaselineOpen((open) => !open); setBaselineManageOpen(false); setModeMenuOpen(false); setViewOpen(false); setOverflowOpen(false); setUserMenuOpen(false); }}
+              onClick={(event) => { event.stopPropagation(); setBaselineError(null); setBaselineOpen((open) => !open); setBaselineManageOpen(false); setModeMenuOpen(false); setViewOpen(false); setOverflowOpen(false); }}
             >
               <Layers size={14} />
               <span className="context-field-label">Baseline</span>

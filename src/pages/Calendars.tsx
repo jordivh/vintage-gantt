@@ -1,17 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { toast } from "sonner";
-import { useNavigate } from "react-router";
 import {
   Copy,
   Download,
   GripVertical,
-  LogOut,
   Pencil,
   Plus,
   Trash2,
   X,
 } from "lucide-react";
-import { useAuth } from "@/hooks/use-auth";
+import { AppBar } from "@/components/AppBar";
 import {
   EXCEPTION_TYPE_LABELS,
   WEEKDAY_LABELS,
@@ -54,8 +52,6 @@ const formatRange = (start: string, end: string) =>
   start === end ? formatDate(start) : `${formatDate(start)} → ${formatDate(end)}`;
 
 export default function Calendars() {
-  const { user, signOut } = useAuth();
-  const navigate = useNavigate();
   const {
     system,
     calendarsUsingProjects,
@@ -230,44 +226,7 @@ export default function Calendars() {
 
   return (
     <div className="planner-shell">
-      <header className="planner-topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark">⌁</div>
-          <div>
-            <div className="eyebrow">PROJECT CATALOG / WORKING TIME</div>
-            <h1>Calendar administration</h1>
-          </div>
-        </div>
-        <nav className="topnav">
-          <button className="tool-button" onClick={() => navigate("/dashboard")}>
-            Planner
-          </button>
-          <button className="tool-button" onClick={() => navigate("/projects")}>
-            Projects
-          </button>
-          <button className="tool-button primary" onClick={() => navigate("/calendars")}>
-            Calendars
-          </button>
-          <button className="tool-button" onClick={() => navigate("/resources")}>
-            Resources
-          </button>
-        </nav>
-        <div className="top-actions">
-          <button className="avatar" title={user?.name ?? "Account"}>
-            {user?.name?.slice(0, 1) ?? "M"}
-          </button>
-          <button
-            className="icon-button"
-            title="Sign out"
-            onClick={() => {
-              signOut();
-              navigate("/");
-            }}
-          >
-            <LogOut size={17} />
-          </button>
-        </div>
-      </header>
+      <AppBar activeKey="calendars" />
 
       <div className="calendar-screen">
         {/* ---------------------------------------------------------- list --- */}

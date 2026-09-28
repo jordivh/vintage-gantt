@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FilterX, LogOut } from "lucide-react";
+import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FilterX } from "lucide-react";
 import { useNavigate } from "react-router";
-import { useAuth } from "@/hooks/use-auth";
 import { useCalendarStore } from "@/lib/calendar-store";
+import { AppBar } from "@/components/AppBar";
 import {
   DISTRIBUTION_OPTIONS,
   type PlannerTask,
@@ -42,7 +42,6 @@ const peakUtilisation = (periods: CapacityPeriod[]): number | null => {
 };
 
 export default function Capacity() {
-  const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const { system, resources, assignments, projects, projectTasks, planVersions, openTask } = useCalendarStore();
   const [granularity, setGranularity] = useState<CapacityGranularity>("week");
@@ -133,17 +132,7 @@ export default function Capacity() {
 
   return (
     <div className="planner-shell">
-      <header className="planner-topbar">
-        <div className="brand-lockup"><div className="brand-mark">⌁</div><div><div className="eyebrow">PEOPLE / CAPACITY</div><h1>Capacity</h1></div></div>
-        <nav className="topnav">
-          <button className="tool-button" onClick={() => navigate("/dashboard")}>Planner</button>
-          <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
-          <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
-          <button className="tool-button" onClick={() => navigate("/resources")}>Resources</button>
-          <button className="tool-button primary" onClick={() => navigate("/capacity")}>Capacity</button>
-        </nav>
-        <div className="top-actions"><button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button><button className="icon-button" title="Sign out" onClick={() => { signOut(); navigate("/"); }}><LogOut size={17} /></button></div>
-      </header>
+      <AppBar activeKey="capacity" />
 
       <main className="capacity-screen">
         <div className="capacity-heading">

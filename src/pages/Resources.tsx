@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { CalendarDays, Check, ChevronLeft, ChevronRight, LogOut, Plus, Trash2, UserRound } from "lucide-react";
-import { useNavigate } from "react-router";
+import { CalendarDays, Check, ChevronLeft, ChevronRight, Plus, Trash2, UserRound } from "lucide-react";
 import { toast } from "sonner";
-import { useAuth } from "@/hooks/use-auth";
 import { useCalendarStore, type LeaveType, type ResourceRecord } from "@/lib/calendar-store";
+import { AppBar } from "@/components/AppBar";
 import { monthCells, parseIsoDate, WEEKDAY_LABELS, WEEK_ORDER, type CalendarSystem, type Weekday } from "@/lib/scheduling-engine";
 import { resourceDayAvailability } from "@/lib/resource-capacity";
 import { Calendar } from "@/components/ui/calendar";
@@ -20,8 +19,6 @@ const scheduleLabel = (days: Weekday[]) => {
 const formatHours = (hours: number) => `${Math.round(hours * 100) / 100}h`;
 
 export default function Resources() {
-  const { user, signOut } = useAuth();
-  const navigate = useNavigate();
   const { resources, system, createResource, updateResource, updateResourceSchedule, addResourceLeave, removeResourceLeave } = useCalendarStore();
   const [selectedId, setSelectedId] = useState(resources[0]?.id ?? "");
   const [tab, setTab] = useState<"details" | "schedule" | "leave">("details");
@@ -51,22 +48,12 @@ export default function Resources() {
   };
 
   if (!selected) {
-    return <div className="planner-shell"><EmptyState onAdd={addEmployee} /></div>;
+    return <div className="planner-shell"><AppBar activeKey="resources" /><EmptyState onAdd={addEmployee} /></div>;
   }
 
   return (
     <div className="planner-shell">
-      <header className="planner-topbar">
-        <div className="brand-lockup"><div className="brand-mark">⌁</div><div><div className="eyebrow">PEOPLE / WORKING TIME</div><h1>Resources</h1></div></div>
-        <nav className="topnav">
-          <button className="tool-button" onClick={() => navigate("/dashboard")}>Planner</button>
-          <button className="tool-button" onClick={() => navigate("/projects")}>Projects</button>
-          <button className="tool-button" onClick={() => navigate("/calendars")}>Calendars</button>
-          <button className="tool-button primary" onClick={() => navigate("/resources")}>Resources</button>
-          <button className="tool-button" onClick={() => navigate("/capacity")}>Capacity</button>
-        </nav>
-        <div className="top-actions"><button className="avatar" title={user?.name ?? "Account"}>{user?.name?.slice(0, 1) ?? "M"}</button><button className="icon-button" title="Sign out" onClick={() => { signOut(); navigate("/"); }}><LogOut size={17} /></button></div>
-      </header>
+      <AppBar activeKey="resources" />
 
       <main className="resource-screen">
         <div className="resource-heading"><div><div className="eyebrow">TEAM DIRECTORY / PERSON CALENDARS</div><h2>People who make the plan</h2><p>Assignments, working patterns and leave stay together in each employee’s person calendar.</p></div><button className="tool-button primary" onClick={addEmployee}><Plus size={16} /> Add employee</button></div>
