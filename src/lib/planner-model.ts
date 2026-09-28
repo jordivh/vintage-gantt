@@ -576,24 +576,15 @@ function workingDaysFrom(start: string, count: number, calendarId: string, syste
 }
 
 /**
- * The hours a task puts on each of its own working days.
- *
- * The span is the task's work duration only, so margin days — which occupy real
- * time after the work but are never worked — receive no hours and are never
- * reached. Non-working days are skipped, never padded. Daily hours are rounded
- * to a quarter hour and any rounding remainder rides on the last working day, so
- * the allocated total always equals the task's Work exactly.
- *
- * Everything is derived from the task (plus its calendar), so a change to
- * Duration, Work, Distribution or the calendar is reflected the next time this
- * is called. Exposed for the capacity engine; no charts or reports are built
- * from it here.
+ * The task's own working days: its work duration on the project calendar, with
+ * margin days excluded. These are the days a task could put hours on before any
+ * availability is considered.
  */
-export function dailyAllocation(
+export function taskWorkingDates(
   task: PlannerTask,
   system: CalendarSystem,
   projectCalendarId?: string,
-): DailyAllocation[] {
+): string[] {
   // A milestone has no work at all, so there is nothing to distribute.
   if (task.isMilestone || task.duration === 0) return [];
   const calendarId = task.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
@@ -602,18 +593,57 @@ export function dailyAllocation(
   const span = durationInWorkingDays(task);
   const finish = span <= 1 ? start : addWorkingDays(start, span - 1, calendarId, system);
   const count = workingDaysBetween(start, finish, calendarId, system);
-  const dates = workingDaysFrom(start, count, calendarId, system);
+  return workingDaysFrom(start, count, calendarId, system);
+}
+
+/**
+ * The hours a task puts on each of its own working days.
+ *
+ * The span is the task's work duration only, so margin days — which occupy real
+ * time after the work but are never worked — receive no hours and are never
+ * reached. Non-working days are skipped, never padded. Daily hours are rounded
+ * to a quarter hour and any rounding remainder rides on the last working day, so
+ * the allocated total always equals the task's Work exactly.
+ *
+ * When `isAvailable` is given, the work is spread only over the task's working
+ * days on which the assigned resource can actually work: a day that is a
+ * weekend, a holiday, a project closure, a personal day off or leave gives 0 h,
+ * and its hours are redistributed over the remaining available days with the
+ * profile's shape preserved. When nothing in the span is available the plain
+ * calendar split is kept, so no hour is ever dropped — the caller reports the
+ * shortfall instead (BES-008).
+ *
+ * Everything is derived from the task and the availability rule, so a change to
+ * Duration, Work, Distribution, the calendar or a person's leave is reflected the
+ * next time this is called. Exposed for the capacity engine; no charts or reports
+ * are built from it here.
+ */
+export function dailyAllocation(
+  task: PlannerTask,
+  system: CalendarSystem,
+  projectCalendarId?: string,
+  isAvailable?: (date: string) => boolean,
+): DailyAllocation[] {
+  const dates = taskWorkingDates(task, system, projectCalendarId);
+  if (dates.length === 0) return [];
   const work = Math.max(0, task.work ?? 0);
   // Distribute in quarter-hour units so the split stays exact and integer.
   const totalQuarters = Math.round(work * 4);
   if (totalQuarters <= 0) return dates.map((date) => ({ date, hours: 0 }));
-  const weights = distributionWeights(normalizeDistribution(task.distribution), count);
+
+  const available = isAvailable ? dates.filter((date) => isAvailable(date)) : dates;
+  // No available day at all: keep the calendar split rather than dropping hours.
+  const target = available.length ? available : dates;
+  const weights = distributionWeights(normalizeDistribution(task.distribution), target.length);
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   const quarters = weights.map((weight) => Math.round((totalQuarters * weight) / totalWeight));
   const distributed = quarters.reduce((sum, value) => sum + value, 0);
-  // Keep the total exact: the rounding remainder rides on the last working day.
+  // Keep the total exact: the rounding remainder rides on the last target day.
   quarters[quarters.length - 1] += totalQuarters - distributed;
-  return dates.map((date, index) => ({ date, hours: quarters[index] / 4 }));
+
+  const hoursByDate = new Map<string, number>();
+  target.forEach((date, index) => hoursByDate.set(date, quarters[index] / 4));
+  return dates.map((date) => ({ date, hours: hoursByDate.get(date) ?? 0 }));
 }
 
 /** The project finish as the planner shows it: the last task date in the plan. */

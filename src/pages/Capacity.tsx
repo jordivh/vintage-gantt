@@ -15,6 +15,7 @@ import {
   selectCapacityProjects,
   formatCapacityHours,
   overloadWarning,
+  unavailableWarning,
   type CapacityGranularity,
   type CapacityPeriod,
   type ResourceCapacityReport,
@@ -282,6 +283,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
       return true;
     });
   }, [report.conflicts]);
+  const unavailable = useMemo(() => new Set(report.unavailableTasks.map((task) => task.taskId)), [report.unavailableTasks]);
   return (
     <div className="capacity-detail-body">
       <div className="capacity-detail-head">
@@ -292,6 +294,20 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
           <span><small>Overloaded days</small><b>{report.overloadedDays}</b></span>
         </div>
       </div>
+
+      {report.unavailableTasks.length > 0 && (
+        <div className="capacity-unavailable" role="alert">
+          <b><AlertTriangle size={14} /> Niet beschikbaar</b>
+          <ul>
+            {report.unavailableTasks.map((task) => (
+              <li key={`${task.projectId}-${task.taskId}`}>
+                {unavailableWarning(report.resourceName, task.work)}
+                <span className="muted"> — {task.projectName} · {task.taskName}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="capacity-table-wrap">
         <table className="capacity-table">
@@ -316,7 +332,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
               <tbody>
                 {assignments.map((row) => (
                   <tr key={`${row.projectId}-${row.taskId}`} className="capacity-assignment-row" onClick={() => onOpenAssignment(row)}>
-                    <td><b>{row.taskName}</b></td>
+                    <td><b>{row.taskName}</b>{unavailable.has(row.taskId) && <span className="capacity-row-warning" title={unavailableWarning(report.resourceName, row.work)}><AlertTriangle size={12} /></span>}</td>
                     <td>
                       <button
                         type="button"

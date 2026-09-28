@@ -45,7 +45,7 @@ import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DIS
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
-import { selectCapacityProjects } from "@/lib/capacity-engine";
+import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engine";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -1829,7 +1829,14 @@ export default function Dashboard() {
                             );
                           })()}
                           {column.key === "resource" && (() => {
+                            const entries = overloadIndex.unavailableByTask.get(task.id);
+                            if (!entries || !entries.length) return null;
+                            const messages = entries.map((entry) => unavailableWarning(entry.resourceName, entry.work));
+                            return <span className="cell-unavailable-notice" role="alert" title={messages.join("\n")}>{messages.join(" ")}</span>;
+                          })()}
+                          {column.key === "resource" && (() => {
                             const info = leaveInfo.get(task.id);
+                            if (overloadIndex.unavailableByTask.get(task.id)?.length) return null;
                             if (!info || info.leaveDays <= 0) return null;
                             const labels = leaveLabels(info);
                             return <span className="cell-leave-days" title={`${info.leaveDays} leave day${info.leaveDays === 1 ? "" : "s"} of the assigned resource fall inside this task${labels.length ? ` (${labels.join(", ")})` : ""}. Leave never moves dates.`}>{info.leaveDays} d leave</span>;

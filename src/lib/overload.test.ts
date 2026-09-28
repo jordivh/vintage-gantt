@@ -174,3 +174,17 @@ describe("overload — project chip and tooltip", () => {
     expect(lines[3]).toBe("+ 2 weken meer");
   });
 });
+
+describe("overload — availability", () => {
+  test("a task fully inside leave is listed as unavailable per resource", () => {
+    const index = buildOverloadIndex({
+      system: r3System(),
+      resources: people(),
+      assignments: [{ taskId: "full", resourceId: "res-r3-chris" }],
+      projects: [projectA([task({ id: "full", name: "Volledig verlof", duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 40 })])],
+    });
+    expect(index.unavailableByTask.get("full")).toEqual([{ resourceId: "res-r3-chris", resourceName: "Chris", work: 40 }]);
+    // A task with available days is not flagged as unavailable.
+    expect(index.unavailableByTask.get("r3a1")).toBeUndefined();
+  });
+});

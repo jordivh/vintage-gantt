@@ -36,11 +36,21 @@ export interface OverloadWeek {
   breakdown: CapacityBreakdownRow[];
 }
 
+/** A task that falls entirely on days one of its assigned resources cannot work. */
+export interface TaskUnavailable {
+  resourceId: string;
+  resourceName: string;
+  /** The task's work that cannot be distributed at all. */
+  work: number;
+}
+
 export interface OverloadIndex {
   /** resourceId → its overloaded weeks, sorted by week start. */
   byResource: Map<string, OverloadWeek[]>;
   /** Resources with at least one overloaded week anywhere in the plan. */
   overloadedResourceIds: string[];
+  /** taskId → the resources that cannot work at all during the task's span. */
+  unavailableByTask: Map<string, TaskUnavailable[]>;
 }
 
 const plusDays = (date: string, amount: number): string => {
@@ -61,6 +71,7 @@ export const overloadWeekLabel = (weekStart: string): string =>
 export function buildOverloadIndex(input: CapacityInput): OverloadIndex {
   const byResource = new Map<string, OverloadWeek[]>();
   const overloadedResourceIds: string[] = [];
+  const unavailableByTask = new Map<string, TaskUnavailable[]>();
   for (const report of computeResourceLoads(input)) {
     const weeks = aggregatePeriods(report, "week")
       .filter((period) => period.overload)
@@ -76,8 +87,11 @@ export function buildOverloadIndex(input: CapacityInput): OverloadIndex {
       }));
     byResource.set(report.resourceId, weeks);
     if (weeks.length) overloadedResourceIds.push(report.resourceId);
+    for (const task of report.unavailableTasks) {
+      unavailableByTask.set(task.taskId, [...(unavailableByTask.get(task.taskId) ?? []), { resourceId: report.resourceId, resourceName: report.resourceName, work: task.work }]);
+    }
   }
-  return { byResource, overloadedResourceIds };
+  return { byResource, overloadedResourceIds, unavailableByTask };
 }
 
 /**

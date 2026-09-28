@@ -8,7 +8,7 @@ import {
 } from "./scheduling-engine";
 import type { PlannerTask } from "./planner-model";
 import { R3_CHRIS_LEAVE, R3_RESOURCES, r3AssignmentsA, r3AssignmentsB, r3TasksA, r3TasksB } from "./r3-fixture";
-import { aggregatePeriods, capacityClients, computeResourceLoads, matchesResourceFilter, overloadWarning, selectCapacityProjects, type CapacityInput } from "./capacity-engine";
+import { aggregatePeriods, capacityClients, computeResourceLoads, matchesResourceFilter, overloadWarning, selectCapacityProjects, unavailableWarning, type CapacityInput } from "./capacity-engine";
 
 const r3System = (): CalendarSystem => {
   const base = createDefaultCalendarSystem();
@@ -210,5 +210,51 @@ describe("capacity — overview filters", () => {
     expect(matchesResourceFilter("res-r3-anna", {})).toBe(true);
     expect(matchesResourceFilter("res-r3-anna", { resourceId: "res-r3-anna" })).toBe(true);
     expect(matchesResourceFilter("res-r3-bram", { resourceId: "res-r3-anna" })).toBe(false);
+  });
+});
+
+describe("capacity — distribution is availability aware", () => {
+  const chrisTask = (overrides: Partial<PlannerTask> = {}) =>
+    task({ id: "chris-task", name: "Chris werkt", duration: 20, start: "2026-10-05", finish: "2026-10-30", work: 40, ...overrides });
+
+  test("no hours land on a leave day: the leave week shows 0 and the work is kept", () => {
+    const input: CapacityInput = {
+      system: r3System(),
+      resources: people(),
+      assignments: [{ taskId: "chris-task", resourceId: "res-r3-chris" }],
+      projects: [projectA([chrisTask()])],
+    };
+    const chris = computeResourceLoads(input).find((report) => report.resourceId === "res-r3-chris")!;
+    const leaveWeek = aggregatePeriods(chris, "week").find((period) => period.start === "2026-10-12")!;
+    expect(leaveWeek.allocated).toBe(0);
+    expect(chris.unavailableTasks).toEqual([]);
+    // The hours are redistributed over the 15 available days, never dropped.
+    expect(close(chris.totalAllocated, 40)).toBe(true);
+  });
+
+  test("a task fully inside leave is reported as unavailable and still carries its hours", () => {
+    const input: CapacityInput = {
+      system: r3System(),
+      resources: people(),
+      assignments: [{ taskId: "full", resourceId: "res-r3-chris" }],
+      projects: [projectA([task({ id: "full", name: "Volledig verlof", duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 40 })])],
+    };
+    const chris = computeResourceLoads(input).find((report) => report.resourceId === "res-r3-chris")!;
+    expect(chris.unavailableTasks.map((entry) => [entry.taskName, entry.work])).toEqual([["Volledig verlof", 40]]);
+    expect(close(chris.totalAllocated, 40)).toBe(true);
+    expect(unavailableWarning("Chris", 40)).toBe("Chris is niet beschikbaar tijdens deze taak: 40 u kan niet verdeeld worden.");
+  });
+
+  test("a day off in the person's week moves the hours off that day", () => {
+    const input: CapacityInput = {
+      system: r3System(),
+      resources: people(),
+      assignments: [{ taskId: "b", resourceId: "res-r3-bram" }],
+      projects: [projectA([task({ id: "b", name: "Opbouw", duration: 5, start: "2026-11-02", finish: "2026-11-06", work: 40, distribution: "front" })])],
+    };
+    const bram = computeResourceLoads(input).find((report) => report.resourceId === "res-r3-bram")!;
+    // Bram is off on Fridays, so Fri 6 Nov receives nothing.
+    expect(bram.days.find((day) => day.date === "2026-11-06")!.allocated).toBe(0);
+    expect(close(bram.totalAllocated, 40)).toBe(true);
   });
 });

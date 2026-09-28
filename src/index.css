@@ -620,3 +620,14 @@
   .context-margin-seg { display: none; }
 }
 
+
+
+/* Availability-aware distribution (BES-008): a task that falls entirely on days
+   the assigned person cannot work says so, without moving a date or dropping an
+   hour. It is a signal, not a resolution. */
+.grid-cell.resource-cell:has(.cell-unavailable-notice) { overflow: visible; z-index: 15; }
+.cell-unavailable-notice { position: absolute; top: calc(100% + 2px); right: 0; z-index: 22; max-width: 320px; white-space: normal; background: #f7ded5; border: 1px solid #b9533c; color: #8f2f22; padding: 3px 7px; font-size: 10px; font-weight: 600; box-shadow: 3px 3px 0 rgba(80, 54, 31, .12); }
+.capacity-unavailable { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #c98a76; border-radius: 3px; background: #f7ded5; color: #8f2f22; font-size: 12px; }
+.capacity-unavailable b { display: inline-flex; align-items: center; gap: 6px; }
+.capacity-unavailable ul { margin: 6px 0 0; padding-left: 18px; }
+.capacity-row-warning { display: inline-flex; margin-left: 6px; color: #a5341f; vertical-align: middle; }

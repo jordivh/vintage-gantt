@@ -137,3 +137,53 @@ describe("distribution — working days, margin and exactness", () => {
     expect(dailyAllocation(task({ duration: 0, isMilestone: true, work: 5 }), system, "base")).toEqual([]);
   });
 });
+
+describe("distribution — availability aware (leave, personal days)", () => {
+  const system = systemWith([]);
+  const onLeave = (date: string) => date >= "2026-10-12" && date <= "2026-10-16";
+  // 40 h even over 20 working days (5 Oct – 30 Oct), with a leave week inside.
+  const span = task({ duration: 20, start: "2026-10-05", finish: "2026-10-30", work: 40 });
+
+  test("unavailable days get 0 h and their hours move to the available days", () => {
+    const rows = dailyAllocation(span, system, "base", (date) => !onLeave(date));
+    expect(sum(rows)).toBe(40);
+    const leaveRows = rows.filter((row) => onLeave(row.date));
+    expect(leaveRows.length).toBe(5);
+    expect(leaveRows.every((row) => row.hours === 0)).toBe(true);
+    // 15 available days: ~2.67 h each, not 10 h in a week with 0 h available.
+    const active = rows.filter((row) => !onLeave(row.date)).map((row) => row.hours);
+    expect(active.length).toBe(15);
+    expect(Math.max(...active)).toBeGreaterThan(2);
+    expect(active.every((hours) => hours <= 4)).toBe(true);
+  });
+
+  test("the total stays exact for every profile over the available days", () => {
+    for (const distribution of ["even", "front", "back", "center"] as const) {
+      const rows = dailyAllocation({ ...span, distribution }, system, "base", (date) => !onLeave(date));
+      expect(sum(rows)).toBe(40);
+    }
+  });
+
+  test("the profile shape is preserved over the available days only", () => {
+    const active = (distribution: "even" | "front" | "back" | "center") =>
+      dailyAllocation({ ...span, distribution }, system, "base", (date) => !onLeave(date))
+        .filter((row) => !onLeave(row.date))
+        .map((row) => row.hours);
+    const front = active("front");
+    const back = active("back");
+    expect(front[0]).toBeGreaterThan(front[front.length - 1]);
+    expect(back).toEqual([...front].reverse());
+  });
+
+  test("with no available day at all the hours are kept, never silently dropped", () => {
+    const fullyInsideLeave = task({ duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 40 });
+    const rows = dailyAllocation(fullyInsideLeave, system, "base", () => false);
+    expect(sum(rows)).toBe(40);
+  });
+
+  test("without the availability rule the plain calendar split is unchanged", () => {
+    const rows = dailyAllocation(span, system, "base");
+    expect(rows.every((row) => row.hours === 2)).toBe(true);
+    expect(sum(rows)).toBe(40);
+  });
+});

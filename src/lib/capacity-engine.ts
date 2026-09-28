@@ -1,5 +1,5 @@
 import { isoDate, parseIsoDate, type CalendarSystem } from "./scheduling-engine";
-import { dailyAllocation, type DailyAllocation, type PlannerTask } from "./planner-model";
+import { dailyAllocation, taskWorkingDates, type DailyAllocation, type PlannerTask } from "./planner-model";
 import { availableHours } from "./resource-capacity";
 
 /**
@@ -121,12 +121,24 @@ export interface CapacityBreakdownRow {
   allocated: number;
 }
 
+/** A task assigned to a resource that cannot work on any day of its span. */
+export interface UnavailableTask {
+  taskId: string;
+  taskName: string;
+  projectId: string;
+  projectName: string;
+  /** The task's work that cannot be spread on any available day. */
+  work: number;
+}
+
 export interface ResourceCapacityReport {
   resourceId: string;
   resourceName: string;
   hoursPerWeek: number;
   days: CapacityDay[];
   conflicts: CapacityConflict[];
+  /** Tasks whose whole span falls on days this resource cannot work. */
+  unavailableTasks: UnavailableTask[];
   totalAllocated: number;
   totalAvailable: number;
   overloadedDays: number;
@@ -207,32 +219,66 @@ const periodOf = (date: string, granularity: CapacityGranularity): { key: string
 export function computeResourceLoads(input: CapacityInput): ResourceCapacityReport[] {
   const { system, resources, assignments, projects } = input;
 
-  const taskIndex = new Map<string, { allocation: DailyAllocation[]; projectId: string; projectName: string; taskName: string }>();
+  const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
+  const taskIndex = new Map<string, { task: PlannerTask; projectId: string; projectName: string; calendarId?: string }>();
   let rangeStart = "";
   let rangeEnd = "";
   for (const project of projects) {
     for (const task of project.tasks) {
-      const allocation = dailyAllocation(task, system, project.projectCalendarId);
-      taskIndex.set(task.id, { allocation, projectId: project.projectId, projectName: project.projectName, taskName: task.name });
-      for (const entry of allocation) {
+      taskIndex.set(task.id, { task, projectId: project.projectId, projectName: project.projectName, calendarId: project.projectCalendarId });
+      // The task's own working days (calendar only) define the plan's time span.
+      for (const entry of dailyAllocation(task, system, project.projectCalendarId)) {
         if (!rangeStart || entry.date < rangeStart) rangeStart = entry.date;
         if (!rangeEnd || entry.date > rangeEnd) rangeEnd = entry.date;
       }
     }
   }
 
+  // The work is spread only over the days the assigned person can actually work,
+  // so leave, holidays and personal days off never hold planned hours. Cached per
+  // task+resource because the same task can be assigned to several people.
+  const allocationCache = new Map<string, DailyAllocation[]>();
+  const allocationFor = (taskId: string, resourceId: string): DailyAllocation[] => {
+    const key = `${taskId}|${resourceId}`;
+    const cached = allocationCache.get(key);
+    if (cached) return cached;
+    const entry = taskIndex.get(taskId);
+    const resource = resourceById.get(resourceId);
+    const allocation = entry && resource
+      ? dailyAllocation(entry.task, system, entry.calendarId, (date) => availableHours(resource, date, system) > 0)
+      : [];
+    allocationCache.set(key, allocation);
+    return allocation;
+  };
+
+  // A task whose whole span falls on days the person cannot work: the work has
+  // nowhere to go, so it is reported rather than silently dropped (BES-008).
+  const unavailableByResource = new Map<string, UnavailableTask[]>();
+  for (const assignment of assignments) {
+    const entry = taskIndex.get(assignment.taskId);
+    const resource = resourceById.get(assignment.resourceId);
+    if (!entry || !resource) continue;
+    const work = Math.max(0, entry.task.work ?? 0);
+    if (work <= 0) continue;
+    const days = taskWorkingDates(entry.task, system, entry.calendarId);
+    if (days.length === 0 || days.some((date) => availableHours(resource, date, system) > 0)) continue;
+    const list = unavailableByResource.get(assignment.resourceId) ?? [];
+    list.push({ taskId: entry.task.id, taskName: entry.task.name, projectId: entry.projectId, projectName: entry.projectName, work });
+    unavailableByResource.set(assignment.resourceId, list);
+  }
+
   // resourceId → date → the tasks (of any project) that put hours on that day.
   const loadByResource = new Map<string, Map<string, CapacityContribution[]>>();
   for (const assignment of assignments) {
-    const task = taskIndex.get(assignment.taskId);
-    if (!task) continue;
+    const entry = taskIndex.get(assignment.taskId);
+    if (!entry) continue;
     let days = loadByResource.get(assignment.resourceId);
     if (!days) { days = new Map(); loadByResource.set(assignment.resourceId, days); }
-    for (const entry of task.allocation) {
-      if (entry.hours <= 0) continue;
-      const list = days.get(entry.date) ?? [];
-      list.push({ projectId: task.projectId, projectName: task.projectName, taskId: assignment.taskId, taskName: task.taskName, hours: entry.hours });
-      days.set(entry.date, list);
+    for (const allocationEntry of allocationFor(assignment.taskId, assignment.resourceId)) {
+      if (allocationEntry.hours <= 0) continue;
+      const list = days.get(allocationEntry.date) ?? [];
+      list.push({ projectId: entry.projectId, projectName: entry.projectName, taskId: assignment.taskId, taskName: entry.task.name, hours: allocationEntry.hours });
+      days.set(allocationEntry.date, list);
     }
   }
 
@@ -255,6 +301,7 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
       hoursPerWeek: resource.hoursPerWeek,
       days,
       conflicts: conflictsFromDays(days),
+      unavailableTasks: unavailableByResource.get(resource.id) ?? [],
       totalAllocated: sum(days.map((day) => day.allocated)),
       totalAvailable: sum(days.map((day) => day.available)),
       overloadedDays: days.filter((day) => isOverloaded(day.allocated, day.available)).length,
@@ -355,6 +402,15 @@ function breakdownFor(days: CapacityDay[]): CapacityBreakdownRow[] {
 export function overloadWarning(resourceName: string, period: CapacityPeriod): string | null {
   if (!period.overload) return null;
   return `Overbelasting: ${resourceName} heeft in ${period.label} ${formatCapacityHours(period.available)} u beschikbaar maar ${formatCapacityHours(period.allocated)} u toegewezen.`;
+}
+
+/**
+ * The explicit Dutch warning for a task whose whole span falls on days the
+ * person cannot work: the hours have nowhere to land, so the tool says so rather
+ * than moving the task or dropping the work (BES-008).
+ */
+export function unavailableWarning(resourceName: string, work: number): string {
+  return `${resourceName} is niet beschikbaar tijdens deze taak: ${formatCapacityHours(work)} u kan niet verdeeld worden.`;
 }
 
 /** Compact hour figure: whole hours as-is, otherwise one decimal. */
