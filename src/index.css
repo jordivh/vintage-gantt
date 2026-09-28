@@ -448,7 +448,14 @@
 .capacity-row-detail.overload td { background: #f9efe6; }
 .capacity-warning { display: flex; align-items: center; gap: 7px; margin: 0 0 7px; color: #8a3f26; font-size: 12px; font-weight: 600; }
 .capacity-breakdown { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; }
-.capacity-chip { padding: 2px 8px; border-radius: 99px; background: #ece0c8; color: #6b5741; }
+.capacity-chip { padding: 2px 8px; border: 0; border-radius: 99px; background: #ece0c8; color: #6b5741; font: inherit; cursor: pointer; }
+.capacity-chip:hover:not(:disabled) { background: #e0cfae; color: #5a4635; }
+.capacity-chip:focus-visible { outline: 2px solid #9a593f; outline-offset: 1px; }
+.capacity-chip:disabled { cursor: not-allowed; opacity: .6; }
+.capacity-project-link { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.capacity-project-link:hover:not(:disabled) { color: #7d4a33; text-decoration: underline; }
+.capacity-project-link:focus-visible { outline: 2px solid #9a593f; outline-offset: 2px; border-radius: 2px; }
+.capacity-project-link:disabled { cursor: not-allowed; color: #9b8268; }
 .capacity-inline-conflict { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 7px; color: #8a5a2a; font-size: 11px; }
 .capacity-inline-conflict span { padding: 2px 8px; border-radius: 3px; background: #f6e6cf; border: 1px solid #e0c79c; }
 .capacity-util { position: relative; height: 8px; width: 110px; border-radius: 99px; background: #e8dcc6; overflow: hidden; }

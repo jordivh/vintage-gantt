@@ -43,7 +43,7 @@ const peakUtilisation = (periods: CapacityPeriod[]): number | null => {
 
 export default function Capacity() {
   const navigate = useNavigate();
-  const { system, resources, assignments, projects, projectTasks, planVersions, openTask } = useCalendarStore();
+  const { system, resources, assignments, projects, projectTasks, planVersions, openTask, setActiveProject } = useCalendarStore();
   // The planner's overload indicators deep-link here: a resource (warning icon)
   // or a project (context-bar chip), optionally scrolled to the first heavy week.
   const [searchParams] = useSearchParams();
@@ -137,6 +137,18 @@ export default function Capacity() {
   const openAssignment = (row: AssignmentRow) => {
     if (!row.versionId) return;
     openTask(row.projectId, row.versionId, row.taskId);
+    navigate("/dashboard");
+  };
+  // A project name anywhere on this screen opens the project in the Planner,
+  // exactly like picking it in the sidebar (its active version, current mode).
+  // Archived or non-project rows stay visible but are not openable.
+  const canOpenProject = (projectId: string) => {
+    const project = projects.find((item) => item.id === projectId);
+    return !!project && project.status !== "archived" && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project";
+  };
+  const openProjectById = (projectId: string) => {
+    if (!canOpenProject(projectId)) return;
+    setActiveProject(projectId);
     navigate("/dashboard");
   };
 
@@ -238,6 +250,8 @@ export default function Capacity() {
                     periods={selectedPeriods}
                     assignments={selectedAssignments}
                     focusWeek={focusWeek}
+                    canOpenProject={canOpenProject}
+                    onOpenProject={openProjectById}
                     onOpenAssignment={openAssignment}
                   />
                 )}
@@ -250,11 +264,13 @@ export default function Capacity() {
   );
 }
 
-function ResourceDetail({ report, periods, assignments, focusWeek, onOpenAssignment }: {
+function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProject, onOpenProject, onOpenAssignment }: {
   report: ResourceCapacityReport;
   periods: CapacityPeriod[];
   assignments: AssignmentRow[];
   focusWeek?: string;
+  canOpenProject: (projectId: string) => boolean;
+  onOpenProject: (projectId: string) => void;
   onOpenAssignment: (row: AssignmentRow) => void;
 }) {
   const conflicts = useMemo(() => {
@@ -283,7 +299,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, onOpenAssignm
           <tbody>
             {periods.length === 0 && <tr><td colSpan={5} className="muted">No planned work in this project range.</td></tr>}
             {periods.map((period) => (
-              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} focus={period.key === focusWeek} />
+              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} focus={period.key === focusWeek} canOpenProject={canOpenProject} onOpenProject={onOpenProject} />
             ))}
           </tbody>
         </table>
@@ -301,7 +317,16 @@ function ResourceDetail({ report, periods, assignments, focusWeek, onOpenAssignm
                 {assignments.map((row) => (
                   <tr key={`${row.projectId}-${row.taskId}`} className="capacity-assignment-row" onClick={() => onOpenAssignment(row)}>
                     <td><b>{row.taskName}</b></td>
-                    <td>{row.projectName}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="capacity-project-link"
+                        aria-label={`Open project ${row.projectName}`}
+                        title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "Project is gearchiveerd"}
+                        disabled={!canOpenProject(row.projectId)}
+                        onClick={(event) => { event.stopPropagation(); onOpenProject(row.projectId); }}
+                      >{row.projectName}</button>
+                    </td>
                     <td>{row.start}</td>
                     <td>{row.finish}</td>
                     <td>{formatCapacityHours(row.work)} h</td>
@@ -335,7 +360,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, onOpenAssignm
   );
 }
 
-function PeriodRows({ period, resourceName, focus }: { period: CapacityPeriod; resourceName: string; focus?: boolean }) {
+function PeriodRows({ period, resourceName, focus, canOpenProject, onOpenProject }: { period: CapacityPeriod; resourceName: string; focus?: boolean; canOpenProject: (projectId: string) => boolean; onOpenProject: (projectId: string) => void }) {
   const warning = overloadWarning(resourceName, period);
   const percent = period.utilisation === null ? null : Math.round(period.utilisation * 100);
   return (
@@ -361,7 +386,15 @@ function PeriodRows({ period, resourceName, focus }: { period: CapacityPeriod; r
               <div className="capacity-breakdown">
                 <span className="muted">Breakdown:</span>
                 {period.breakdown.map((row) => (
-                  <span key={row.projectId} className="capacity-chip">{row.projectName} · {formatCapacityHours(row.allocated)} h</span>
+                  <button
+                    key={row.projectId}
+                    type="button"
+                    className="capacity-chip"
+                    aria-label={`Open project ${row.projectName}`}
+                    title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "Project is gearchiveerd"}
+                    disabled={!canOpenProject(row.projectId)}
+                    onClick={() => onOpenProject(row.projectId)}
+                  >{row.projectName} · {formatCapacityHours(row.allocated)} h</button>
                 ))}
               </div>
             )}
