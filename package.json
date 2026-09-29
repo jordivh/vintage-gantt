@@ -65,6 +65,7 @@
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.17",
     "vaul": "^1.1.2",
+    "write-excel-file": "^4.1.1",
     "zod": "^4.1.13"
   },
   "devDependencies": {

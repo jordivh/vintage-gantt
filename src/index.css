@@ -666,3 +666,6 @@
 
 /* An untouched date picker shows today as a hint, not as a value. */
 .date-picker-button.is-empty span { color: #a2917a; font-style: italic; }
+
+/* The Export to Excel button sits beside the period switch in the Capacity header. */
+.capacity-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FilterX } from "lucide-react";
+import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FileSpreadsheet, FilterX, Loader2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
+import { toast } from "sonner";
 import { useCalendarStore } from "@/lib/calendar-store";
 import { AppBar } from "@/components/AppBar";
 import {
@@ -20,6 +21,9 @@ import {
   type CapacityPeriod,
   type ResourceCapacityReport,
 } from "@/lib/capacity-engine";
+import { isoDate } from "@/lib/scheduling-engine";
+import { buildCapacityWorkbook, capacityExportFileName } from "@/lib/capacity-export";
+import { downloadCapacityWorkbook } from "@/lib/capacity-workbook";
 
 interface AssignmentRow {
   taskId: string;
@@ -54,6 +58,7 @@ export default function Capacity() {
   const [filterResource, setFilterResource] = useState(() => searchParams.get("resource") ?? "");
   const [filterProject, setFilterProject] = useState(() => searchParams.get("project") ?? "");
   const [filterClient, setFilterClient] = useState("");
+  const [exporting, setExporting] = useState(false);
 
   const clients = useMemo(() => capacityClients(projects), [projects]);
   // Every regular, non-archived project — the options the filters offer.
@@ -84,6 +89,13 @@ export default function Capacity() {
   }), [system, resources, assignments, filteredProjects, projectTasks]);
 
   const visibleReports = reports.filter((report) => matchesResourceFilter(report.resourceId, { resourceId: filterResource }));
+
+  // The clients of every project the export could mention, for the "By project" sheet.
+  const clientByProject = useMemo(() => {
+    const map = new Map<string, string | undefined>();
+    for (const project of selectableProjects) map.set(project.id, project.client);
+    return map;
+  }, [selectableProjects]);
 
   const assignmentsByResource = useMemo(() => {
     const map = new Map<string, AssignmentRow[]>();
@@ -135,6 +147,37 @@ export default function Capacity() {
     filterClient ? { label: `Client: ${filterClient}`, clear: () => setFilterClient("") } : null,
   ].filter((value): value is { label: string; clear: () => void } => value !== null);
 
+  /**
+   * Downloads exactly what is on screen as a real .xlsx workbook: the same filtered
+   * people, the same aggregated periods and the same figures the tables show. It only
+   * reads them, so exporting can never change a plan, a date or an assignment.
+   */
+  const exportToExcel = async () => {
+    const exportDate = isoDate(new Date());
+    const fileName = capacityExportFileName(granularity, exportDate);
+    setExporting(true);
+    try {
+      const sheets = buildCapacityWorkbook({
+        exportDate,
+        granularity,
+        reports: visibleReports,
+        periodsFor: (resourceId) => periodsByResource.get(resourceId) ?? [],
+        clients: clientByProject,
+        filters: {
+          resource: filterResource ? resources.find((resource) => resource.id === filterResource)?.name ?? filterResource : "",
+          project: filterProject ? selectableProjects.find((project) => project.id === filterProject)?.name ?? filterProject : "",
+          client: filterClient,
+        },
+      });
+      await downloadCapacityWorkbook(fileName, sheets);
+      toast.success(`Exported ${fileName}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? `Export failed: ${error.message}` : "Export failed. Please try again.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const openAssignment = (row: AssignmentRow) => {
     if (!row.versionId) return;
     openTask(row.projectId, row.versionId, row.taskId);
@@ -164,11 +207,23 @@ export default function Capacity() {
             <h2>Who is over capacity</h2>
             <p>Every active plan version of every project, measured against each person’s own available hours. Click an assignment to open that task in its project and version.</p>
           </div>
-          <div className="capacity-toggle" role="group" aria-label="Aggregation period">
-            <CalendarRange size={15} />
-            {(["week", "month"] as const).map((value) => (
-              <button key={value} className={granularity === value ? "active" : ""} onClick={() => setGranularity(value)}>{value === "week" ? "Week" : "Month"}</button>
-            ))}
+          <div className="capacity-heading-actions">
+            <button
+              type="button"
+              className="tool-button primary"
+              onClick={() => void exportToExcel()}
+              disabled={exporting}
+              title="Download the figures shown below as an Excel workbook (.xlsx)"
+            >
+              {exporting ? <Loader2 size={15} className="animate-spin" /> : <FileSpreadsheet size={15} />}
+              {exporting ? "Exporting…" : "Export to Excel"}
+            </button>
+            <div className="capacity-toggle" role="group" aria-label="Aggregation period">
+              <CalendarRange size={15} />
+              {(["week", "month"] as const).map((value) => (
+                <button key={value} className={granularity === value ? "active" : ""} onClick={() => setGranularity(value)}>{value === "week" ? "Week" : "Month"}</button>
+              ))}
+            </div>
           </div>
         </div>
 
