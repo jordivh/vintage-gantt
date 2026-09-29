@@ -49,8 +49,9 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
     try {
       await signIn("password", { email, password, flow: "signIn" });
       // Signed in: `AuthShell` opens the requested page (or the dashboard).
-    } catch (cause) {
-      console.error("Password sign-in failed:", cause);
+    } catch {
+      // Never the error object: it can carry the submitted credentials.
+      console.error("Password sign-in failed.");
       setError(SIGN_IN_ERROR);
     } finally {
       setBusy(false);

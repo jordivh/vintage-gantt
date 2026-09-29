@@ -29,6 +29,7 @@ import {
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
 import { invitationAcceptHref } from "./company-users";
+import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
@@ -377,7 +378,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [baselineTasks, setBaselineTasks] = useState<BaselineTask[]>([]);
   const [focusTask, setFocusTask] = useState<{ projectId: string; versionId: string; taskId: string } | null>(null);
 
-  const { isAuthenticated } = useConvexAuth();
+  const { isLoading: isAuthLoading, isAuthenticated } = useConvexAuth();
   const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
   const ensureTestProject = useMutation(api.planner.ensureTestProject);
@@ -398,7 +399,15 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
   const companyRole: CompanyRole = company?.role ?? "user";
   const accessInfo = useQuery(api.companies.access, isAuthenticated ? {} : "skip");
-  const accessRemoved = accessInfo?.removed === true;
+  // A valid session survives a refresh; a removed account, a suspended company
+  // and a signed-out visitor all end access. One rule decides, everywhere.
+  const access = accessState({
+    isLoading: isAuthLoading || (isAuthenticated && companyInfo === undefined),
+    isAuthenticated,
+    removed: accessInfo?.removed === true,
+    companyActive: company ? company.company.status === "active" : true,
+  });
+  const accessRemoved = access === "denied";
   const pendingInvitationRows = useQuery(
     api.companies.pendingInvitations,
     isAuthenticated && (company?.canManageMembers ?? false) ? {} : "skip",
@@ -1046,16 +1055,44 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   );
 
   /**
-   * A removed account is signed out: every protected read and write refuses it
-   * server-side already, and the session is dropped here so the screens can
-   * never show a stale workspace.
+   * Drops every protected record from the screen. Called the moment access
+   * ends, so a removed account, a suspended company or a signed-out visitor can
+   * never leave a stale workspace on screen.
+   */
+  const resetWorkspace = useCallback(() => {
+    setSystem({ calendars: [], exceptions: [], defaultCalendarId: "" });
+    setProjects([]);
+    setResources([]);
+    setAssignments([]);
+    setTasksByProject({});
+    setActiveProjectId("");
+    setActiveVersionId("");
+    setPlanVersions([]);
+    setBaselines([]);
+    setBaselineTasks([]);
+    setFocusTask(null);
+    hydratedRef.current = false;
+    migrationStartedRef.current = false;
+    seedStartedRef.current = false;
+    companyStartedRef.current = false;
+    removalSignOutRef.current = false;
+    suppressSaveRef.current = false;
+    lastServerStateRef.current = null;
+  }, []);
+
+  /**
+   * Access ended: clear the screen, and — when a session still exists — drop it
+   * and return to Sign in. Every protected read and write refuses the account
+   * server-side already; this makes the screens agree.
    */
   useEffect(() => {
-    if (!accessRemoved || removalSignOutRef.current) return;
+    if (!accessEnded(access)) return;
+    resetWorkspace();
+    if (access === "signed-out" || removalSignOutRef.current) return;
     removalSignOutRef.current = true;
-    toast.error("Your access to this company has been removed.");
+    toast.error(ACCESS_ENDED_MESSAGE);
     void signOut();
-  }, [accessRemoved, signOut]);
+  }, [access, resetWorkspace, signOut]);
 
   const invitationAction = async (run: () => Promise<{ token: string; email: string }>, done: (email: string) => string) => {
     try {
@@ -1064,8 +1101,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       try {
         await sendInvitationEmailRemote({ token: result.token, link });
       } catch (error) {
-        console.error("[vintage-gantt] invitation email failed:", error);
-        return { ok: true, message: `Invitation created for ${result.email}, but the email could not be sent. Share this link instead: ${link}` };
+        // Never the error object, and never the link in the message: a mail
+        // failure can echo the message body, which carries the single-use value.
+        console.error("[vintage-gantt] the invitation email could not be sent");
+        return { ok: true, message: `Invitation created for ${result.email}, but the email could not be sent. Use Resend to try again.` };
       }
       return { ok: true, message: done(result.email) };
     } catch (error: unknown) {

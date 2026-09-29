@@ -1,6 +1,6 @@
 import { createAccount, getAuthUserId, invalidateSessions } from "@convex-dev/auth/server";
-import axios from "axios";
 import { internal } from "./_generated/api";
+import { sendTransactionalEmail } from "./email";
 import { action, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import type { GenericActionCtx } from "convex/server";
@@ -816,9 +816,6 @@ export const invitationForDelivery = internalQuery({
   },
 });
 
-const RESEND_ENDPOINT = "https://api.resend.com/emails";
-const PLATFORM_MAIL_ENDPOINT = "https://auth.freebuff.app/send_otp";
-
 const invitationEmailHtml = (input: { link: string; companyName: string; inviterName: string; expiry: string }) => {
   const company = input.companyName || "a company";
   const invitation = input.inviterName ? `${input.inviterName} invited you` : "You have been invited";
@@ -828,43 +825,6 @@ const invitationEmailHtml = (input: { link: string; companyName: string; inviter
     `<p><a href="${input.link}">Accept the invitation</a></p>`,
     `<p>This link works once${until ? ` and expires on ${until}` : ""}.</p>`,
   ].join("");
-};
-
-/**
- * Sends one invitation email, through the project's email provider when its key
- * is configured, and otherwise through the platform's transactional mailer so an
- * invitation still reaches its recipient. The address is always the one stored
- * on the invitation, never one supplied by the caller.
- */
-const deliverInvitationEmail = async (input: {
-  to: string;
-  link: string;
-  companyName: string;
-  inviterName: string;
-  expiry: string;
-}) => {
-  const appName = process.env.VLY_APP_NAME || "Vintage GANTT";
-  const subject = `Join ${input.companyName || appName} on Vintage GANTT`;
-  const apiKey = process.env.RESEND_API_KEY;
-  if (apiKey) {
-    await axios.post(
-      RESEND_ENDPOINT,
-      {
-        from: process.env.INVITATION_FROM_EMAIL || `${appName} <onboarding@resend.dev>`,
-        to: input.to,
-        subject,
-        html: invitationEmailHtml(input),
-      },
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-    return "resend";
-  }
-  await axios.post(
-    PLATFORM_MAIL_ENDPOINT,
-    { to: input.to, otp: input.link, appName },
-    { headers: { "x-api-key": "fb_email_2crN1hqIArZP2bEfvjp5Qik4" } },
-  );
-  return "platform";
 };
 
 /**
@@ -885,12 +845,13 @@ export const sendInvitationEmail = action({
       });
     if (!target) throw new Error("This invitation is no longer valid.");
     const link = args.link && args.link.startsWith("http") ? args.link : invitationAcceptHref(args.token);
-    const provider = await deliverInvitationEmail({
+    // The recipient is always the address stored on the invitation, never one
+    // supplied by the caller, and the link is never returned or logged.
+    const provider = await sendTransactionalEmail({
       to: target.email,
-      link,
-      companyName: target.companyName,
-      inviterName: target.inviterName,
-      expiry: target.expiresAt,
+      subject: `Join ${target.companyName || "Vintage GANTT"} on Vintage GANTT`,
+      html: invitationEmailHtml({ link, companyName: target.companyName, inviterName: target.inviterName, expiry: target.expiresAt }),
+      value: link,
     });
     return { ok: true, email: target.email, provider };
   },

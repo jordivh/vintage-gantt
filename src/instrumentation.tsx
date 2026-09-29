@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { scrubSecrets } from "@/lib/secret-scrub";
 import {
   Collapsible,
   CollapsibleContent,
@@ -44,8 +45,14 @@ async function reportErrorToVly(errorData: {
     await fetch(import.meta.env.VITE_VLY_MONITORING_URL, {
       method: "POST",
       body: JSON.stringify({
-        ...errorData,
-        url: window.location.href,
+        // Every string is scrubbed: a URL or a message can carry a single-use
+        // invitation or password-reset value, which must never be reported.
+        error: scrubSecrets(errorData.error ?? ""),
+        stackTrace: scrubSecrets(errorData.stackTrace ?? ""),
+        filename: scrubSecrets(errorData.filename ?? ""),
+        lineno: errorData.lineno,
+        colno: errorData.colno,
+        url: scrubSecrets(window.location.href),
         projectSemanticIdentifier: import.meta.env.VITE_VLY_APP_ID,
       }),
     });
@@ -177,7 +184,6 @@ export function InstrumentationProvider({
   useEffect(() => {
     const handleError = async (event: ErrorEvent) => {
       try {
-        console.log(event);
         event.preventDefault();
         setError({
           error: event.message,
@@ -203,21 +209,23 @@ export function InstrumentationProvider({
 
     const handleRejection = async (event: PromiseRejectionEvent) => {
       try {
-        console.error(event);
+        // `reportErrorToVly` scrubs what it sends; the console line stays generic
+        // so a reset or invitation value can never be printed here.
+        console.error("Unhandled promise rejection in the application");
 
         if (import.meta.env.VITE_VLY_APP_ID) {
           await reportErrorToVly({
-            error: event.reason.message,
-            stackTrace: event.reason.stack,
+            error: event.reason?.message ?? "Unhandled promise rejection",
+            stackTrace: event.reason?.stack,
           });
         }
 
         setError({
-          error: event.reason.message,
-          stack: event.reason.stack,
+          error: event.reason?.message ?? "Unhandled promise rejection",
+          stack: event.reason?.stack ?? "",
         });
-      } catch (error) {
-        console.error("Error in handleRejection:", error);
+      } catch {
+        console.error("Error in handleRejection");
       }
     };
 

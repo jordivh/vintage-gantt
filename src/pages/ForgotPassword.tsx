@@ -1,22 +1,22 @@
 import { AuthShell } from "@/components/AuthShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useAuth } from "@/hooks/use-auth";
+import { api } from "@/convex/_generated/api";
 import { AUTH_PATHS, authHref, normalizeEmail, resolveRedirectAfterAuth } from "@/lib/auth-routes";
+import { useAction } from "convex/react";
 import { KeyRound, Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 
 /**
- * Ask for a password reset code.
+ * Ask for a password reset link.
  *
- * The answer is always the same — "if an account exists …" — whether the
- * address has an account or not, because sending a code for an unknown address
- * fails on the server and that failure must not say anything. The code itself
- * is sent by the auth service to the address, never shown here.
+ * The answer is always the same — "if an account exists …" — whether the address
+ * has an account or not, and the request itself always reports success. Nothing
+ * here reveals an account, and the link is sent by email, never shown.
  */
 export default function ForgotPassword() {
-  const { signIn } = useAuth();
+  const requestReset = useAction(api.passwordRecovery.requestReset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const returnTo = searchParams.get("returnTo");
@@ -30,16 +30,20 @@ export default function ForgotPassword() {
     if (!address) return;
     setBusy(true);
     try {
-      await signIn("password", { email: address, flow: "reset" });
-    } catch (cause) {
-      // Unknown address, delivery problem or rate limit: the next screen says
-      // the same thing either way, so nothing is revealed here.
-      console.warn("Password reset request did not send a code:", cause);
-    } finally {
-      setBusy(false);
+      // The action answers `{ ok: true }` whatever the address and whatever
+      // happens while sending, so there is nothing here to branch on.
+      await requestReset({
+        email: address,
+        origin: typeof window === "undefined" ? undefined : window.location.origin,
+      });
+    } catch {
+      // Even an unexpected failure gets the same neutral answer, and the error is
+      // never logged: it could carry the address or the link.
+      console.warn("Password reset request did not complete.");
     }
+    setBusy(false);
     // The next screen always says the same thing: if an account exists for the
-    // address, a code has been sent. Whether it was is not visible here.
+    // address, a link has been sent. Whether it was is not visible here.
     navigate(
       authHref(AUTH_PATHS.reset, address, { ...(returnTo ? { returnTo } : {}), sent: "1" }),
       { replace: true },
@@ -50,7 +54,7 @@ export default function ForgotPassword() {
     <AuthShell
       eyebrow="Password reset"
       title="Forgot your password?"
-      description="Enter your email address and we will send a 6-digit code to set a new password."
+      description="Enter your email address and we will send you a link to set a new password."
       redirect={redirect}
       footer={
         <span>
@@ -81,7 +85,7 @@ export default function ForgotPassword() {
             </>
           ) : (
             <>
-              <KeyRound className="h-4 w-4" /> Send reset code
+              <KeyRound className="h-4 w-4" /> Send reset link
             </>
           )}
         </Button>

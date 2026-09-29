@@ -10,7 +10,6 @@ import {
   REGISTRATION_MESSAGES,
   registrationMessage,
   registrationMessageFor,
-  resetSentNotice,
   resolveRedirectAfterAuth,
   SIGN_IN_ERROR,
   signInHref,
@@ -91,11 +90,6 @@ describe("failed sign-in and reset messages", () => {
     expect(SIGN_IN_ERROR.includes("found")).toBe(false);
   });
 
-  test("the reset request always gives the same conditional answer", () => {
-    expect(resetSentNotice("marta@example.com")).toBe(
-      "If an account exists for marta@example.com, we have sent a 6-digit reset code.",
-    );
-  });
 });
 
 describe("registration failures", () => {

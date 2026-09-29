@@ -30,8 +30,10 @@ export const emailOtp = Email({
           },
         },
       );
-    } catch (error) {
-      throw new Error(JSON.stringify(error));
+    } catch {
+      // Never the provider's error: it can echo the request body, which holds
+      // the verification value. One fixed message keeps it out of any log.
+      throw new Error("The sign-in email could not be sent.");
     }
   },
 });

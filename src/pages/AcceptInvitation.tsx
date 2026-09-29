@@ -42,7 +42,8 @@ export default function AcceptInvitation() {
       const result = await acceptInvitation({ token, name, password });
       email = result.email;
     } catch (cause) {
-      console.error("Accepting the invitation failed:", cause);
+      // Never the error object: it can carry the invitation value or the password.
+      console.error("Accepting the invitation failed.");
       setError(invitationErrorMessage(cause));
       setBusy(false);
       return;
@@ -50,8 +51,8 @@ export default function AcceptInvitation() {
     try {
       // The account exists now; signing in opens the company environment.
       await signIn("password", { email, password, flow: "signIn" });
-    } catch (cause) {
-      console.error("Signing in after accepting the invitation failed:", cause);
+    } catch {
+      console.error("Signing in after accepting the invitation failed.");
       setError("Your account is ready. Please sign in with your email address and password.");
     }
     setBusy(false);

@@ -58,7 +58,8 @@ export default function RegisterCompany() {
       // the message names it — nothing about the database is echoed here.
       await registerCompany({ companyName, name, email, password });
     } catch (cause) {
-      console.error("Company registration failed:", cause);
+      // Never the error object: it can carry the submitted credentials.
+      console.error("Company registration failed.");
       setError(registrationMessage(cause));
       setBusy(false);
       return;
@@ -66,8 +67,8 @@ export default function RegisterCompany() {
     try {
       // The company exists now; signing in opens it through `AuthShell`.
       await signIn("password", { email, password, flow: "signIn" });
-    } catch (cause) {
-      console.error("Signing in as the new company admin failed:", cause);
+    } catch {
+      console.error("Signing in as the new company admin failed.");
       setError("Your company account was created. Please sign in with your new password.");
     }
     setBusy(false);

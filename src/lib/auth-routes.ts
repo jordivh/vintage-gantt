@@ -69,13 +69,8 @@ export function authHref(path: string, email?: string, extra?: Record<string, st
  */
 export const SIGN_IN_ERROR = "The email address or password is incorrect.";
 
-/** One message for every failed reset code, for the same reason. */
-export const RESET_CODE_ERROR = "That reset code is not valid or has expired. Request a new one.";
-
-/** Always the same answer to a reset request, whatever the address. */
-export function resetSentNotice(email: string): string {
-  return `If an account exists for ${email}, we have sent a 6-digit reset code.`;
-}
+// The password-reset messages live with the reset rules in `./password-reset`
+// (RESET_REQUEST_NOTICE and RESET_LINK_ERROR), so the policy stays in one place.
 
 /* --------------------------------------------------- registration failures */
 

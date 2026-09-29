@@ -92,6 +92,21 @@ const schema = defineSchema(
       .index("by_token", ["tokenHash"])
       .index("by_company_email", ["companyId", "email"]),
 
+    // A single-use password-reset link. Only the SHA-256 hash of the link's
+    // value is stored; `usedAt` is set the moment it is spent, and `expiresAt`
+    // bounds how long it lives. A new request replaces every earlier row for the
+    // account, so an address has at most one working link.
+    passwordResets: defineTable({
+      userId: v.id("users"),
+      email: v.string(),
+      tokenHash: v.string(),
+      createdAt: v.string(),
+      expiresAt: v.string(),
+      usedAt: v.optional(v.string()),
+    })
+      .index("by_token", ["tokenHash"])
+      .index("by_user", ["userId"]),
+
     projects: defineTable({
       ownerId: v.id("users"), companyId, id: v.string(), name: v.string(), status: v.string(), startDate: v.string(),
       schedulingDirection: v.string(), calendarId: v.string(),      createdAt: v.string(), updatedAt: v.string(),
