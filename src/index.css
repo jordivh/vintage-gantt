@@ -775,3 +775,9 @@
   .planner-appbar .segment { flex: 0 0 auto; }
   .company-context { max-width: 128px; padding: 0 8px; }
 }
+
+/* The employee profile keeps its act and delete controls together, so a destructive
+   action is deliberately styled apart from the everyday toggle. */
+.detail-heading-actions { display: flex; align-items: center; gap: 4px; }
+.icon-button.danger { color: #9a4f3d; }
+.icon-button.danger:hover { border-color: #cfa595; background: #eed9d2; }

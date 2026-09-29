@@ -230,21 +230,29 @@ interface Identity {
   companyId: Id<"companies">;
 }
 
-/** Creates the one empty starter project a brand-new workspace opens on, exactly once. */
+/** The one empty starter project a brand-new workspace opens on. */
+const STARTER_PROJECT_ID = "proj-welcome";
+
+/**
+ * Creates the starter project exactly once, and only when the workspace has no
+ * regular project at all. A project the user removed is never recreated: once
+ * the marker exists nothing is written here again.
+ */
 const ensureStarterProject = async (ctx: MutationCtx, identity: Identity, now: string) => {
   const { companyId } = identity;
   const starterRun = await ctx.db.query("seedRuns").withIndex("by_company_seed", (q) => q.eq("companyId", companyId as never).eq("seedKey", STARTER_SEED_KEY)).first();
   if (starterRun) return false;
   const projects = await ctx.db.query("projects").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
   const hasRealProject = projects.some((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project");
-  if (!hasRealProject) {
+  const alreadyThere = projects.some((project) => project.id === STARTER_PROJECT_ID);
+  if (!hasRealProject && !alreadyThere) {
     const calendars = await ctx.db.query("calendars").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
     const calendarId = calendars.find((calendar) => calendar.isDefault)?.id ?? "cal-base-belgium";
-    await ctx.db.insert("projects", { ownerId: identity.ownerId, companyId, id: "proj-welcome", name: "New project", status: "active", kind: "project", startDate: new Date().toISOString().slice(0, 10), schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now });
-    await ctx.db.insert("planVersions", { ownerId: identity.ownerId, companyId, id: "version-proj-welcome-1", projectId: "proj-welcome", name: "Versie 1", isActive: true, createdAt: now, mode: "planning" });
+    await ctx.db.insert("projects", { ownerId: identity.ownerId, companyId, id: STARTER_PROJECT_ID, name: "New project", status: "active", kind: "project", startDate: new Date().toISOString().slice(0, 10), schedulingDirection: "forward", calendarId, createdAt: now, updatedAt: now });
+    await ctx.db.insert("planVersions", { ownerId: identity.ownerId, companyId, id: `version-${STARTER_PROJECT_ID}-1`, projectId: STARTER_PROJECT_ID, name: "Versie 1", isActive: true, createdAt: now, mode: "planning" });
   }
   await ctx.db.insert("seedRuns", { ownerId: identity.ownerId, companyId, seedKey: STARTER_SEED_KEY, executedAt: now });
-  return !hasRealProject;
+  return !hasRealProject && !alreadyThere;
 };
 
 const seedTestProject = async (ctx: MutationCtx, identity: Identity) => {
@@ -268,8 +276,12 @@ const seedTestProject = async (ctx: MutationCtx, identity: Identity) => {
     // Retain older duplicate markers without touching their project or scheduling data.
     await ctx.db.patch(legacy._id, { seedKey: undefined, updatedAt: now });
   }
-  if (executed && !legacyRows.length) {
-    // The built-in template was deleted on purpose — it must stay deleted.
+  // Demo content is created for a brand-new, empty company and nothing else. A
+  // company that already owns a project either still holds the template (found
+  // above) or deleted it on purpose, and a company whose marker exists has been
+  // seeded before — neither may ever see the record come back.
+  if (allProjects.length || executed) {
+    if (!executed) await ctx.db.insert("seedRuns", { ownerId: identity.ownerId, companyId, seedKey: TEST_SEED_KEY, executedAt: now });
     return await ensureStarterProject(ctx, identity, now);
   }
   const calendars = await ctx.db.query("calendars").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
@@ -298,15 +310,31 @@ const seedR3 = async (ctx: MutationCtx, identity: Identity, now: string) => {
   const { companyId } = identity;
   const executed = await ctx.db.query("seedRuns").withIndex("by_company_seed", (q) => q.eq("companyId", companyId as never).eq("seedKey", R3_SEED_KEY)).first();
   if (executed) return;
+  // Same rule as the built-in template: the scenario is created once, for a
+  // brand-new company. A company that already owns a project has been seeded
+  // before or removed the scenario on purpose — it must never come back.
+  if ((await ctx.db.query("projects").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect()).length) {
+    await ctx.db.insert("seedRuns", { ownerId: identity.ownerId, companyId, seedKey: R3_SEED_KEY, executedAt: now });
+    return;
+  }
   const calendars = await ctx.db.query("calendars").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
+  const resources = await ctx.db.query("resources").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
+  const exceptions = await ctx.db.query("calendarExceptions").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect();
   const base = calendars.find((calendar) => calendar.id === "cal-base-belgium") ?? calendars.find((calendar) => calendar.isDefault);
   const baseCalendarId = base?.id ?? "cal-base-belgium";
   if (!base) await ctx.db.insert("calendars", { ownerId: identity.ownerId, companyId, id: baseCalendarId, name: "Belgium — standard", type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] });
   for (const resource of R3_RESOURCES) {
-    await ctx.db.insert("calendars", { ownerId: identity.ownerId, companyId, id: resource.calendarId, name: `${resource.name} — leave`, type: "person", parentCalendarId: baseCalendarId, isDefault: false, workingDays: resource.workingDays });
-    await ctx.db.insert("resources", { ownerId: identity.ownerId, companyId, id: resource.id, name: resource.name, role: "", email: "", colour: resource.colour, hoursPerWeek: resource.hoursPerWeek, isActive: true, calendarId: resource.calendarId });
+    // Deterministic ids plus an existence check, so a second run can never duplicate a person.
+    if (!calendars.some((calendar) => calendar.id === resource.calendarId)) {
+      await ctx.db.insert("calendars", { ownerId: identity.ownerId, companyId, id: resource.calendarId, name: `${resource.name} — leave`, type: "person", parentCalendarId: baseCalendarId, isDefault: false, workingDays: resource.workingDays });
+    }
+    if (!resources.some((row) => row.id === resource.id)) {
+      await ctx.db.insert("resources", { ownerId: identity.ownerId, companyId, id: resource.id, name: resource.name, role: "", email: "", colour: resource.colour, hoursPerWeek: resource.hoursPerWeek, isActive: true, calendarId: resource.calendarId });
+    }
   }
-  await ctx.db.insert("calendarExceptions", { ownerId: identity.ownerId, companyId, id: R3_CHRIS_LEAVE.id, calendarId: R3_CHRIS_LEAVE.calendarId, startDate: R3_CHRIS_LEAVE.startDate, endDate: R3_CHRIS_LEAVE.endDate, label: R3_CHRIS_LEAVE.label, type: "leave", isWorkingDay: false, source: "manual" });
+  if (!exceptions.some((row) => row.id === R3_CHRIS_LEAVE.id)) {
+    await ctx.db.insert("calendarExceptions", { ownerId: identity.ownerId, companyId, id: R3_CHRIS_LEAVE.id, calendarId: R3_CHRIS_LEAVE.calendarId, startDate: R3_CHRIS_LEAVE.startDate, endDate: R3_CHRIS_LEAVE.endDate, label: R3_CHRIS_LEAVE.label, type: "leave", isWorkingDay: false, source: "manual" });
+  }
   for (const pair of R3_PROJECTS) {
     for (const [projectId, prefix, isTemplate] of [[pair.projectId, pair.prefix, false], [pair.templateId, pair.templatePrefix, true]] as const) {
       const versionId = `version-${projectId}-1`;
@@ -501,6 +529,200 @@ export const deleteTemplate = mutation({
     for (const row of await ctx.db.query("taskAssignments").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect()) if (taskIds.has(row.taskId)) await ctx.db.delete(row._id);
     for (const row of await ctx.db.query("planVersions").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.templateId)).collect()) await ctx.db.delete(row._id);
     await ctx.db.delete(project._id);
+  },
+});
+
+/** True when the row belongs to a regular project rather than a template. */
+const isRegularProject = (project: { kind?: string; status: string }) =>
+  (project.kind ?? (project.status === "template" ? "template" : "project")) === "project";
+
+/** Every project of one company, through the company index. */
+const companyProjectRows = (ctx: MutationCtx, companyId: Id<"companies">) => companyTable(ctx, "projects", companyId);
+
+/**
+ * Deletes one regular project and every record that belongs to it: its tasks,
+ * its dependencies, the assignments of those tasks, its plan versions, its
+ * baselines and their snapshots. Nothing is rewritten and no planning figure is
+ * recomputed — rows are only removed, so no orphaned row can reappear or keep
+ * counting towards capacity.
+ *
+ * Only the signed-in company's own rows are reachable: the project is looked up
+ * by id inside the company's own projects, and every cascade runs through a
+ * company index, so a project id from another company cannot be deleted.
+ */
+export const deleteProject = mutation({
+  args: { projectId: v.string() },
+  handler: async (ctx, args) => {
+    const { companyId } = await requireCompany(ctx);
+    const projects = await companyProjectRows(ctx, companyId);
+    const project = projects.find((row) => row.id === args.projectId);
+    if (!project) throw new Error("That project is not part of this company.");
+    if (!isRegularProject(project)) throw new Error("That is a template. Templates are hidden or deleted from the templates list.");
+    if (projects.filter(isRegularProject).length <= 1) throw new Error("You must keep at least one project.");
+
+    const tasks = await ctx.db.query("tasks").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.projectId)).collect();
+    const taskIds = new Set(tasks.map((task) => task.id));
+    const baselines = await ctx.db.query("baselines").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.projectId)).collect();
+    const baselineIds = new Set(baselines.map((baseline) => baseline.id));
+
+    let assignments = 0;
+    for (const row of await companyTable(ctx, "taskAssignments", companyId)) {
+      if (taskIds.has(row.taskId)) {
+        await ctx.db.delete(row._id);
+        assignments += 1;
+      }
+    }
+    let baselineTasks = 0;
+    for (const row of await companyTable(ctx, "baselineTasks", companyId)) {
+      if (baselineIds.has(row.baselineId)) {
+        await ctx.db.delete(row._id);
+        baselineTasks += 1;
+      }
+    }
+    // A dependency belongs to the project that owns the link, but either end can
+    // name a task of this project. Both are removed: a link row whose endpoint is
+    // gone is an orphan, whichever project it was filed under.
+    let dependencies = 0;
+    for (const row of await companyTable(ctx, "dependencies", companyId)) {
+      if (row.projectId !== args.projectId && !taskIds.has(row.predecessorId) && !taskIds.has(row.successorId)) continue;
+      await ctx.db.delete(row._id);
+      dependencies += 1;
+    }
+    let planVersions = 0;
+    for (const row of await ctx.db.query("planVersions").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.projectId)).collect()) {
+      await ctx.db.delete(row._id);
+      planVersions += 1;
+    }
+    for (const row of tasks) await ctx.db.delete(row._id);
+    for (const row of baselines) await ctx.db.delete(row._id);
+    await ctx.db.delete(project._id);
+    return {
+      projectId: args.projectId,
+      removed: { tasks: tasks.length, dependencies, assignments, planVersions, baselines: baselines.length, baselineTasks },
+    };
+  },
+});
+
+/**
+ * Deletes the given tasks of one project together with their subtree, their
+ * assignments and every dependency that names them. A task row can therefore
+ * never outlive the task it points at.
+ */
+export const deleteTasks = mutation({
+  args: { projectId: v.string(), taskIds: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    const { companyId } = await requireCompany(ctx);
+    const tasks = await ctx.db.query("tasks").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.projectId)).collect();
+    const wanted = new Set(args.taskIds);
+    const doomed = new Set(tasks.filter((task) => wanted.has(task.id)).map((task) => task.id));
+    if (!doomed.size) throw new Error("That task is not part of this company.");
+    // Children of a deleted task go with it, so nothing is left pointing at a gone parent.
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const task of tasks) {
+        if (task.parentId && doomed.has(task.parentId) && !doomed.has(task.id)) {
+          doomed.add(task.id);
+          grew = true;
+        }
+      }
+    }
+    let assignments = 0;
+    for (const row of await companyTable(ctx, "taskAssignments", companyId)) {
+      if (doomed.has(row.taskId)) {
+        await ctx.db.delete(row._id);
+        assignments += 1;
+      }
+    }
+    // Same rule as the project delete: every link that names a doomed task goes,
+    // whatever project the link was filed under.
+    let dependencies = 0;
+    for (const row of await companyTable(ctx, "dependencies", companyId)) {
+      if (doomed.has(row.predecessorId) || doomed.has(row.successorId)) {
+        await ctx.db.delete(row._id);
+        dependencies += 1;
+      }
+    }
+    for (const task of tasks) if (doomed.has(task.id)) await ctx.db.delete(task._id);
+    return { taskIds: [...doomed], assignments, dependencies };
+  },
+});
+
+/**
+ * Deletes one employee with everything that only exists for them: their
+ * assignments, their person calendar and that calendar's leave rows. No
+ * assignment can survive pointing at an employee who is gone.
+ */
+export const deleteResource = mutation({
+  args: { resourceId: v.string() },
+  handler: async (ctx, args) => {
+    const { companyId } = await requireCompany(ctx);
+    const resources = await companyTable(ctx, "resources", companyId);
+    const resource = resources.find((row) => row.id === args.resourceId);
+    if (!resource) throw new Error("That employee is not part of this company.");
+    let assignments = 0;
+    for (const row of await companyTable(ctx, "taskAssignments", companyId)) {
+      if (row.resourceId === resource.id) {
+        await ctx.db.delete(row._id);
+        assignments += 1;
+      }
+    }
+    // The employee's own calendar goes with them — but only when it is really
+    // theirs. The shared base calendar, a calendar a project plans on, and one
+    // another employee still uses all stay put, so no record is left stranded.
+    let exceptions = 0;
+    let calendars = 0;
+    const own = (await companyTable(ctx, "calendars", companyId)).find((row) => row.id === resource.calendarId);
+    const sharedWithProject = (await companyProjectRows(ctx, companyId)).some((project) => isRegularProject(project) && project.calendarId === resource.calendarId);
+    const sharedWithEmployee = (await companyTable(ctx, "resources", companyId)).some((row) => row.id !== resource.id && row.calendarId === resource.calendarId);
+    if (own && !own.isDefault && !sharedWithProject && !sharedWithEmployee) {
+      for (const row of await companyTable(ctx, "calendarExceptions", companyId)) {
+        if (row.calendarId === own.id) {
+          await ctx.db.delete(row._id);
+          exceptions += 1;
+        }
+      }
+      await ctx.db.delete(own._id);
+      calendars = 1;
+    }
+    await ctx.db.delete(resource._id);
+    return { resourceId: resource.id, removed: { assignments, exceptions, calendars } };
+  },
+});
+
+/**
+ * Deletes one calendar and its exception rows, refusing every deletion that
+ * would strand another record: the base calendar, a calendar a project still
+ * plans on, one an employee still uses, and one other calendars inherit from.
+ */
+export const deleteCalendar = mutation({
+  args: { calendarId: v.string() },
+  handler: async (ctx, args) => {
+    const { companyId } = await requireCompany(ctx);
+    const calendars = await companyTable(ctx, "calendars", companyId);
+    const calendar = calendars.find((row) => row.id === args.calendarId);
+    if (!calendar) throw new Error("That calendar is not part of this company.");
+    if (calendar.isDefault) throw new Error("The base calendar cannot be deleted.");
+    const planned = (await companyProjectRows(ctx, companyId)).filter((project) => isRegularProject(project) && project.calendarId === calendar.id);
+    if (planned.length) {
+      throw new Error(`${planned.length} project${planned.length === 1 ? "" : "s"} still use this calendar (${planned.map((project) => project.name).join(", ")}). Re-link them first.`);
+    }
+    const staffed = (await companyTable(ctx, "resources", companyId)).filter((resource) => resource.calendarId === calendar.id);
+    if (staffed.length) {
+      throw new Error(`${staffed.length} employee${staffed.length === 1 ? "" : "s"} still use this calendar (${staffed.map((resource) => resource.name).join(", ")}). Move them to another calendar first.`);
+    }
+    const children = calendars.filter((row) => row.parentCalendarId === calendar.id);
+    if (children.length) {
+      throw new Error(`${children.length} calendar${children.length === 1 ? "" : "s"} inherit from this one (${children.map((row) => row.name).join(", ")}). Delete or re-parent them first.`);
+    }
+    let exceptions = 0;
+    for (const row of await companyTable(ctx, "calendarExceptions", companyId)) {
+      if (row.calendarId === calendar.id) {
+        await ctx.db.delete(row._id);
+        exceptions += 1;
+      }
+    }
+    await ctx.db.delete(calendar._id);
+    return { calendarId: calendar.id, removed: { exceptions } };
   },
 });
 

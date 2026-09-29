@@ -219,8 +219,10 @@ export default function Calendars() {
     toast.success("Calendar created");
   };
 
-  const handleDelete = (calendar: PlannerCalendar) => {
-    const result = deleteCalendar(calendar.id);
+  // The database is written first and the answer awaited: the calendar leaves the
+  // screen only once the delete is confirmed, and a refusal keeps it and says why.
+  const handleDelete = async (calendar: PlannerCalendar) => {
+    const result = await deleteCalendar(calendar.id);
     if (!result.ok) toast.error(result.message ?? "Unable to delete calendar");
     else toast.success(`${calendar.name} deleted`);
   };

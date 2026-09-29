@@ -230,7 +230,17 @@ interface CalendarStoreValue {
    * assignments — moves, and the project counts in the capacity figures again.
    */
   restoreProject: (projectId: string) => void;
-  deleteProject: (projectId: string) => { ok: boolean; taskCount: number };
+  /**
+   * Permanently removes a project and everything that belongs to it. The server
+   * delete is awaited: the project disappears from the screen only after the
+   * database confirmed it, and a refusal keeps it in place with a reason.
+   */
+  deleteProject: (projectId: string) => Promise<{ ok: boolean; taskCount: number; message?: string }>;
+  /**
+   * Permanently removes tasks (with their subtree) from one project. Awaited like
+   * every delete: the caller applies its own state change only when `ok` is true.
+   */
+  deleteTasks: (projectId: string, taskIds: string[]) => Promise<{ ok: boolean; removedTaskIds: string[]; message?: string }>;
   calendarsUsingProjects: (calendarId: string) => ProjectRecord[];
   projectsAffectedBy: (calendarId: string) => ProjectRecord[];
   previewCalendarChange: (nextSystem: CalendarSystem, changedCalendarId: string) => ImpactCount;
@@ -240,6 +250,12 @@ interface CalendarStoreValue {
   updateResource: (id: string, patch: Partial<ResourceRecord>) => void;
   updateResourceSchedule: (id: string, workingDays: Weekday[]) => void;
   createResource: (input: Omit<ResourceRecord, "id" | "calendarId">) => ResourceRecord;
+  /**
+   * Permanently removes an employee with their assignments, their person calendar
+   * and that calendar's leave rows. Awaited, so nothing is removed on screen
+   * until the database confirmed it.
+   */
+  deleteResource: (id: string) => Promise<{ ok: boolean; message?: string }>;
   setTaskAssignments: (taskId: string, resourceIds: string[]) => void;
   addResourceLeave: (resourceId: string, input: { startDate: string; endDate: string; type: LeaveType; note?: string }) => void;
   removeResourceLeave: (exceptionId: string) => void;
@@ -249,7 +265,7 @@ interface CalendarStoreValue {
   createCalendar: (input: { name: string; type: CalendarType; parentCalendarId: string | null; workingDays?: Weekday[] }) => string | null;
   duplicateCalendar: (id: string) => string;
   renameCalendar: (id: string, name: string) => void;
-  deleteCalendar: (id: string) => { ok: boolean; message?: string };
+  deleteCalendar: (id: string) => Promise<{ ok: boolean; message?: string }>;
   planVersions: PlanVersion[];
   baselines: Baseline[];
   baselineTasks: BaselineTask[];
@@ -381,11 +397,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const { isLoading: isAuthLoading, isAuthenticated } = useConvexAuth();
   const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
-  const ensureTestProject = useMutation(api.planner.ensureTestProject);
   const createProjectFromTemplateRemote = useMutation(api.planner.createProjectFromTemplate);
   const saveAsTemplateRemote = useMutation(api.planner.saveAsTemplate);
   const setTemplateHiddenRemote = useMutation(api.planner.hideTemplate);
   const deleteTemplateRemote = useMutation(api.planner.deleteTemplate);
+  const deleteProjectRemote = useMutation(api.planner.deleteProject);
+  const deleteTasksRemote = useMutation(api.planner.deleteTasks);
+  const deleteResourceRemote = useMutation(api.planner.deleteResource);
+  const deleteCalendarRemote = useMutation(api.planner.deleteCalendar);
   const replaceRemoteState = useMutation(api.planner.replaceState);
   const ensureCompanyRemote = useMutation(api.companies.ensureCompany);
   const setCompanyMemberRoleRemote = useMutation(api.companies.setMemberRole);
@@ -417,10 +436,55 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const removalSignOutRef = useRef(false);
   const hydratedRef = useRef(false);
   const migrationStartedRef = useRef(false);
-  const seedStartedRef = useRef(false);
   const companyStartedRef = useRef(false);
-  const suppressSaveRef = useRef(false);
+  /** Set for exactly one run while a failed write is being rolled back. */
+  const restoringRef = useRef(false);
   const lastServerStateRef = useRef<unknown>(null);
+  /**
+   * The exact JSON the database holds. A write is sent only when the workspace
+   * differs from it, so hydrating the server's own answer never echoes back —
+   * and, unlike a "skip the next write" flag, a change the user made is never
+   * dropped on a timer. A skipped write is impossible; only an identical one is.
+   */
+  const lastSyncedRef = useRef<string | null>(null);
+
+  /** The whole workspace exactly as it is sent to the server, relations repaired. */
+  const buildWorkspacePayload = useCallback(
+    (source: {
+      projects: ProjectRecord[];
+      tasksByProject: Record<string, PlannerTask[]>;
+      system: CalendarSystem;
+      resources: ResourceRecord[];
+      assignments: TaskAssignment[];
+      planVersions: PlanVersion[];
+      baselines: Baseline[];
+      baselineTasks: BaselineTask[];
+    }) => {
+      const state = {
+        projects: source.projects,
+        tasks: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
+        dependencies: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
+        calendars: source.system.calendars,
+        exceptions: source.system.exceptions,
+        resources: source.resources,
+        assignments: source.assignments,
+        planVersions: source.planVersions,
+        baselines: source.baselines,
+        baselineTasks: source.baselineTasks,
+      };
+      // Every relation that survives has to belong to this company. A link row
+      // whose target is gone can never be read, so it is dropped here rather than
+      // stored: the only other rows that exist belong to other companies, and a
+      // relation naming one of those is exactly what must never be written. The
+      // server refuses a payload that fails this, so the two agree.
+      const repaired = normalizeWorkspaceRelations(state);
+      if (repaired.dropped.length) {
+        console.info("[vintage-gantt] dropped relations that are not part of this company:", repaired.dropped);
+      }
+      return repaired.rows;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isAuthenticated || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
@@ -430,14 +494,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // the browser — a browser is shared, so a snapshot left behind by an
       // earlier session could belong to another company, and a company must
       // never adopt records it does not own.
+      // Seeding happens here and only here: for a workspace that has no records
+      // at all. The server creates the starter project and the demo scenario
+      // once, and never recreates a record that was removed afterwards.
       migrationStartedRef.current = true;
-      void initializeWorkspace({}).then(() => ensureTestProject({})).catch(() => {
+      void initializeWorkspace({}).catch(() => {
         migrationStartedRef.current = false;
         toast.error("Could not connect to the central planner database. Your changes were not saved.");
       });
       return;
     }
-    suppressSaveRef.current = true;
     const state = remoteState as { projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; planVersions?: PlanVersion[]; baselines?: Baseline[]; baselineTasks?: BaselineTask[] };
     const grouped: Record<string, PlannerTask[]> = {};
     const rawVersions: PlanVersion[] = (state.planVersions as PlanVersion[] | undefined) ?? (state.projects ?? []).map((project) => ({ id: `version-${project.id}-1`, projectId: project.id, name: "Versie 1", isActive: true, createdAt: project.createdAt }));
@@ -465,18 +531,20 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived" && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ? current : fallback?.id ?? "");
     hydratedRef.current = true;
     lastServerStateRef.current = remoteState;
-  }, [isAuthenticated, remoteState, initializeWorkspace, ensureTestProject]);
-
-  useEffect(() => {
-    if (!isAuthenticated || remoteState === undefined || remoteState === null || seedStartedRef.current) return;
-    seedStartedRef.current = true;
-    void ensureTestProject({}).then((result) => {
-      if (result === true) hydratedRef.current = false;
-    }).catch(() => {
-      seedStartedRef.current = false;
-      toast.error("Could not prepare the server-side test project.");
-    });
-  }, [isAuthenticated, remoteState, ensureTestProject]);
+    // The workspace the database just handed us is, by definition, already
+    // stored: recording its exact form means the next save run recognises it and
+    // writes nothing, without skipping whatever the user does next.
+    lastSyncedRef.current = JSON.stringify(buildWorkspacePayload({
+      projects: state.projects ?? [],
+      tasksByProject: grouped,
+      system: { calendars: state.calendars ?? [], exceptions: state.exceptions ?? [], defaultCalendarId: state.calendars?.find((calendar) => calendar.isDefault)?.id ?? "" },
+      resources: state.resources ?? [],
+      assignments: state.assignments ?? [],
+      planVersions: versions,
+      baselines: state.baselines ?? [],
+      baselineTasks: state.baselineTasks ?? [],
+    }));
+  }, [isAuthenticated, remoteState, initializeWorkspace, buildWorkspacePayload]);
 
   /**
    * Company-based access. The server creates exactly one company for the
@@ -502,36 +570,28 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!isAuthenticated || !hydratedRef.current) return;
-    if (suppressSaveRef.current) { suppressSaveRef.current = false; return; }
-    const state = {
-      projects,
-      tasks: Object.entries(tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
-      dependencies: Object.entries(tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
-      calendars: system.calendars,
-      exceptions: system.exceptions,
-      resources,
-      assignments,
-      planVersions,
-      baselines,
-      baselineTasks,
-    };
-    // Every relation that survives has to belong to this company. A link row
-    // whose target is gone can never be read, so it is dropped here rather than
-    // stored: the only other rows that exist belong to other companies, and a
-    // relation naming one of those is exactly what must never be written. The
-    // server refuses a payload that fails this, so the two agree.
-    const repaired = normalizeWorkspaceRelations(state);
-    if (repaired.dropped.length) {
-      console.info("[vintage-gantt] dropped relations that are not part of this company:", repaired.dropped);
-    }
-    const payload = repaired.rows;
-    void replaceRemoteState({ state: payload }).then(() => { lastServerStateRef.current = payload; }).catch((error: unknown) => {
+    // One run is skipped while a refused write is rolled back, so the rollback
+    // itself is not sent back to the server.
+    if (restoringRef.current) { restoringRef.current = false; return; }
+    const payload = buildWorkspacePayload({ projects, tasksByProject, system, resources, assignments, planVersions, baselines, baselineTasks });
+    const serialised = JSON.stringify(payload);
+    // Nothing to write when the workspace is already what the database holds.
+    // Only an identical payload is skipped — never a change the user made.
+    if (serialised === lastSyncedRef.current) return;
+    void replaceRemoteState({ state: payload }).then(() => {
+      lastSyncedRef.current = serialised;
+      lastServerStateRef.current = payload;
+    }).catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
       console.error("[vintage-gantt] could not persist planner state:", error);
       toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
-      const previous = lastServerStateRef.current as typeof state | null;
+      const previous = lastServerStateRef.current as {
+        projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[];
+        resources: ResourceRecord[]; assignments: TaskAssignment[]; planVersions?: PlanVersion[]; baselines?: Baseline[]; baselineTasks?: BaselineTask[];
+      } | null;
       if (!previous) return;
-      suppressSaveRef.current = true;
+      restoringRef.current = true;
+      lastSyncedRef.current = null;
       setProjects(previous.projects);
       setSystem({ calendars: previous.calendars, exceptions: previous.exceptions, defaultCalendarId: previous.calendars.find((calendar) => calendar.isDefault)?.id ?? "" });
       setResources(previous.resources);
@@ -543,7 +603,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       setBaselines(previous.baselines ?? []);
       setBaselineTasks(previous.baselineTasks ?? []);
     });
-  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState]);
+  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload]);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? projects.find((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? {
       id: "",
@@ -839,26 +899,111 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setProjects((current) => current.map((project) => project.id === projectId ? { ...project, status: "active", updatedAt: new Date().toISOString() } : project));
   }, [projects]);
 
-  const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>((projectId) => {
+  /**
+   * Permanently deletes a project. The database is written first and the answer is
+   * awaited: the project is removed from the screen only when the server
+   * confirmed it, and every refusal keeps it visible with an English reason. The
+   * same request removes its tasks, dependencies, assignments, plan versions and
+   * baselines server-side, so no orphaned row is left counting towards capacity.
+   */
+  const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>(async (projectId) => {
     const taskCount = (tasksByProject[projectId] ?? []).length;
     const project = projects.find((item) => item.id === projectId);
-    if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "project") return { ok: false, taskCount };
+    if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "project") {
+      return { ok: false, taskCount, message: "That project is no longer in this workspace." };
+    }
     const regularProjects = projects.filter((item) => (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
-    if (regularProjects.length <= 1) return { ok: false, taskCount };
-    setProjects((current) => current.filter((project) => project.id !== projectId));
-    setTasksByProject((current) => { const next = { ...current }; delete next[projectId]; return next; });
+    if (regularProjects.length <= 1) return { ok: false, taskCount, message: "You must keep at least one project." };
+    try {
+      await deleteProjectRemote({ projectId });
+    } catch (error: unknown) {
+      return { ok: false, taskCount, message: error instanceof Error ? error.message : "The project could not be deleted." };
+    }
+    // Confirmed deleted: the screen now drops exactly what the database dropped.
     const taskIds = new Set((tasksByProject[projectId] ?? []).map((task) => task.id));
-    setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
-    // The project takes everything that belongs to it along — its plan versions,
-    // its baselines and their snapshots — so nothing is left pointing at a
-    // project that no longer exists.
     const removedBaselines = new Set(baselines.filter((baseline) => baseline.projectId === projectId).map((baseline) => baseline.id));
-    setPlanVersions((current) => current.filter((version) => version.projectId !== projectId));
-    setBaselines((current) => current.filter((baseline) => baseline.projectId !== projectId));
-    setBaselineTasks((current) => current.filter((row) => !removedBaselines.has(row.baselineId)));
+    const nextProjects = projects.filter((item) => item.id !== projectId);
+    const nextTasksByProject = { ...tasksByProject };
+    delete nextTasksByProject[projectId];
+    const nextAssignments = assignments.filter((assignment) => !taskIds.has(assignment.taskId));
+    const nextPlanVersions = planVersions.filter((version) => version.projectId !== projectId);
+    const nextBaselines = baselines.filter((baseline) => baseline.projectId !== projectId);
+    const nextBaselineTasks = baselineTasks.filter((row) => !removedBaselines.has(row.baselineId));
+    // What the screen is about to show is already stored, so it is recorded as
+    // synced instead of being written a second time.
+    lastSyncedRef.current = JSON.stringify(buildWorkspacePayload({
+      projects: nextProjects,
+      tasksByProject: nextTasksByProject,
+      system,
+      resources,
+      assignments: nextAssignments,
+      planVersions: nextPlanVersions,
+      baselines: nextBaselines,
+      baselineTasks: nextBaselineTasks,
+    }));
+    setProjects(nextProjects);
+    setTasksByProject(nextTasksByProject);
+    setAssignments(nextAssignments);
+    setPlanVersions(nextPlanVersions);
+    setBaselines(nextBaselines);
+    setBaselineTasks(nextBaselineTasks);
     if (activeProjectId === projectId) setActiveProjectId(regularProjects.find((item) => item.id !== projectId && item.status === "active")?.id ?? regularProjects.find((item) => item.id !== projectId)?.id ?? "");
     return { ok: true, taskCount };
-  }, [activeProjectId, baselines, projects, tasksByProject]);
+  }, [activeProjectId, assignments, baselineTasks, baselines, buildWorkspacePayload, deleteProjectRemote, planVersions, projects, resources, system, tasksByProject]);
+
+  /**
+   * Deletes tasks (with their subtree) from one project. The database goes first
+   * and the answer is awaited, so the caller can leave its plan untouched when the
+   * delete is refused. The assignments those tasks owned are dropped here as well;
+   * the caller owns the task list and its recalculation.
+   */
+  const deleteTasks = useCallback<CalendarStoreValue["deleteTasks"]>(async (projectId, taskIds) => {
+    if (!taskIds.length) return { ok: true, removedTaskIds: [] };
+    let removedTaskIds = taskIds;
+    try {
+      const result = (await deleteTasksRemote({ projectId, taskIds })) as { taskIds?: string[] } | null;
+      if (result?.taskIds?.length) removedTaskIds = result.taskIds;
+    } catch (error: unknown) {
+      return { ok: false, removedTaskIds: [], message: error instanceof Error ? error.message : "The task could not be deleted." };
+    }
+    const doomed = new Set(removedTaskIds);
+    const nextAssignments = assignments.filter((assignment) => !doomed.has(assignment.taskId));
+    setAssignments(nextAssignments);
+    return { ok: true, removedTaskIds };
+  }, [assignments, deleteTasksRemote]);
+
+  /**
+   * Deletes one employee with everything that only existed for them: their
+   * assignments, their person calendar and that calendar's leave rows. Awaited,
+   * so the directory and the capacity figures change only after the database
+   * confirmed the delete.
+   */
+  const deleteResource = useCallback<CalendarStoreValue["deleteResource"]>(async (id) => {
+    try {
+      await deleteResourceRemote({ resourceId: id });
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : "The employee could not be deleted." };
+    }
+    const resource = resources.find((item) => item.id === id);
+    const nextResources = resources.filter((item) => item.id !== id);
+    const nextAssignments = assignments.filter((assignment) => assignment.resourceId !== id);
+    // Only the employee's own calendar follows them: the shared base calendar and
+    // a calendar another project or employee still uses must stay.
+    const own = resource ? system.calendars.find((calendar) => calendar.id === resource.calendarId) : undefined;
+    const sharedWithProject = resource ? projects.some((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project" && project.calendarId === resource.calendarId) : false;
+    const sharedWithEmployee = resource ? resources.some((item) => item.id !== id && item.calendarId === resource.calendarId) : false;
+    const dropCalendar = Boolean(own && !own.isDefault && !sharedWithProject && !sharedWithEmployee);
+    const nextSystem = resource && dropCalendar
+      ? { ...system, calendars: system.calendars.filter((calendar) => calendar.id !== resource.calendarId), exceptions: system.exceptions.filter((exception) => exception.calendarId !== resource.calendarId) }
+      : system;
+    lastSyncedRef.current = JSON.stringify(buildWorkspacePayload({
+      projects, tasksByProject, system: nextSystem, resources: nextResources, assignments: nextAssignments, planVersions, baselines, baselineTasks,
+    }));
+    setResources(nextResources);
+    setAssignments(nextAssignments);
+    if (resource) setSystem(nextSystem);
+    return { ok: true };
+  }, [assignments, baselineTasks, baselines, buildWorkspacePayload, deleteResourceRemote, planVersions, projects, resources, system, tasksByProject]);
 
   const addResourceLeave = useCallback<CalendarStoreValue["addResourceLeave"]>((resourceId, input) => {
     const resource = resources.find((item) => item.id === resourceId);
@@ -1019,8 +1164,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  /**
+   * Deletes one calendar with its exception rows. The server repeats every guard
+   * below and is awaited before anything leaves the screen, so a refusal — the
+   * base calendar, a calendar a project or an employee still uses, one another
+   * calendar inherits from — keeps the calendar in place with a clear reason.
+   */
   const deleteCalendar = useCallback<CalendarStoreValue["deleteCalendar"]>(
-    (id) => {
+    async (id) => {
       const calendar = system.calendars.find((item) => item.id === id);
       if (!calendar) return { ok: false, message: "Calendar not found." };
       if (calendar.isDefault) {
@@ -1035,6 +1186,15 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
             .join(", ")}). Re-link them first.`,
         };
       }
+      const staffed = resources.filter((resource) => resource.calendarId === id);
+      if (staffed.length) {
+        return {
+          ok: false,
+          message: `${staffed.length} employee${staffed.length === 1 ? "" : "s"} still use this calendar (${staffed
+            .map((resource) => resource.name)
+            .join(", ")}). Delete those employees or move them to another calendar first.`,
+        };
+      }
       const children = system.calendars.filter((item) => item.parentCalendarId === id);
       if (children.length) {
         return {
@@ -1044,14 +1204,23 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
             .join(", ")}). Delete or re-parent them first.`,
         };
       }
-      setSystem((current) => ({
-        ...current,
-        calendars: current.calendars.filter((item) => item.id !== id),
-        exceptions: current.exceptions.filter((exception) => exception.calendarId !== id),
+      try {
+        await deleteCalendarRemote({ calendarId: id });
+      } catch (error: unknown) {
+        return { ok: false, message: error instanceof Error ? error.message : "The calendar could not be deleted." };
+      }
+      const nextSystem = {
+        ...system,
+        calendars: system.calendars.filter((item) => item.id !== id),
+        exceptions: system.exceptions.filter((exception) => exception.calendarId !== id),
+      };
+      lastSyncedRef.current = JSON.stringify(buildWorkspacePayload({
+        projects, tasksByProject, system: nextSystem, resources, assignments, planVersions, baselines, baselineTasks,
       }));
+      setSystem(nextSystem);
       return { ok: true };
     },
-    [projects, system],
+    [assignments, baselineTasks, baselines, buildWorkspacePayload, deleteCalendarRemote, planVersions, projects, resources, system, tasksByProject],
   );
 
   /**
@@ -1073,11 +1242,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setFocusTask(null);
     hydratedRef.current = false;
     migrationStartedRef.current = false;
-    seedStartedRef.current = false;
     companyStartedRef.current = false;
     removalSignOutRef.current = false;
-    suppressSaveRef.current = false;
+    restoringRef.current = false;
     lastServerStateRef.current = null;
+    lastSyncedRef.current = null;
   }, []);
 
   /**
@@ -1185,6 +1354,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       archiveProject,
       restoreProject,
       deleteProject,
+      deleteTasks,
       calendarsUsingProjects,
       projectsAffectedBy,
       previewCalendarChange,
@@ -1199,6 +1369,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       updateResource,
       updateResourceSchedule,
       createResource,
+      deleteResource,
       setTaskAssignments,
       addResourceLeave,
       removeResourceLeave,
@@ -1231,10 +1402,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       transferCompanyAdmin,
     }),
     [
-      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, calendarsUsingProjects,
+      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, deleteTasks, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
-      updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
+      updateResource, updateResourceSchedule, createResource, deleteResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
       planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode, setProjectClient, openTask, focusTask, clearFocusTask,
       company, companyRole, setCompanyMemberRole, accessRemoved, pendingInvitations,
       inviteCompanyMember, resendCompanyInvitation, revokeCompanyInvitation, removeCompanyMember, transferCompanyAdmin,

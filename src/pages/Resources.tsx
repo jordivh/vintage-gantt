@@ -23,7 +23,7 @@ const scheduleLabel = (days: Weekday[]) => {
 const formatHours = (hours: number) => `${Math.round(hours * 100) / 100}h`;
 
 export default function Resources() {
-  const { resources, system, createResource, updateResource, updateResourceSchedule, addResourceLeave, removeResourceLeave } = useCalendarStore();
+  const { resources, system, createResource, updateResource, updateResourceSchedule, addResourceLeave, removeResourceLeave, deleteResource } = useCalendarStore();
   const [selectedId, setSelectedId] = useState(resources[0]?.id ?? "");
   const [tab, setTab] = useState<"details" | "schedule" | "leave">("details");
   const [year, setYear] = useState(() => new Date().getFullYear());
@@ -53,6 +53,21 @@ export default function Resources() {
     toast.success("Employee added");
   };
 
+  // Permanently removing an employee is written to the database first and awaited:
+  // the directory (and the capacity figures) change only after the delete is
+  // confirmed, and a refusal keeps the employee with a clear reason.
+  const removeEmployee = async () => {
+    if (!selected) return;
+    const name = selected.name;
+    const result = await deleteResource(selected.id);
+    if (!result.ok) {
+      toast.error(result.message ?? "The employee could not be deleted.");
+      return;
+    }
+    setTab("details");
+    toast.success(`${name} deleted`);
+  };
+
   if (!selected) {
     return <div className="planner-shell"><AppBar activeKey="resources" /><EmptyState onAdd={addEmployee} /></div>;
   }
@@ -77,7 +92,7 @@ export default function Resources() {
           </section>
 
           <aside className="resource-detail card-surface">
-            <div className="detail-heading"><div className="detail-person"><span className="person-avatar" style={{ background: selected.colour }}>{selected.name.slice(0, 1).toUpperCase()}</span><div><div className="eyebrow">EMPLOYEE PROFILE</div><h3>{selected.name}</h3><span className="muted">{selected.role || "Role not set"}</span></div></div><button className="icon-button" onClick={() => updateResource(selected.id, { isActive: !selected.isActive })} title={selected.isActive ? "Deactivate" : "Activate"}>{selected.isActive ? <UserRound size={17} /> : <Check size={17} />}</button></div>
+            <div className="detail-heading"><div className="detail-person"><span className="person-avatar" style={{ background: selected.colour }}>{selected.name.slice(0, 1).toUpperCase()}</span><div><div className="eyebrow">EMPLOYEE PROFILE</div><h3>{selected.name}</h3><span className="muted">{selected.role || "Role not set"}</span></div></div><div className="detail-heading-actions"><button className="icon-button" onClick={() => updateResource(selected.id, { isActive: !selected.isActive })} title={selected.isActive ? "Deactivate" : "Activate"}>{selected.isActive ? <UserRound size={17} /> : <Check size={17} />}</button><button className="icon-button danger" onClick={removeEmployee} title="Delete employee" aria-label="Delete employee"><Trash2 size={17} /></button></div></div>
             <div className="detail-tabs">{(["details", "schedule", "leave"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "details" ? "Details" : value === "schedule" ? "Work schedule" : "Leave"}</button>)}</div>
             {tab === "details" && <Details resource={selected} onUpdate={(patch) => updateResource(selected.id, patch)} />}
             {tab === "schedule" && <Schedule days={workingDays} hoursPerWeek={selected.hoursPerWeek} onChange={(days) => updateResourceSchedule(selected.id, days)} />}

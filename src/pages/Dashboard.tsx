@@ -158,6 +158,7 @@ export default function Dashboard() {
     resources,
     assignments,
     setTaskAssignments,
+    deleteTasks,
     resourceLeave,
     planVersions,
     activeVersionId,
@@ -791,9 +792,21 @@ export default function Dashboard() {
     setTasks((items) => items.filter((item) => item.id !== id));
   };
 
-  const deleteSelected = () => {
+  // Deleting goes to the database first and the answer is awaited. Only a
+  // confirmed delete changes the plan here; a refusal keeps every row and says
+  // what went wrong, so a task can never look deleted while the server keeps it.
+  const deleteSelected = async () => {
     if (!selected.length) return;
-    commit(tasks.filter((task) => !selected.includes(task.id) && !selected.includes(task.parentId ?? "")));
+    const wanted = tasks.filter((task) => selected.includes(task.id) || selected.includes(task.parentId ?? "")).map((task) => task.id);
+    const result = await deleteTasks(activeProjectId, wanted);
+    if (!result.ok) {
+      toast.error(result.message ?? "The task could not be deleted.");
+      return;
+    }
+    // Exactly what the database removed leaves the plan — including the whole
+    // subtree of a removed parent, so nothing is left pointing at a gone task.
+    const removed = new Set(result.removedTaskIds);
+    commit(tasks.filter((task) => !removed.has(task.id)));
     setSelected([]);
   };
 
