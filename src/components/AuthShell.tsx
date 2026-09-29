@@ -13,6 +13,14 @@ type AuthShellProps = {
   children: ReactNode;
   /** Optional secondary links under the form. */
   footer?: ReactNode;
+  /**
+   * Keep the screen visible for a visitor who already has a session.
+   *
+   * Off for every sign-in surface, where a session means the visitor is done and
+   * belongs in their environment. On for an invitation link: that link is its own
+   * instruction, and an active session must be shown and handled, never skipped.
+   */
+  allowAuthenticated?: boolean;
 };
 
 /**
@@ -22,13 +30,14 @@ type AuthShellProps = {
  * reset their password, or because they arrived with one — this opens their
  * company environment instead.
  */
-export function AuthShell({ eyebrow, title, description, redirect, wide, children, footer }: AuthShellProps) {
+export function AuthShell({ eyebrow, title, description, redirect, wide, children, footer, allowAuthenticated }: AuthShellProps) {
   const { isLoading, isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (allowAuthenticated) return;
     if (!isLoading && isAuthenticated) navigate(redirect, { replace: true });
-  }, [isLoading, isAuthenticated, navigate, redirect]);
+  }, [allowAuthenticated, isLoading, isAuthenticated, navigate, redirect]);
 
   return (
     <main className="auth-screen">

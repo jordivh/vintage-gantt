@@ -41,6 +41,7 @@ import {
   invitationDecision,
   invitationExpiry,
   invitationState,
+  invitationStateMessage,
   inviteDecision,
   normalizeEmail,
   removeMemberDecision,
@@ -49,6 +50,7 @@ import {
   type InvitationErrorCode,
   type InvitationState,
 } from "../lib/company-users";
+import { invitationEmail } from "../lib/invitation-email";
 import { companyRoleValidator } from "./schema";
 
 /**
@@ -643,6 +645,18 @@ const membershipContext = (
 const invitationError = (code: InvitationErrorCode) => new ConvexError({ code });
 
 /**
+ * The invitation a link's value names, or null. Only the hash is ever compared:
+ * the raw value exists in the email and nowhere on the server. The token is
+ * bound to one address and one company, so it can never authenticate an account.
+ */
+const invitationByToken = async (ctx: QueryCtx | MutationCtx, rawToken: string) => {
+  const token = rawToken.trim();
+  if (!token) return null;
+  const tokenHash = await hashInvitationToken(token);
+  return await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("tokenHash", tokenHash)).unique();
+};
+
+/**
  * Creates an invitation for the signed-in admin's company. Any earlier pending
  * invitation for the same address is revoked first, so an address has at most
  * one working link — which is also what makes a resend safe. Only the hash of
@@ -718,6 +732,44 @@ export const revokeInvitation = mutation({
       await ctx.db.patch(invitation._id, { status: INVITATION_REVOKED, revokedAt: new Date().toISOString() });
     }
     return { ok: true };
+  },
+});
+
+/** Every state a link can be in that is not a working invitation. */
+export type InvitationPreviewFailedState = Exclude<InvitationState, "pending"> | "invalid";
+
+/**
+ * What an invitation link reports about itself. Only a live link names anything —
+ * the invited address and the inviting company — so the accept screen can say who
+ * is signed in and for whom the invitation is. Every other state is one neutral
+ * sentence and nothing else.
+ */
+export type InvitationPreview =
+  | { state: "pending"; email: string; companyName: string; message: string }
+  | { state: InvitationPreviewFailedState; email: null; companyName: null; message: string };
+
+/**
+ * What an invitation link says about itself, before anything happens.
+ *
+ * Public and session-free on purpose: it never signs anybody in and never reads
+ * or writes an account. A live link reports the address it was sent to and the
+ * inviting company, so the accept screen can name both; an unknown, expired,
+ * revoked or already-used link reports only its state, so a stale link can never
+ * be used to discover a company or an address.
+ */
+export const invitationPreview = query({
+  args: { token: v.string() },
+  handler: async (ctx, args): Promise<InvitationPreview> => {
+    const invitation = await invitationByToken(ctx, args.token);
+    const state = invitationState(invitation, Date.now());
+    if (invitation && state === "pending") {
+      const company = await ctx.db.get(invitation.companyId);
+      return { state: "pending", email: invitation.email, companyName: company?.name ?? "", message: "" };
+    }
+    // Nothing but the state: a stale link never names a company or an address.
+    const failed: InvitationPreviewFailedState =
+      state === "pending" || state === null ? "invalid" : state;
+    return { state: failed, email: null, companyName: null, message: invitationStateMessage(failed) };
   },
 });
 
@@ -816,17 +868,6 @@ export const invitationForDelivery = internalQuery({
   },
 });
 
-const invitationEmailHtml = (input: { link: string; companyName: string; inviterName: string; expiry: string }) => {
-  const company = input.companyName || "a company";
-  const invitation = input.inviterName ? `${input.inviterName} invited you` : "You have been invited";
-  const until = input.expiry ? input.expiry.slice(0, 10) : "";
-  return [
-    `<p>${invitation} to join <strong>${company}</strong> on Vintage GANTT.</p>`,
-    `<p><a href="${input.link}">Accept the invitation</a></p>`,
-    `<p>This link works once${until ? ` and expires on ${until}` : ""}.</p>`,
-  ].join("");
-};
-
 /**
  * Sends (or resends) the email for an invitation. An action because sending mail
  * is network I/O. It only ever mails the address stored on a pending invitation
@@ -847,10 +888,20 @@ export const sendInvitationEmail = action({
     const link = args.link && args.link.startsWith("http") ? args.link : invitationAcceptHref(args.token);
     // The recipient is always the address stored on the invitation, never one
     // supplied by the caller, and the link is never returned or logged.
+    //
+    // The purpose-built invitation message: names the company and the inviter,
+    // one call-to-action button with the link as a normal href, and the expiry
+    // and single-use rule stated in English. Never a sign-in or code template.
+    const message = invitationEmail({
+      link,
+      companyName: target.companyName,
+      inviterName: target.inviterName,
+      expiresAt: target.expiresAt,
+    });
     const sent = await sendTransactionalEmail({
       to: target.email,
-      subject: `Join ${target.companyName || "Vintage GANTT"} on Vintage GANTT`,
-      html: invitationEmailHtml({ link, companyName: target.companyName, inviterName: target.inviterName, expiry: target.expiresAt }),
+      subject: message.subject,
+      html: message.html,
     });
     return { ok: true, email: target.email, provider: sent.provider };
   },
@@ -861,16 +912,13 @@ export const sendInvitationEmail = action({
  * becomes a regular user of the inviting company. A used, expired, revoked or
  * unknown link fails with one generic code and never creates an account. The
  * account and the company link are written in this one transaction, so an
- * acceptance either completes or changes nothing.
+ * acceptance either completes or changes nothing. The link is the only proof
+ * accepted here, and it is bound to the invited address and one company.
  */
 export const acceptInvitation = mutation({
   args: { token: v.string(), name: v.string(), password: v.string() },
   handler: async (ctx, args) => {
-    const token = args.token.trim();
-    const tokenHash = token ? await hashInvitationToken(token) : "";
-    const invitation = tokenHash
-      ? await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("tokenHash", tokenHash)).unique()
-      : null;
+    const invitation = await invitationByToken(ctx, args.token);
     const decision = invitationDecision(invitation, Date.now());
     if (!decision.ok || !invitation) throw invitationError(decision.code ?? "invalid");
 
@@ -880,15 +928,14 @@ export const acceptInvitation = mutation({
 
     const email = normalizeEmail(invitation.email);
     // If the address gained an account since the invitation was sent, refuse and
-    // burn the link rather than touching that existing account.
+    // write nothing: a thrown error rolls this transaction back, so the existing
+    // account is left exactly as it is and the link stays refused for as long as
+    // that account exists. It never signs anybody in.
     const credential = await ctx.db
       .query("authAccounts")
       .withIndex("providerAndAccountId", (q) => q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email))
       .unique();
-    if (credential || (await findAccountByEmail(ctx, email))) {
-      await ctx.db.patch(invitation._id, { status: INVITATION_REVOKED, revokedAt: new Date().toISOString() });
-      throw invitationError("taken");
-    }
+    if (credential || (await findAccountByEmail(ctx, email))) throw invitationError("taken");
 
     const created = await createAccount<DataModel>(ctx as unknown as GenericActionCtx<DataModel>, {
       provider: PASSWORD_PROVIDER_ID,
@@ -903,5 +950,39 @@ export const acceptInvitation = mutation({
       acceptedByUserId: userId,
     });
     return { ok: true, email };
+  },
+});
+
+/**
+ * Settles an invitation that is opened while the account already signed in
+ * carries the invited address.
+ *
+ * The link is bound to one address and one company, so this only ever marks the
+ * invitation as accepted for that same address — it never creates a second
+ * account, and it refuses when the signed-in address is anybody else. The screen
+ * never calls it for a different address; it shows the session notice instead.
+ */
+export const handleInvitationForCurrentAccount = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await currentAccount(ctx);
+    if (!user || user.removedAt) throw invitationError("invalid");
+
+    const invitation = await invitationByToken(ctx, args.token);
+    const decision = invitationDecision(invitation, Date.now());
+    if (!decision.ok || !invitation) throw invitationError(decision.code ?? "invalid");
+
+    const email = normalizeEmail(user.email ?? "");
+    // Only the address the link was sent to may settle it. An anonymous session
+    // has no address and can never match.
+    if (!email || email !== normalizeEmail(invitation.email)) throw invitationError("invalid");
+
+    await ctx.db.patch(invitation._id, {
+      status: INVITATION_ACCEPTED,
+      acceptedAt: new Date().toISOString(),
+      acceptedByUserId: user._id,
+    });
+    const alreadyMember = (user.companyId as string | undefined) === (invitation.companyId as string);
+    return { ok: true, email, alreadyMember };
   },
 });

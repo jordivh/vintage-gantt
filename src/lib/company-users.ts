@@ -36,14 +36,20 @@ export const INVITATION_SENT_NOTICE = "Invitation created. We sent an email with
 
 /* ------------------------------------------------------------ invitations */
 
-export const INVITATION_STATUSES = ["pending", "accepted", "revoked"] as const;
+/**
+ * What a stored invitation row can say. `expired` is also derived from the
+ * expiry date, so a row is never wrong while a reader looks at it; it is written
+ * when the fact is observed, so the record ends up telling the truth itself.
+ */
+export const INVITATION_STATUSES = ["pending", "accepted", "revoked", "expired"] as const;
 export type InvitationStatus = (typeof INVITATION_STATUSES)[number];
 
 export const INVITATION_PENDING: InvitationStatus = "pending";
 export const INVITATION_ACCEPTED: InvitationStatus = "accepted";
 export const INVITATION_REVOKED: InvitationStatus = "revoked";
+export const INVITATION_EXPIRED: InvitationStatus = "expired";
 
-/** The stored status plus the one that is derived from the expiry date. */
+/** Every state an invitation can be in, stored or derived. */
 export const INVITATION_STATES = ["pending", "accepted", "revoked", "expired"] as const;
 export type InvitationState = (typeof INVITATION_STATES)[number];
 
@@ -87,6 +93,7 @@ export function invitationState(record: InvitationLike | null | undefined, nowMs
   if (!isInvitationStatus(status)) return null;
   if (status === INVITATION_ACCEPTED) return "accepted";
   if (status === INVITATION_REVOKED) return "revoked";
+  if (status === INVITATION_EXPIRED) return "expired";
   const expiresAt = typeof record?.expiresAt === "string" ? record.expiresAt : "";
   const expiry = Date.parse(expiresAt);
   if (!expiresAt || Number.isNaN(expiry) || expiry <= nowMs) return "expired";
@@ -150,6 +157,62 @@ export function invitationErrorMessage(error: unknown): string {
 export function invitationAcceptHref(token: string, origin = ""): string {
   const base = origin && origin !== "null" ? origin.replace(/\/+$/, "") : "";
   return `${base}${INVITATION_ACCEPT_PATH}?token=${encodeURIComponent(token)}`;
+}
+
+/** The neutral sentence for a link that cannot be accepted, from its state. */
+export function invitationStateMessage(state: InvitationState | "invalid" | null | undefined): string {
+  if (state === "expired") return INVITATION_ERROR_MESSAGES.expired;
+  if (state === "revoked") return INVITATION_ERROR_MESSAGES.revoked;
+  // An accepted invitation is exactly an already-used link.
+  if (state === "accepted") return INVITATION_ERROR_MESSAGES.used;
+  return INVITATION_ERROR_MESSAGES.invalid;
+}
+
+/* -------------------------------------------- an invitation and a session */
+
+/**
+ * The two things a visitor may do when an invitation link is opened while another
+ * session is active. Nothing happens on its own: the notice says who is signed in
+ * and for whom the invitation is, and the visitor chooses.
+ */
+export const INVITATION_SIGN_OUT_AND_ACCEPT = "Sign out and accept invitation";
+export const INVITATION_CANCEL = "Cancel";
+
+export const INVITATION_SESSION_HEADING = "An account is already signed in";
+export const INVITATION_SAME_ADDRESS_HEADING = "This invitation is for the account you are signed in with";
+
+export interface InvitationSessionNotice {
+  /** The email of the account that is signed in now. */
+  currentEmail: string;
+  /** Its display name, when it has one. */
+  currentName?: string;
+  /** The address the invitation was sent to — the only address it can create. */
+  invitedEmail: string;
+  companyName: string;
+}
+
+/** The notice shown when somebody else is signed in: who, for whom, and the choice. */
+export function invitationSessionNotice(input: InvitationSessionNotice): string {
+  const signedIn = input.currentName ? `${input.currentEmail} (${input.currentName})` : input.currentEmail;
+  const company = input.companyName || "this company";
+  return `You are signed in as ${signedIn}. This invitation is for ${input.invitedEmail} to join ${company}. Choose "${INVITATION_SIGN_OUT_AND_ACCEPT}" to sign out first and create that account, or "${INVITATION_CANCEL}" to stay signed in. Nothing changes until you choose.`;
+}
+
+/** The same notice when the active session belongs to nobody in particular. */
+export function invitationAnonymousSessionNotice(companyName: string, invitedEmail: string): string {
+  return `This browser has a temporary session that is not linked to an email address. This invitation is for ${invitedEmail} to join ${companyName || "this company"}. Choose "${INVITATION_SIGN_OUT_AND_ACCEPT}" to clear it first and create that account, or "${INVITATION_CANCEL}" to stay as you are.`;
+}
+
+/**
+ * What is said when the signed-in account already carries the invited address.
+ * The invitation is settled as handled and no second account is ever created.
+ */
+export function invitationHandledNotice(input: { email: string; companyName: string; alreadyMember: boolean }): string {
+  const company = input.companyName || "the company that invited you";
+  const base = `You are signed in as ${input.email}, the address this invitation was sent to, so it has been marked as accepted. No second account was created.`;
+  return input.alreadyMember
+    ? `You are already a member of ${company}. ${base}`
+    : `${base} If you cannot see ${company} yet, ask its company admin to add your account.`;
 }
 
 /* --------------------------------------------------------- access decisions */

@@ -80,7 +80,9 @@ const schema = defineSchema(
       companyId: v.id("companies"),
       email: v.string(),
       tokenHash: v.string(),
-      status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked")),
+      // `expired` is also derived from `expiresAt` when the row is read, so a
+      // link can never be accepted because a status write was missed.
+      status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked"), v.literal("expired")),
       invitedByUserId: v.id("users"),
       createdAt: v.string(),
       expiresAt: v.string(),
