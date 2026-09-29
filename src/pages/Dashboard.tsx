@@ -196,6 +196,9 @@ export default function Dashboard() {
   const [editing, setEditing] = useState<{ id: string; field: ColumnKey } | null>(null);
   const [resourceEditor, setResourceEditor] = useState<{ taskId: string; query: string } | null>(null);
   const [draft, setDraft] = useState("");
+  // The id of a freshly inserted row that is still waiting for its name. Only while
+  // it is set does the name field show "New task" as a placeholder instead of a value.
+  const [namingTaskId, setNamingTaskId] = useState<string | null>(null);
   const [zoom, setZoom] = useState<"day" | "week" | "month" | "quarter">("week");
   const [split, setSplit] = useState(58);
   const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
@@ -569,7 +572,9 @@ export default function Dashboard() {
     return true;
   };
 
-  const updateTask = (id: string, field: ColumnKey, value: string) => {
+  /** Applies one cell edit and returns the task list it committed, so callers can
+   *  chain another change (a new row) onto the result instead of onto stale state. */
+  const updateTask = (id: string, field: ColumnKey, value: string): Task[] | undefined => {
     // A field owned by the other mode never changes here, even if some event
     // slips through the readonly cells.
     if (fieldModeReadOnly(field, activeMode)) { setEditing(null); return; }
@@ -661,6 +666,8 @@ export default function Dashboard() {
       if (field === "name") return { ...task, name: value.trim() || task.name };
       return { ...task, [field]: value };
     });
+    // The name is settled now, so the field stops showing the "New task" placeholder.
+    if (field === "name" && id === namingTaskId) setNamingTaskId(null);
     // Start and finish of a task with predecessors are derived from the network, so
     // a date that breaks a dependency is refused rather than silently corrected.
     if (field === "start" || field === "finish") {
@@ -674,8 +681,9 @@ export default function Dashboard() {
         return;
       }
     }
-    commit(next);
+    const accepted = commit(next);
     setEditing(null);
+    return accepted ? next : undefined;
   };
 
   /**
@@ -703,17 +711,33 @@ export default function Dashboard() {
     setFuture((items) => items.slice(1));
   };
 
-  const addTask = (parentId: string | null = null, afterId?: string) => {
-    const id = String(Date.now());
-    const task: Task = {
+  /** A free task id: two rows created in the same millisecond must still differ. */
+  const nextTaskId = (items: Task[] = tasks) => {
+    let id = String(Date.now());
+    while (items.some((item) => item.id === id)) id = String(Number(id) + 1);
+    return id;
+  };
+
+  /**
+   * The start date a brand-new task gets: today on the project calendar, moved to
+   * the next working day when today is a weekend, holiday or closure. Dependencies
+   * and the surrounding network still win — `commit` re-plans the row right after,
+   * exactly as it already does for every other new task.
+   */
+  const defaultTaskStart = () => ensureWorkingDay(isoDate(new Date()), calendarId, system);
+
+  /** A fresh row. Its name is only the fallback until the user confirms a name. */
+  const newTaskRow = (id: string, parentId: string | null): Task => {
+    const start = defaultTaskStart();
+    return {
       id,
       parentId,
       name: "New task",
       duration: 1,
       durationUnit: "days",
       work: 0,
-      start: "2025-05-02",
-      finish: "2025-05-02",
+      start,
+      finish: start,
       isMilestone: false,
       predecessors: "",
       resource: "",
@@ -721,11 +745,49 @@ export default function Dashboard() {
       notes: "",
       color: "sage",
     };
-    const index = afterId ? tasks.findIndex((item) => item.id === afterId) + 1 : tasks.length;
-    commit([...tasks.slice(0, index), task, ...tasks.slice(index)]);
+  };
+
+  /** Opens the name field of a fresh, empty row. */
+  const openNameEditor = (id: string) => {
     setSelected([id]);
     setEditing({ id, field: "name" });
-    setDraft(task.name);
+    setDraft("");
+    setNamingTaskId(id);
+  };
+
+  const addTask = (parentId: string | null = null, afterId?: string, base: Task[] = tasks) => {
+    const id = nextTaskId(base);
+    const index = afterId ? base.findIndex((item) => item.id === afterId) + 1 : base.length;
+    const next = [...base.slice(0, index), newTaskRow(id, parentId), ...base.slice(index)];
+    openNameEditor(id);
+    commit(next);
+  };
+
+  /**
+   * Confirms the pending row's typed name and opens the next empty row directly
+   * below it in ONE commit. Committing twice would rebuild the second change from
+   * the task list as it was before the first one, which is how a typed name used to
+   * be replaced by the "New task" placeholder again.
+   */
+  const confirmNewTaskName = (task: Task) => {
+    const renamed = tasks.map((item) => item.id === task.id ? { ...item, name: draft.trim() || item.name } : item);
+    const id = nextTaskId(renamed);
+    const index = renamed.findIndex((item) => item.id === task.id) + 1;
+    const next = [...renamed.slice(0, index), newTaskRow(id, task.parentId), ...renamed.slice(index)];
+    openNameEditor(id);
+    commit(next);
+  };
+
+  /** Escape on a row that was never named drops it again: nothing is saved, and the
+   *  undo step its insertion added is taken back with it. */
+  const cancelNewTask = () => {
+    const id = namingTaskId;
+    if (!id) return;
+    setNamingTaskId(null);
+    setEditing(null);
+    setSelected((items) => items.filter((item) => item !== id));
+    setHistory((items) => items.slice(0, -1));
+    setTasks((items) => items.filter((item) => item.id !== id));
   };
 
   const deleteSelected = () => {
@@ -806,31 +868,38 @@ export default function Dashboard() {
 
   const handleKey = (event: ReactKeyboardEvent, task: Task, field: ColumnKey) => {
     if (event.key === "Escape") {
-      setEditing(null);
+      // Escape on a row that was never named cancels the creation: nothing is saved.
+      if (task.id === namingTaskId) cancelNewTask();
+      else setEditing(null);
       setCellError(null);
       setMarginNotice(null);
       setAbsorptionNotice(null);
       return;
     }
-    if (event.key === "Enter" || event.key === "Tab") {
-      event.preventDefault();
-      updateTask(task.id, field, draft);
-      const columnIndex = columnDefs.findIndex((column) => column.key === field);
-      const nextColumn = event.shiftKey
-        ? columnDefs[Math.max(0, columnIndex - 1)]
-        : columnDefs[Math.min(columnDefs.length - 1, columnIndex + 1)];
-      if (event.key === "Enter") {
-        const rowIndex = visibleTasks.findIndex((item) => item.id === task.id);
-        const nextRow = visibleTasks[rowIndex + 1];
-        if (nextRow) {
-          setSelected([nextRow.id]);
-          setEditing({ id: nextRow.id, field });
-          setDraft(String((nextRow as unknown as Record<string, unknown>)[field] ?? ""));
-        } else addTask(task.parentId);
-      } else if (nextColumn) {
-        setEditing({ id: task.id, field: nextColumn.key });
-        setDraft(String((task as unknown as Record<string, unknown>)[nextColumn.key] ?? ""));
-      }
+    if (event.key !== "Enter" && event.key !== "Tab") return;
+    event.preventDefault();
+    // Enter while naming a fresh row saves exactly what was typed and opens the next
+    // empty row after it, so several tasks can be typed in sequence.
+    if (event.key === "Enter" && field === "name" && task.id === namingTaskId) {
+      confirmNewTaskName(task);
+      return;
+    }
+    const committed = updateTask(task.id, field, draft);
+    const columnIndex = columnDefs.findIndex((column) => column.key === field);
+    const nextColumn = event.shiftKey
+      ? columnDefs[Math.max(0, columnIndex - 1)]
+      : columnDefs[Math.min(columnDefs.length - 1, columnIndex + 1)];
+    if (event.key === "Enter") {
+      const rowIndex = visibleTasks.findIndex((item) => item.id === task.id);
+      const nextRow = visibleTasks[rowIndex + 1];
+      if (nextRow) {
+        setSelected([nextRow.id]);
+        setEditing({ id: nextRow.id, field });
+        setDraft(String((nextRow as unknown as Record<string, unknown>)[field] ?? ""));
+      } else addTask(task.parentId, undefined, committed ?? tasks);
+    } else if (nextColumn) {
+      setEditing({ id: task.id, field: nextColumn.key });
+      setDraft(String((task as unknown as Record<string, unknown>)[nextColumn.key] ?? ""));
     }
   };
 
@@ -1796,10 +1865,13 @@ export default function Dashboard() {
                               className="cell-input"
                               type={["start", "finish", "actualStart", "actualFinish"].includes(column.key) ? "date" : "text"}
                               value={draft}
+                              placeholder={isName && task.id === namingTaskId ? "New task" : undefined}
                               onChange={(event) => setDraft(event.target.value)}
-                              onFocus={(event) => { if (isName && (task.name === "New task" || task.name === "Nieuwe taak")) event.currentTarget.select(); }}
+                              onFocus={(event) => { if (isName && task.id !== namingTaskId && (task.name === "New task" || task.name === "Nieuwe taak")) event.currentTarget.select(); }}
                               onKeyDown={(event) => handleKey(event, task, column.key)}
-                              onBlur={() => updateTask(task.id, column.key, draft)}
+                              /* Only save when this cell is still the one being edited, so the blur
+                                 that follows Enter (or Escape) cannot commit a stale value. */
+                              onBlur={() => { if (editing?.id === task.id && editing.field === column.key) updateTask(task.id, column.key, draft); }}
                             />
                           ) : (
                             <span style={isName ? { paddingLeft: depth * 17 } : undefined} className={isName && summary ? "summary-name" : ""}>

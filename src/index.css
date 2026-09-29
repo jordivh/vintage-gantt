@@ -643,3 +643,6 @@
 .project-margin.warning { border-color: #dcc294; background: #f4e3c4; color: #7d5326; }
 .project-margin.exceeded { border-color: #cfa595; background: #eed9d2; color: #7d3f32; font-weight: 700; }
 .project-margin.none { padding-left: 0; border-color: transparent; background: transparent; color: #9b866b; }
+
+/* A fresh task row shows its fallback name as a real placeholder only. */
+.cell-input::placeholder { color: #a2917a; font-style: italic; }
