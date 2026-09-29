@@ -3,6 +3,7 @@ import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FileSpreadshe
 import { useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { useCalendarStore } from "@/lib/calendar-store";
+import { UNAVAILABLE_NOTICE, scopedRefStatus } from "@/lib/company-access";
 import { AppBar } from "@/components/AppBar";
 import {
   DISTRIBUTION_OPTIONS,
@@ -55,8 +56,17 @@ export default function Capacity() {
   const focusWeek = searchParams.get("week") ?? "";
   const [granularity, setGranularity] = useState<CapacityGranularity>("week");
   const [selectedId, setSelectedId] = useState("");
-  const [filterResource, setFilterResource] = useState(() => searchParams.get("resource") ?? "");
-  const [filterProject, setFilterProject] = useState(() => searchParams.get("project") ?? "");
+  // A deep link only ever carries an id of this company's own records. Anything
+  // else — a stranger's id, a record that has since been deleted — is dropped on
+  // arrival, so it cannot filter the screen and is never echoed back as a label.
+  const [filterResource, setFilterResource] = useState(() => {
+    const requested = searchParams.get("resource") ?? "";
+    return resources.some((resource) => resource.id === requested) ? requested : "";
+  });
+  const [filterProject, setFilterProject] = useState(() => {
+    const requested = searchParams.get("project") ?? "";
+    return projects.some((project) => project.id === requested && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ? requested : "";
+  });
   const [filterClient, setFilterClient] = useState("");
   const [exporting, setExporting] = useState(false);
 
@@ -142,10 +152,18 @@ export default function Capacity() {
   }, [focusWeek, selected?.resourceId, granularity]);
   const selectedAssignments = selected ? assignmentsByResource.get(selected.resourceId) ?? [] : [];
   const activeFilters = [
-    filterResource ? { label: `Resource: ${resources.find((resource) => resource.id === filterResource)?.name ?? filterResource}`, clear: () => setFilterResource("") } : null,
-    filterProject ? { label: `Project: ${selectableProjects.find((project) => project.id === filterProject)?.name ?? filterProject}`, clear: () => setFilterProject("") } : null,
+    filterResource && resources.some((resource) => resource.id === filterResource) ? { label: `Resource: ${resources.find((resource) => resource.id === filterResource)?.name ?? ""}`, clear: () => setFilterResource("") } : null,
+    filterProject && selectableProjects.some((project) => project.id === filterProject) ? { label: `Project: ${selectableProjects.find((project) => project.id === filterProject)?.name ?? ""}`, clear: () => setFilterProject("") } : null,
     filterClient ? { label: `Client: ${filterClient}`, clear: () => setFilterClient("") } : null,
   ].filter((value): value is { label: string; clear: () => void } => value !== null);
+
+  // A deep link may carry an id of another company. Resolution is against this
+  // company's own ids only, and an id that is not ours is answered with one
+  // generic sentence — never with the identifier it carried.
+  const deepLinkUnavailable = [
+    scopedRefStatus(searchParams.get("resource") ?? "", resources.map((resource) => resource.id)),
+    scopedRefStatus(searchParams.get("project") ?? "", projects.map((project) => project.id)),
+  ].includes("unavailable");
 
   /**
    * Downloads exactly what is on screen as a real .xlsx workbook: the same filtered
@@ -164,8 +182,8 @@ export default function Capacity() {
         periodsFor: (resourceId) => periodsByResource.get(resourceId) ?? [],
         clients: clientByProject,
         filters: {
-          resource: filterResource ? resources.find((resource) => resource.id === filterResource)?.name ?? filterResource : "",
-          project: filterProject ? selectableProjects.find((project) => project.id === filterProject)?.name ?? filterProject : "",
+          resource: filterResource ? resources.find((resource) => resource.id === filterResource)?.name ?? "" : "",
+          project: filterProject ? selectableProjects.find((project) => project.id === filterProject)?.name ?? "" : "",
           client: filterClient,
         },
       });
@@ -226,6 +244,8 @@ export default function Capacity() {
             </div>
           </div>
         </div>
+
+        {deepLinkUnavailable && <p className="scope-notice" role="status">{UNAVAILABLE_NOTICE}</p>}
 
         <section className="capacity-filters card-surface">
           <label>Resource

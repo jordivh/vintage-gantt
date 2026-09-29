@@ -1,6 +1,12 @@
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
+import {
+  describeReferences,
+  outsideCompanyReferences,
+  workspaceIsolationReport,
+  type WorkspaceRelationRows,
+} from "../lib/company-integrity";
 import { remapPredecessorText } from "../lib/planner-model";
 import { R3_CHRIS_LEAVE, R3_PROJECTS, R3_RESOURCES, R3_SEED_KEY } from "../lib/r3-fixture";
 import { companyTable, deleteCompanyRows, requireCompany, rowsByOwner, viewerScope } from "./companies";
@@ -525,12 +531,26 @@ export const replaceState = mutation({
     // discarded, so a browser can never write into (or hide data from) another
     // company.
     const { userId, companyId } = await requireCompany(ctx);
+    const state = args.state as WorkspaceRelationRows;
+    // Relations are the one place where a payload could name something the
+    // company does not own. The only rows that exist besides this company's own
+    // are other companies', so a relation that does not resolve inside the
+    // submitted workspace is refused outright — the save is rejected, not
+    // repaired, and the transaction leaves the stored workspace untouched.
+    const foreign = outsideCompanyReferences(state);
+    if (foreign.length) {
+      throw new Error(
+        `That workspace save refers to ${describeReferences(foreign).join("; ")}. Nothing was written.`,
+      );
+    }
     const tableNames = ["projects", "tasks", "dependencies", "calendars", "calendarExceptions", "resources", "taskAssignments", "planVersions", "baselines", "baselineTasks"] as const;
     for (const table of tableNames) await deleteCompanyRows(ctx, table, companyId);
-    const state = args.state as { projects?: any[]; tasks?: any[]; dependencies?: any[]; calendars?: any[]; exceptions?: any[]; resources?: any[]; assignments?: any[]; planVersions?: any[]; baselines?: any[]; baselineTasks?: any[] };
     const scope = { ownerId: userId, companyId };
     for (const item of state.projects ?? []) await ctx.db.insert("projects", { ...withoutScope(item), ...scope });
-    for (const [index, item] of (state.tasks ?? []).entries()) await ctx.db.insert("tasks", { ...withoutScope(item), ...scope, sortOrder: item.sortOrder ?? index });
+    for (const [index, item] of (state.tasks ?? []).entries()) {
+      const row = withoutScope(item);
+      await ctx.db.insert("tasks", { ...row, ...scope, sortOrder: row.sortOrder ?? index });
+    }
     for (const item of state.dependencies ?? []) await ctx.db.insert("dependencies", { ...withoutScope(item), ...scope });
     for (const item of state.calendars ?? []) await ctx.db.insert("calendars", { ...withoutScope(item), ...scope });
     for (const item of state.exceptions ?? []) await ctx.db.insert("calendarExceptions", { ...withoutScope(item), ...scope });
@@ -539,5 +559,53 @@ export const replaceState = mutation({
     for (const item of state.planVersions ?? []) await ctx.db.insert("planVersions", { ...withoutScope(item), ...scope });
     for (const item of state.baselines ?? []) await ctx.db.insert("baselines", { ...withoutScope(item), ...scope });
     for (const item of state.baselineTasks ?? []) await ctx.db.insert("baselineTasks", { ...withoutScope(item), ...scope });
+  },
+});
+
+/* -------------------------------------------------------- isolation audit */
+
+/** Every company-owned row of one company, keyed the way the relation rules read them. */
+const relationRowsOf = async (
+  ctx: QueryCtx | MutationCtx,
+  companyId: Id<"companies">,
+): Promise<WorkspaceRelationRows> => {
+  const [projects, tasks, dependencies, calendars, exceptions, resources, assignments, planVersions, baselines, baselineTasks] = await Promise.all([
+    ctx.db.query("projects").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("tasks").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("dependencies").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("calendars").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("calendarExceptions").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("resources").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("taskAssignments").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("planVersions").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("baselines").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+    ctx.db.query("baselineTasks").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).collect(),
+  ]);
+  return { projects, tasks, dependencies, calendars, exceptions, resources, assignments, planVersions, baselines, baselineTasks };
+};
+
+/**
+ * The automated company-isolation audit: for every company it reports how many
+ * records of each kind it holds and whether anything in it points outside it.
+ * `companiesWithForeignReferences` must stay 0 — a company that names another
+ * company's record in a relation is a cross-company leak, and this is the query
+ * that proves there is none. Internal on purpose: it reads every company, so
+ * only the CLI or the Convex dashboard may run it.
+ */
+export const isolationAudit = internalQuery({
+  args: { companyId: v.optional(v.id("companies")) },
+  handler: async (ctx, args) => {
+    const companies = args.companyId ? [await ctx.db.get(args.companyId)] : await ctx.db.query("companies").collect();
+    const reports = [];
+    for (const company of companies) {
+      if (!company) continue;
+      const rows = await relationRowsOf(ctx, company._id);
+      reports.push({ companyId: company._id as string, name: company.name, ...workspaceIsolationReport(rows) });
+    }
+    return {
+      companies: reports.length,
+      companiesWithForeignReferences: reports.filter((report) => report.outsideCompany.length > 0).length,
+      reports,
+    };
   },
 });

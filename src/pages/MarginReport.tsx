@@ -10,6 +10,7 @@ import {
   type MarginReportRow,
 } from "@/lib/margin-report";
 import type { PlanMode } from "@/lib/planner-model";
+import { UNAVAILABLE_NOTICE, scopedRefStatus } from "@/lib/company-access";
 import { AppBar } from "@/components/AppBar";
 
 /**
@@ -67,6 +68,9 @@ export default function MarginReport() {
   // The planner passes the baseline it is showing; otherwise the latest capture
   // on this version decides what "had float before" means.
   const requestedBaselineId = searchParams.get("baseline") ?? "";
+  // A copied link may name another company's baseline. It resolves against this
+  // company's own baseline ids only; anything else gets one generic sentence.
+  const baselineRefUnavailable = scopedRefStatus(requestedBaselineId, baselines.map((item) => item.id)) === "unavailable";
   const versionBaselines = baselines.filter((baseline) => baseline.projectId === projectId && baseline.versionId === versionId);
   const baseline = versionBaselines.find((item) => item.id === requestedBaselineId)
     ?? [...versionBaselines].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
@@ -116,6 +120,8 @@ export default function MarginReport() {
           <BarChart3 size={28} />
         </div>
       </div>
+
+      {baselineRefUnavailable && <p className="scope-notice" role="status">{UNAVAILABLE_NOTICE}</p>}
 
       {!report ? (
         <p className="margin-report-note danger"><b>The report could not be read.</b> {failure || "The margin data could not be read."} The rest of the planner still works — try Recalculate on the plan, or open a different plan version.</p>

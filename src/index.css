@@ -718,3 +718,8 @@
 .auth-foot { margin: 0; color: #9b886d; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
 .auth-foot a { color: inherit; text-decoration: underline; }
 @media (max-width: 480px) { .auth-card { padding: 24px 20px 22px; } .auth-title { font-size: 26px; } }
+
+/* A deep link that names something this company does not hold — another
+   company's record, or one since deleted — is answered with one generic
+   sentence carrying no identifier, in the same paper palette as the rest. */
+.scope-notice { margin: 0 0 14px; padding: 9px 12px; border: 1px solid #d3bd97; border-left: 3px solid #b07b46; background: #f6ecd8; color: #6b5741; font-size: 12px; line-height: 1.5; }

@@ -27,6 +27,7 @@ import {
   type CompanyMigrationReport,
   type CompanyRole,
 } from "./company-scope";
+import { normalizeWorkspaceRelations } from "./company-integrity";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
@@ -377,29 +378,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isAuthenticated || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
     if (remoteState === null) {
+      // The signed-in company has no workspace yet, so it gets its own: an
+      // empty one plus the built-in starter project. Nothing is inherited from
+      // the browser — a browser is shared, so a snapshot left behind by an
+      // earlier session could belong to another company, and a company must
+      // never adopt records it does not own.
       migrationStartedRef.current = true;
-      let legacy: Record<string, unknown> | null = null;
-      try {
-        const raw = localStorage.getItem("vintage-gantt-calendar-state");
-        legacy = raw ? JSON.parse(raw) as Record<string, unknown> : null;
-      } catch { legacy = null; }
-      const legacySystem = legacy?.system as CalendarSystem | undefined;
-      const legacyProjects = legacy?.projects as ProjectRecord[] | undefined;
-      const legacyTasksByProject = legacy?.tasksByProject as Record<string, PlannerTask[]> | undefined;
-      const migration = legacySystem && legacyProjects ? {
-        projects: legacyProjects,
-        tasks: Object.entries(legacyTasksByProject ?? {}).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
-        dependencies: Object.entries(legacyTasksByProject ?? {}).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
-        calendars: legacySystem.calendars,
-        exceptions: legacySystem.exceptions,
-        resources: (legacy?.resources as ResourceRecord[] | undefined) ?? [],
-        assignments: (legacy?.assignments as TaskAssignment[] | undefined) ?? [],
-        planVersions: legacyProjects.map((project) => ({ id: `version-${project.id}-1`, projectId: project.id, name: "Versie 1", isActive: true, createdAt: new Date().toISOString(), mode: "planning" as PlanMode })),
-      } : null;
-      const finish = migration ? replaceRemoteState({ state: migration }) : initializeWorkspace({});
-      void finish.then(() => ensureTestProject({})).then(() => {
-        try { localStorage.removeItem("vintage-gantt-calendar-state"); } catch { /* migration cleanup is best effort */ }
-      }).catch(() => {
+      void initializeWorkspace({}).then(() => ensureTestProject({})).catch(() => {
         migrationStartedRef.current = false;
         toast.error("Could not connect to the central planner database. Your changes were not saved.");
       });
@@ -433,7 +418,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveProjectId((current) => (state.projects ?? []).some((project) => project.id === current && project.status !== "archived" && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ? current : fallback?.id ?? "");
     hydratedRef.current = true;
     lastServerStateRef.current = remoteState;
-  }, [isAuthenticated, remoteState, initializeWorkspace, replaceRemoteState]);
+  }, [isAuthenticated, remoteState, initializeWorkspace, ensureTestProject]);
 
   useEffect(() => {
     if (!isAuthenticated || remoteState === undefined || remoteState === null || seedStartedRef.current) return;
@@ -483,7 +468,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       baselines,
       baselineTasks,
     };
-    void replaceRemoteState({ state }).then(() => { lastServerStateRef.current = state; }).catch((error: unknown) => {
+    // Every relation that survives has to belong to this company. A link row
+    // whose target is gone can never be read, so it is dropped here rather than
+    // stored: the only other rows that exist belong to other companies, and a
+    // relation naming one of those is exactly what must never be written. The
+    // server refuses a payload that fails this, so the two agree.
+    const repaired = normalizeWorkspaceRelations(state);
+    if (repaired.dropped.length) {
+      console.info("[vintage-gantt] dropped relations that are not part of this company:", repaired.dropped);
+    }
+    const payload = repaired.rows;
+    void replaceRemoteState({ state: payload }).then(() => { lastServerStateRef.current = payload; }).catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
       console.error("[vintage-gantt] could not persist planner state:", error);
       toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
@@ -734,11 +729,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const deleteTemplate = useCallback<CalendarStoreValue["deleteTemplate"]>(async (templateId) => {
     await deleteTemplateRemote({ templateId });
     const taskIds = new Set((tasksByProject[templateId] ?? []).map((task) => task.id));
+    const removedBaselines = new Set(baselines.filter((baseline) => baseline.projectId === templateId).map((baseline) => baseline.id));
     setProjects((current) => current.filter((project) => project.id !== templateId));
     setTasksByProject((current) => { const next = { ...current }; delete next[templateId]; return next; });
     setPlanVersions((current) => current.filter((version) => version.projectId !== templateId));
     setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
-  }, [deleteTemplateRemote, tasksByProject]);
+    setBaselines((current) => current.filter((baseline) => baseline.projectId !== templateId));
+    setBaselineTasks((current) => current.filter((row) => !removedBaselines.has(row.baselineId)));
+  }, [baselines, deleteTemplateRemote, tasksByProject]);
 
   const renameProject = useCallback((projectId: string, name: string) => {
     if (!name.trim()) return;
@@ -750,12 +748,18 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /** Opens a task in its project and version, and asks the planner to select it. */
+  // Every id is checked against what this company actually holds, so an id that
+  // came from somewhere else — a shared link, another company — opens nothing.
   const openTask = useCallback((projectId: string, versionId: string, taskId: string) => {
+    const project = projects.find((item) => item.id === projectId && (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
+    const version = planVersions.find((item) => item.id === versionId && item.projectId === projectId);
+    const task = (tasksByProject[projectId] ?? []).find((item) => item.id === taskId && (!item.versionId || item.versionId === versionId));
+    if (!project || !version || !task) return;
     setActiveProjectId(projectId);
-    setPlanVersions((current) => current.map((version) => version.projectId === projectId ? { ...version, isActive: version.id === versionId } : version));
+    setPlanVersions((current) => current.map((item) => item.projectId === projectId ? { ...item, isActive: item.id === versionId } : item));
     setActiveVersionId(versionId);
     setFocusTask({ projectId, versionId, taskId });
-  }, []);
+  }, [projects, planVersions, tasksByProject]);
 
   const clearFocusTask = useCallback(() => setFocusTask(null), []);
 
@@ -798,9 +802,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setTasksByProject((current) => { const next = { ...current }; delete next[projectId]; return next; });
     const taskIds = new Set((tasksByProject[projectId] ?? []).map((task) => task.id));
     setAssignments((current) => current.filter((assignment) => !taskIds.has(assignment.taskId)));
+    // The project takes everything that belongs to it along — its plan versions,
+    // its baselines and their snapshots — so nothing is left pointing at a
+    // project that no longer exists.
+    const removedBaselines = new Set(baselines.filter((baseline) => baseline.projectId === projectId).map((baseline) => baseline.id));
+    setPlanVersions((current) => current.filter((version) => version.projectId !== projectId));
+    setBaselines((current) => current.filter((baseline) => baseline.projectId !== projectId));
+    setBaselineTasks((current) => current.filter((row) => !removedBaselines.has(row.baselineId)));
     if (activeProjectId === projectId) setActiveProjectId(regularProjects.find((item) => item.id !== projectId && item.status === "active")?.id ?? regularProjects.find((item) => item.id !== projectId)?.id ?? "");
     return { ok: true, taskCount };
-  }, [activeProjectId, projects, tasksByProject]);
+  }, [activeProjectId, baselines, projects, tasksByProject]);
 
   const addResourceLeave = useCallback<CalendarStoreValue["addResourceLeave"]>((resourceId, input) => {
     const resource = resources.find((item) => item.id === resourceId);
