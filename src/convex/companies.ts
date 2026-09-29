@@ -1,5 +1,7 @@
-import { createAccount, getAuthUserId } from "@convex-dev/auth/server";
-import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { createAccount, getAuthUserId, invalidateSessions } from "@convex-dev/auth/server";
+import axios from "axios";
+import { internal } from "./_generated/api";
+import { action, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import type { GenericActionCtx } from "convex/server";
 import type { DataModel, Doc, Id } from "./_generated/dataModel";
@@ -10,7 +12,6 @@ import {
   COMPANY_SCOPED_TABLES,
   COMPANY_USER,
   defaultCompanyName,
-  memberAttachDecision,
   migrationSummaryLines,
   normalizeCompanyRole,
   planningTotals,
@@ -26,6 +27,28 @@ import {
   type WorkspaceSnapshot,
 } from "../lib/company-scope";
 import type { RegistrationErrorCode } from "../lib/auth-routes";
+import { generateInvitationToken, hashInvitationToken } from "../lib/invitation-token";
+import {
+  ADMIN_ONLY_MESSAGE,
+  INVITATION_ACCEPTED,
+  INVITATION_PENDING,
+  INVITATION_REVOKED,
+  INVITATION_STATE_LABELS,
+  INVITE_INVALID_EMAIL_MESSAGE,
+  NOT_MEMBER_MESSAGE,
+  REMOVED_ACCESS_MESSAGE,
+  invitationAcceptHref,
+  invitationDecision,
+  invitationExpiry,
+  invitationState,
+  inviteDecision,
+  normalizeEmail,
+  removeMemberDecision,
+  replaceableInvitations,
+  transferAdminDecision,
+  type InvitationErrorCode,
+  type InvitationState,
+} from "../lib/company-users";
 import { companyRoleValidator } from "./schema";
 
 /**
@@ -62,6 +85,9 @@ const currentAccount = async (ctx: QueryCtx | MutationCtx): Promise<Doc<"users">
 export const viewerScope = async (ctx: QueryCtx | MutationCtx): Promise<ViewerScope | null> => {
   const user = await currentAccount(ctx);
   if (!user) return null;
+  // A removed account has no access at all, to any company. Nothing it created
+  // is deleted — only its access is gone.
+  if (user.removedAt) return null;
   return { userId: user._id, companyId: user.companyId ?? null, role: normalizeCompanyRole(user.companyRole) };
 };
 
@@ -331,6 +357,7 @@ export const ensureCompany = mutation({
   handler: async (ctx): Promise<CompanyMigrationReport> => {
     const user = await currentAccount(ctx);
     if (!user) throw new Error("You must be signed in to access planner data.");
+    if (user.removedAt) throw new Error(REMOVED_ACCESS_MESSAGE);
     if (user.companyId) {
       const company = await activeCompany(ctx, user.companyId);
       if (!company) throw new Error("This company is not active. Ask your company admin for access.");
@@ -359,6 +386,8 @@ export const current = query({
   handler: async (ctx) => {
     const user = await currentAccount(ctx);
     if (!user) return null;
+    // A removed account has no company view at all.
+    if (user.removedAt) return null;
     if (!user.companyId) return null;
     const company = await ctx.db.get(user.companyId);
     if (!company) return null;
@@ -371,7 +400,9 @@ export const current = query({
       company: { id: company._id as string, name: company.name, status: company.status, createdAt: company.createdAt },
       role,
       canManageMembers: canManageMembers(role),
+      // A removed account is not part of the company any more.
       members: members
+        .filter((member) => !member.removedAt)
         .map((member) => ({
           userId: member._id as string,
           name: member.name ?? "",
@@ -399,7 +430,8 @@ export const migrateWorkspaces = internalMutation({
     const accounts = await ctx.db.query("users").collect();
     const reports = [];
     for (const account of accounts) {
-      if (account.companyId) continue;
+      // A removed account is deliberately left without a company.
+      if (account.companyId || account.removedAt) continue;
       reports.push({ userId: account._id as string, email: account.email ?? null, ...(await provisionCompanyForUser(ctx, account)) });
     }
     return {
@@ -422,6 +454,9 @@ export const requireCompany = async (
 ): Promise<{ userId: Id<"users">; companyId: Id<"companies">; role: CompanyRole }> => {
   const user = await currentAccount(ctx);
   if (!user) throw new Error("You must be signed in to access planner data.");
+  // A removed account must never be given a fresh company: it is cut off until a
+  // company admin adds it back.
+  if (user.removedAt) throw new Error(REMOVED_ACCESS_MESSAGE);
   if (user.companyId) {
     const company = await activeCompany(ctx, user.companyId);
     if (!company) throw new Error("This company is not active. Ask your company admin for access.");
@@ -437,30 +472,6 @@ const findAccountByEmail = async (ctx: MutationCtx, email: string) => {
   const accounts = await ctx.db.query("users").collect();
   return accounts.find((account) => (account.email ?? "").trim().toLowerCase() === email) ?? null;
 };
-
-/**
- * Adds an existing account to the caller's company. This is the only kind of
- * action restricted to company admins: projects, planning, resources, calendars
- * and capacity work identically for both account types.
- */
-export const addMemberByEmail = mutation({
-  args: { email: v.string() },
-  handler: async (ctx, args) => {
-    const viewer = await requireCompany(ctx);
-    const email = args.email.trim().toLowerCase();
-    if (!email) throw new Error("Enter the email address of the account to add.");
-    const target = await findAccountByEmail(ctx, email);
-    if (!target) throw new Error(`No account found for ${email}.`);
-    const decision = memberAttachDecision({
-      actorRole: viewer.role,
-      existingCompanyId: target.companyId ? (target.companyId as string) : null,
-      companyId: viewer.companyId as string,
-    });
-    if (!decision.ok) throw new Error(decision.message ?? "Could not add this account.");
-    await ctx.db.patch(target._id, { companyId: viewer.companyId, companyRole: COMPANY_USER });
-    return { ok: true, userId: target._id as string };
-  },
-});
 
 /* ------------------------------------------------------------------ sign-up */
 
@@ -577,5 +588,360 @@ export const setMemberRole = mutation({
     if (!decision.ok) throw new Error(decision.message ?? "Could not change this account type.");
     await ctx.db.patch(target._id, { companyRole: args.role });
     return { ok: true };
+  },
+});
+
+/**
+ * Whether the signed-in account's access was removed. Kept apart from `current`
+ * so the company view stays exactly the company's own data: a removed account
+ * gets no company at all, and the store signs it out from this flag.
+ */
+export const access = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await currentAccount(ctx);
+    if (!user) return null;
+    return { removed: Boolean(user.removedAt) };
+  },
+});
+
+/* --------------------------------------------- company users & invitations */
+
+/** Every member of a company whose access has not been removed. */
+const activeMembers = async (ctx: QueryCtx | MutationCtx, companyId: Id<"companies">) =>
+  (
+    await ctx.db
+      .query("users")
+      .withIndex("by_company", (q) => q.eq("companyId", companyId as never))
+      .collect()
+  ).filter((member) => !member.removedAt);
+
+const adminCountOf = (members: Doc<"users">[]) =>
+  members.filter((member) => normalizeCompanyRole(member.companyRole) === COMPANY_ADMIN).length;
+
+/** Only a company admin manages users and invitations; every rule below is enforced here. */
+const requireCompanyAdmin = async (ctx: MutationCtx) => {
+  const viewer = await requireCompany(ctx);
+  if (!canManageMembers(viewer.role)) throw new Error(ADMIN_ONLY_MESSAGE);
+  return viewer;
+};
+
+const membershipContext = (
+  viewer: { userId: Id<"users">; role: CompanyRole },
+  target: Doc<"users">,
+  adminCount: number,
+) => ({
+  actorRole: viewer.role,
+  actorUserId: viewer.userId as string,
+  targetUserId: target._id as string,
+  targetRole: normalizeCompanyRole(target.companyRole),
+  adminCount,
+  targetRemoved: Boolean(target.removedAt),
+});
+
+/** The single-use code an invitation failure carries (never server text). */
+const invitationError = (code: InvitationErrorCode) => new ConvexError({ code });
+
+/**
+ * Creates an invitation for the signed-in admin's company. Any earlier pending
+ * invitation for the same address is revoked first, so an address has at most
+ * one working link — which is also what makes a resend safe. Only the hash of
+ * the value is stored; the raw value is returned once, for the link.
+ */
+const createCompanyInvitation = async (
+  ctx: MutationCtx,
+  viewer: { userId: Id<"users">; companyId: Id<"companies">; role: CompanyRole },
+  rawEmail: string,
+) => {
+  const email = normalizeEmail(rawEmail);
+  if (!EMAIL_PATTERN.test(email)) throw new Error(INVITE_INVALID_EMAIL_MESSAGE);
+  const credential = await ctx.db
+    .query("authAccounts")
+    .withIndex("providerAndAccountId", (q) => q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email))
+    .unique();
+  const accountExists = Boolean(credential) || (await findAccountByEmail(ctx, email)) !== null;
+  const decision = inviteDecision({ actorRole: viewer.role, email, accountExists });
+  if (!decision.ok) throw new Error(decision.message ?? ADMIN_ONLY_MESSAGE);
+
+  const nowIso = new Date().toISOString();
+  const existing = await ctx.db
+    .query("invitations")
+    .withIndex("by_company_email", (q) => q.eq("companyId", viewer.companyId as never).eq("email", email))
+    .collect();
+  for (const row of replaceableInvitations(existing, email)) {
+    await ctx.db.patch(row._id, { status: INVITATION_REVOKED, revokedAt: nowIso });
+  }
+
+  const token = generateInvitationToken();
+  const tokenHash = await hashInvitationToken(token);
+  const expiresAt = invitationExpiry(Date.now());
+  const invitationId = await ctx.db.insert("invitations", {
+    companyId: viewer.companyId,
+    email,
+    tokenHash,
+    status: INVITATION_PENDING,
+    invitedByUserId: viewer.userId,
+    createdAt: nowIso,
+    expiresAt,
+  });
+  return { invitationId: invitationId as string, email, token, expiresAt };
+};
+
+/** Admin-only: invite an email address to the admin's company. */
+export const inviteMember = mutation({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    return await createCompanyInvitation(ctx, viewer, args.email);
+  },
+});
+
+/** Admin-only: replace a pending invitation with a fresh link. */
+export const resendInvitation = mutation({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    return await createCompanyInvitation(ctx, viewer, args.email);
+  },
+});
+
+/** Admin-only: a revoked link can never be accepted again. */
+export const revokeInvitation = mutation({
+  args: { invitationId: v.id("invitations") },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    const invitation = await ctx.db.get(args.invitationId);
+    if (!invitation || (invitation.companyId as string) !== (viewer.companyId as string)) {
+      throw new Error(NOT_MEMBER_MESSAGE);
+    }
+    if (invitation.status === INVITATION_PENDING) {
+      await ctx.db.patch(invitation._id, { status: INVITATION_REVOKED, revokedAt: new Date().toISOString() });
+    }
+    return { ok: true };
+  },
+});
+
+/** Pending invitations of the caller's company. Admin-only; nothing for regular users. */
+export const pendingInvitations = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await currentAccount(ctx);
+    if (!user || user.removedAt || !user.companyId) return null;
+    if (!canManageMembers(user.companyRole)) return null;
+    const now = Date.now();
+    const rows = await ctx.db
+      .query("invitations")
+      .withIndex("by_company", (q) => q.eq("companyId", user.companyId as never))
+      .collect();
+    return rows
+      .map((row) => {
+        const state = invitationState(row, now) as InvitationState;
+        return {
+          id: row._id as string,
+          email: row.email,
+          state,
+          stateLabel: INVITATION_STATE_LABELS[state],
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+        };
+      })
+      .filter((row) => row.state === "pending")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+});
+
+/**
+ * Admin-only: removes a regular user's access. Nothing the account created is
+ * deleted — only its access is withdrawn, and its sessions are invalidated so
+ * the change takes effect at once. A company always keeps one admin.
+ */
+export const removeMember = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    const target = await ctx.db.get(args.userId);
+    if (!target || !target.companyId || (target.companyId as string) !== (viewer.companyId as string)) {
+      throw new Error(NOT_MEMBER_MESSAGE);
+    }
+    const members = await activeMembers(ctx, viewer.companyId);
+    const decision = removeMemberDecision(membershipContext(viewer, target, adminCountOf(members)));
+    if (!decision.ok) throw new Error(decision.message ?? ADMIN_ONLY_MESSAGE);
+    await ctx.db.patch(target._id, { removedAt: new Date().toISOString() });
+    await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: target._id });
+    return { ok: true };
+  },
+});
+
+/**
+ * Admin-only: hands company admin to another active user and steps down. One
+ * transaction, so the company is never left without an admin in between.
+ */
+export const transferAdmin = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    const target = await ctx.db.get(args.userId);
+    if (!target || !target.companyId || (target.companyId as string) !== (viewer.companyId as string)) {
+      throw new Error(NOT_MEMBER_MESSAGE);
+    }
+    const members = await activeMembers(ctx, viewer.companyId);
+    const decision = transferAdminDecision(membershipContext(viewer, target, adminCountOf(members)));
+    if (!decision.ok) throw new Error(decision.message ?? ADMIN_ONLY_MESSAGE);
+    await ctx.db.patch(target._id, { companyRole: COMPANY_ADMIN });
+    await ctx.db.patch(viewer.userId, { companyRole: COMPANY_USER });
+    return { ok: true };
+  },
+});
+
+/** What an invitation email needs, and only for the admin of that invitation's company. */
+export const invitationForDelivery = internalQuery({
+  args: { tokenHash: v.string(), viewerId: v.optional(v.id("users")) },
+  handler: async (ctx, args) => {
+    const invitation = await ctx.db
+      .query("invitations")
+      .withIndex("by_token", (q) => q.eq("tokenHash", args.tokenHash))
+      .unique();
+    if (!invitation || invitationState(invitation, Date.now()) !== "pending") return null;
+    if (!args.viewerId) return null;
+    const viewer = await ctx.db.get(args.viewerId);
+    if (!viewer || viewer.removedAt || !viewer.companyId || (viewer.companyId as string) !== (invitation.companyId as string)) return null;
+    if (!canManageMembers(viewer.companyRole)) return null;
+    const company = await ctx.db.get(invitation.companyId);
+    return {
+      email: invitation.email,
+      companyName: company?.name ?? "",
+      inviterName: viewer.name ?? "",
+      expiresAt: invitation.expiresAt,
+    };
+  },
+});
+
+const RESEND_ENDPOINT = "https://api.resend.com/emails";
+const PLATFORM_MAIL_ENDPOINT = "https://auth.freebuff.app/send_otp";
+
+const invitationEmailHtml = (input: { link: string; companyName: string; inviterName: string; expiry: string }) => {
+  const company = input.companyName || "a company";
+  const invitation = input.inviterName ? `${input.inviterName} invited you` : "You have been invited";
+  const until = input.expiry ? input.expiry.slice(0, 10) : "";
+  return [
+    `<p>${invitation} to join <strong>${company}</strong> on Vintage GANTT.</p>`,
+    `<p><a href="${input.link}">Accept the invitation</a></p>`,
+    `<p>This link works once${until ? ` and expires on ${until}` : ""}.</p>`,
+  ].join("");
+};
+
+/**
+ * Sends one invitation email, through the project's email provider when its key
+ * is configured, and otherwise through the platform's transactional mailer so an
+ * invitation still reaches its recipient. The address is always the one stored
+ * on the invitation, never one supplied by the caller.
+ */
+const deliverInvitationEmail = async (input: {
+  to: string;
+  link: string;
+  companyName: string;
+  inviterName: string;
+  expiry: string;
+}) => {
+  const appName = process.env.VLY_APP_NAME || "Vintage GANTT";
+  const subject = `Join ${input.companyName || appName} on Vintage GANTT`;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (apiKey) {
+    await axios.post(
+      RESEND_ENDPOINT,
+      {
+        from: process.env.INVITATION_FROM_EMAIL || `${appName} <onboarding@resend.dev>`,
+        to: input.to,
+        subject,
+        html: invitationEmailHtml(input),
+      },
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+    );
+    return "resend";
+  }
+  await axios.post(
+    PLATFORM_MAIL_ENDPOINT,
+    { to: input.to, otp: input.link, appName },
+    { headers: { "x-api-key": "fb_email_2crN1hqIArZP2bEfvjp5Qik4" } },
+  );
+  return "platform";
+};
+
+/**
+ * Sends (or resends) the email for an invitation. An action because sending mail
+ * is network I/O. It only ever mails the address stored on a pending invitation
+ * of the caller's own company, and refuses when the link is no longer valid.
+ */
+export const sendInvitationEmail = action({
+  args: { token: v.string(), link: v.optional(v.string()) },
+  handler: async (ctx, args): Promise<{ ok: boolean; email: string; provider: string }> => {
+    const viewerId = await getAuthUserId(ctx);
+    if (!viewerId) throw new Error(ADMIN_ONLY_MESSAGE);
+    const tokenHash = await hashInvitationToken(args.token);
+    const target: { email: string; companyName: string; inviterName: string; expiresAt: string } | null =
+      await ctx.runQuery(internal.companies.invitationForDelivery, {
+        tokenHash,
+        viewerId: viewerId as Id<"users">,
+      });
+    if (!target) throw new Error("This invitation is no longer valid.");
+    const link = args.link && args.link.startsWith("http") ? args.link : invitationAcceptHref(args.token);
+    const provider = await deliverInvitationEmail({
+      to: target.email,
+      link,
+      companyName: target.companyName,
+      inviterName: target.inviterName,
+      expiry: target.expiresAt,
+    });
+    return { ok: true, email: target.email, provider };
+  },
+});
+
+/**
+ * Accepts an invitation: the invited person sets a name and a password and
+ * becomes a regular user of the inviting company. A used, expired, revoked or
+ * unknown link fails with one generic code and never creates an account. The
+ * account and the company link are written in this one transaction, so an
+ * acceptance either completes or changes nothing.
+ */
+export const acceptInvitation = mutation({
+  args: { token: v.string(), name: v.string(), password: v.string() },
+  handler: async (ctx, args) => {
+    const token = args.token.trim();
+    const tokenHash = token ? await hashInvitationToken(token) : "";
+    const invitation = tokenHash
+      ? await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("tokenHash", tokenHash)).unique()
+      : null;
+    const decision = invitationDecision(invitation, Date.now());
+    if (!decision.ok || !invitation) throw invitationError(decision.code ?? "invalid");
+
+    const name = args.name.trim();
+    if (!name) throw invitationError("missing_name");
+    if (args.password.length < 8) throw invitationError("weak_password");
+
+    const email = normalizeEmail(invitation.email);
+    // If the address gained an account since the invitation was sent, refuse and
+    // burn the link rather than touching that existing account.
+    const credential = await ctx.db
+      .query("authAccounts")
+      .withIndex("providerAndAccountId", (q) => q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email))
+      .unique();
+    if (credential || (await findAccountByEmail(ctx, email))) {
+      await ctx.db.patch(invitation._id, { status: INVITATION_REVOKED, revokedAt: new Date().toISOString() });
+      throw invitationError("taken");
+    }
+
+    const created = await createAccount<DataModel>(ctx as unknown as GenericActionCtx<DataModel>, {
+      provider: PASSWORD_PROVIDER_ID,
+      account: { id: email, secret: args.password },
+      profile: { email, name },
+    });
+    const userId = created.user._id as Id<"users">;
+    await ctx.db.patch(userId, { companyId: invitation.companyId, companyRole: COMPANY_USER });
+    await ctx.db.patch(invitation._id, {
+      status: INVITATION_ACCEPTED,
+      acceptedAt: new Date().toISOString(),
+      acceptedByUserId: userId,
+    });
+    return { ok: true, email };
   },
 });

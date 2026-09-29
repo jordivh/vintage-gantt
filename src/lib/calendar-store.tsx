@@ -28,9 +28,11 @@ import {
   type CompanyRole,
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
+import { invitationAcceptHref } from "./company-users";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useAction, useConvexAuth, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 
 export type ProjectStatus = "active" | "archived" | "template";
@@ -85,6 +87,16 @@ export interface BaselineTask { id: string; baselineId: string; taskId: string; 
 export interface CompanySummary { id: string; name: string; status: string; createdAt: string; }
 export interface CompanyMember { userId: string; name: string; email: string; role: CompanyRole; isSelf: boolean; }
 export interface CompanyInfo { company: CompanySummary; role: CompanyRole; canManageMembers: boolean; members: CompanyMember[]; }
+
+/** One pending invitation, as the company users screen shows it. */
+export interface PendingInvitation {
+  id: string;
+  email: string;
+  state: string;
+  stateLabel: string;
+  createdAt: string;
+  expiresAt: string;
+}
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -265,10 +277,22 @@ interface CalendarStoreValue {
   companyRole: CompanyRole;
   /** True only for company admins. */
   canManageMembers: boolean;
-  /** Admin-only: adds an existing account to this company. */
-  addCompanyMember: (email: string) => Promise<{ ok: boolean; message?: string }>;
   /** Admin-only: changes an account type; the last company admin can never be demoted. */
   setCompanyMemberRole: (userId: string, role: CompanyRole) => Promise<{ ok: boolean; message?: string }>;
+  /** True when this account's access to its company was removed (it is signed out). */
+  accessRemoved: boolean;
+  /** The company's pending invitations (admin only; empty otherwise). */
+  pendingInvitations: PendingInvitation[];
+  /** Admin-only: invites an email address and sends the acceptance email. */
+  inviteCompanyMember: (email: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: replaces a pending invitation with a fresh link and emails it. */
+  resendCompanyInvitation: (email: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: revokes a pending invitation, so its link can never be used. */
+  revokeCompanyInvitation: (invitationId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: removes a user's access; nothing the user created is deleted. */
+  removeCompanyMember: (userId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: hands company admin to another active user and steps down. */
+  transferCompanyAdmin: (userId: string) => Promise<{ ok: boolean; message?: string }>;
   /**
    * Switches a version between Planning and Monitoring. Monitoring requires a
    * baseline on that version, and a version can never go back to Planning —
@@ -363,11 +387,25 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const deleteTemplateRemote = useMutation(api.planner.deleteTemplate);
   const replaceRemoteState = useMutation(api.planner.replaceState);
   const ensureCompanyRemote = useMutation(api.companies.ensureCompany);
-  const addCompanyMemberRemote = useMutation(api.companies.addMemberByEmail);
   const setCompanyMemberRoleRemote = useMutation(api.companies.setMemberRole);
+  const inviteMemberRemote = useMutation(api.companies.inviteMember);
+  const resendInvitationRemote = useMutation(api.companies.resendInvitation);
+  const revokeInvitationRemote = useMutation(api.companies.revokeInvitation);
+  const removeMemberRemote = useMutation(api.companies.removeMember);
+  const transferAdminRemote = useMutation(api.companies.transferAdmin);
+  const sendInvitationEmailRemote = useAction(api.companies.sendInvitationEmail);
   const companyInfo = useQuery(api.companies.current, isAuthenticated ? {} : "skip");
   const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
   const companyRole: CompanyRole = company?.role ?? "user";
+  const accessInfo = useQuery(api.companies.access, isAuthenticated ? {} : "skip");
+  const accessRemoved = accessInfo?.removed === true;
+  const pendingInvitationRows = useQuery(
+    api.companies.pendingInvitations,
+    isAuthenticated && (company?.canManageMembers ?? false) ? {} : "skip",
+  );
+  const pendingInvitations = (pendingInvitationRows as PendingInvitation[] | null | undefined) ?? [];
+  const { signOut } = useAuthActions();
+  const removalSignOutRef = useRef(false);
   const hydratedRef = useRef(false);
   const migrationStartedRef = useRef(false);
   const seedStartedRef = useRef(false);
@@ -1007,14 +1045,73 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [projects, system],
   );
 
-  const addCompanyMember = useCallback<CalendarStoreValue["addCompanyMember"]>(async (email) => {
+  /**
+   * A removed account is signed out: every protected read and write refuses it
+   * server-side already, and the session is dropped here so the screens can
+   * never show a stale workspace.
+   */
+  useEffect(() => {
+    if (!accessRemoved || removalSignOutRef.current) return;
+    removalSignOutRef.current = true;
+    toast.error("Your access to this company has been removed.");
+    void signOut();
+  }, [accessRemoved, signOut]);
+
+  const invitationAction = async (run: () => Promise<{ token: string; email: string }>, done: (email: string) => string) => {
     try {
-      await addCompanyMemberRemote({ email: email.trim() });
+      const result = await run();
+      const link = invitationAcceptHref(result.token, typeof window === "undefined" ? "" : window.location.origin);
+      try {
+        await sendInvitationEmailRemote({ token: result.token, link });
+      } catch (error) {
+        console.error("[vintage-gantt] invitation email failed:", error);
+        return { ok: true, message: `Invitation created for ${result.email}, but the email could not be sent. Share this link instead: ${link}` };
+      }
+      return { ok: true, message: done(result.email) };
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
+  const inviteCompanyMember = useCallback<CalendarStoreValue["inviteCompanyMember"]>(
+    (email) => invitationAction(() => inviteMemberRemote({ email: email.trim() }), (address) => `Invitation sent to ${address}.`),
+    [inviteMemberRemote, sendInvitationEmailRemote],
+  );
+
+  const resendCompanyInvitation = useCallback<CalendarStoreValue["resendCompanyInvitation"]>(
+    (email) => invitationAction(
+      () => resendInvitationRemote({ email: email.trim() }),
+      (address) => `New invitation sent to ${address}. The previous link no longer works.`,
+    ),
+    [resendInvitationRemote, sendInvitationEmailRemote],
+  );
+
+  const revokeCompanyInvitation = useCallback<CalendarStoreValue["revokeCompanyInvitation"]>(async (invitationId) => {
+    try {
+      await revokeInvitationRemote({ invitationId: invitationId as Id<"invitations"> });
       return { ok: true };
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
-  }, [addCompanyMemberRemote]);
+  }, [revokeInvitationRemote]);
+
+  const removeCompanyMember = useCallback<CalendarStoreValue["removeCompanyMember"]>(async (userId) => {
+    try {
+      await removeMemberRemote({ userId: userId as Id<"users"> });
+      return { ok: true };
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }, [removeMemberRemote]);
+
+  const transferCompanyAdmin = useCallback<CalendarStoreValue["transferCompanyAdmin"]>(async (userId) => {
+    try {
+      await transferAdminRemote({ userId: userId as Id<"users"> });
+      return { ok: true };
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }, [transferAdminRemote]);
 
   const setCompanyMemberRole = useCallback<CalendarStoreValue["setCompanyMemberRole"]>(async (userId, role) => {
     try {
@@ -1082,8 +1179,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       company,
       companyRole,
       canManageMembers: roleCanManageMembers(companyRole),
-      addCompanyMember,
       setCompanyMemberRole,
+      accessRemoved,
+      pendingInvitations,
+      inviteCompanyMember,
+      resendCompanyInvitation,
+      revokeCompanyInvitation,
+      removeCompanyMember,
+      transferCompanyAdmin,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, calendarsUsingProjects,
@@ -1091,7 +1194,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
       planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode, setProjectClient, openTask, focusTask, clearFocusTask,
-      company, companyRole, addCompanyMember, setCompanyMemberRole,
+      company, companyRole, setCompanyMemberRole, accessRemoved, pendingInvitations,
+      inviteCompanyMember, resendCompanyInvitation, revokeCompanyInvitation, removeCompanyMember, transferCompanyAdmin,
     ],
   );
 

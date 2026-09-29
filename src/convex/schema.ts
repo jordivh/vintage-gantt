@@ -56,6 +56,10 @@ const schema = defineSchema(
       companyId: v.optional(v.id("companies")),
       // "company_admin" | "user". Absent means plain user.
       companyRole: v.optional(companyRoleValidator),
+      // Set by a company admin when the account is removed from the company.
+      // The account keeps no access from then on, but nothing it created is
+      // deleted. Optional so existing accounts are simply active.
+      removedAt: v.optional(v.string()),
     }).index("email", ["email"]) // index for the email. do not remove or modify
       .index("by_company", ["companyId"]), // index for the company. do not remove
 
@@ -67,6 +71,26 @@ const schema = defineSchema(
       createdAt: v.string(),
       createdByUserId: v.optional(v.id("users")),
     }).index("by_name", ["name"]),
+
+    // A single-use invitation to join a company. Only the SHA-256 hash of the
+    // link's value is stored, so a database row can never be replayed as a
+    // working link. `expired` is derived from `expiresAt`; the stored status is
+    // one of pending / accepted / revoked.
+    invitations: defineTable({
+      companyId: v.id("companies"),
+      email: v.string(),
+      tokenHash: v.string(),
+      status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked")),
+      invitedByUserId: v.id("users"),
+      createdAt: v.string(),
+      expiresAt: v.string(),
+      acceptedAt: v.optional(v.string()),
+      acceptedByUserId: v.optional(v.id("users")),
+      revokedAt: v.optional(v.string()),
+    })
+      .index("by_company", ["companyId"])
+      .index("by_token", ["tokenHash"])
+      .index("by_company_email", ["companyId", "email"]),
 
     projects: defineTable({
       ownerId: v.id("users"), companyId, id: v.string(), name: v.string(), status: v.string(), startDate: v.string(),
