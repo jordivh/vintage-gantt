@@ -306,7 +306,8 @@ export default function Dashboard() {
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [resourceEditor]);
   const [recalcDirection, setRecalcDirection] = useState<PlanningDirection>("forward");
-  const [recalcDate, setRecalcDate] = useState("2025-04-01");
+  // The anchor the "plan the whole schedule" action starts from: today, never a fixed date.
+  const [recalcDate, setRecalcDate] = useState(() => isoDate(new Date()));
   const [planningDirection, setPlanningDirection] = useState<PlanningDirection>("forward");
   const [projectDialog, setProjectDialog] = useState(false);
   const [pendingCalendarId, setPendingCalendarId] = useState(calendarId);

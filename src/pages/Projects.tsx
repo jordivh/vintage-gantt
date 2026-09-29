@@ -6,10 +6,11 @@ import { useCalendarStore, type ProjectRecord } from "@/lib/calendar-store";
 import { buildMarginConsumption, EMPTY_MARGIN_CONSUMPTION, type MarginConsumption } from "@/lib/margin-consumption";
 import { CATALOG_GROUP_ORDER, catalogGroupStorage, readCatalogGroups, toggleCatalogGroup, writeCatalogGroups, type CatalogGroupKey } from "@/lib/catalog-groups";
 import { AppBar } from "@/components/AppBar";
-import type { PlanningDirection } from "@/lib/scheduling-engine";
+import { isoDate, type PlanningDirection } from "@/lib/scheduling-engine";
 
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T12:00:00`));
-const today = new Date().toISOString().slice(0, 10);
+/** Today in the app's own date format, read whenever a default date is needed. */
+const todayIso = () => isoDate(new Date());
 
 type TemplateCreateResult = { id: string; skippedAssignments: number };
 
@@ -39,7 +40,7 @@ export default function Projects() {
   const [searchParams] = useSearchParams();
   const { projects, system, projectTasks, activeProjectId, setActiveProject, createProjectFromTemplate, saveAsTemplate, planVersions, baselines, renameProject, setProjectClient, archiveProject, restoreProject, deleteProject, setTemplateHidden, deleteTemplate } = useCalendarStore();
   const [showNew, setShowNew] = useState(() => searchParams.get("new") === "1");
-  const [newProject, setNewProject] = useState({ name: "", startDate: today, schedulingDirection: "forward" as PlanningDirection, calendarId: system.defaultCalendarId, templateId: "" });
+  const [newProject, setNewProject] = useState({ name: "", startDate: todayIso(), schedulingDirection: "forward" as PlanningDirection, calendarId: system.defaultCalendarId, templateId: "" });
   const [rename, setRename] = useState<{ id: string; value: string; client: string } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectRecord | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<ProjectRecord | null>(null);
@@ -147,7 +148,7 @@ export default function Projects() {
   const rowActions = (project: ProjectRecord): RowAction[] => {
     if (isTemplate(project)) return [
       { key: "rename", label: "Rename template", icon: <Pencil size={14} />, run: () => setRename({ id: project.id, value: project.name, client: project.client ?? "" }) },
-      { key: "use", label: project.hidden ? "Show this template before using it" : "Create project from template", icon: <Copy size={14} />, disabled: project.hidden, run: () => { setIncludeAssignments(false); setNewProject({ name: `${project.name} copy`, startDate: today, schedulingDirection: "forward", calendarId: project.calendarId, templateId: project.id }); setShowNew(true); } },
+      { key: "use", label: project.hidden ? "Show this template before using it" : "Create project from template", icon: <Copy size={14} />, disabled: project.hidden, run: () => { setIncludeAssignments(false); setNewProject({ name: `${project.name} copy`, startDate: todayIso(), schedulingDirection: "forward", calendarId: project.calendarId, templateId: project.id }); setShowNew(true); } },
       { key: "visibility", label: project.hidden ? "Show template" : "Hide template", icon: project.hidden ? <Eye size={14} /> : <EyeOff size={14} />, run: async () => { try { await setTemplateHidden(project.id, !project.hidden); toast.success(project.hidden ? "Template shown" : "Template hidden"); } catch { toast.error("Could not update template visibility."); } } },
       ...(project.isBuiltin ? [] : [{ key: "delete", label: "Delete template", icon: <Trash2 size={14} />, danger: true, run: () => setDeleteTarget(project) }]),
     ];

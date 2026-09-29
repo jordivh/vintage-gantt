@@ -663,3 +663,6 @@
 .project-settings-restore { margin: 4px 0 6px; padding: 12px 13px; border: 1px solid #d0bea0; background: #f3e9d7; }
 .project-settings-restore p { margin: 0 0 10px; color: #6b5741; font-size: 11px; line-height: 1.55; }
 .project-settings-restore b { color: #9a593f; }
+
+/* An untouched date picker shows today as a hint, not as a value. */
+.date-picker-button.is-empty span { color: #a2917a; font-style: italic; }

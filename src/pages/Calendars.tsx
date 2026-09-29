@@ -67,7 +67,8 @@ export default function Calendars() {
   const [selectedId, setSelectedId] = useState(
     () => system.calendars.find((calendar) => calendar.isDefault)?.id ?? system.calendars[0]?.id ?? "",
   );
-  const [year, setYear] = useState(2025);
+  // The year grid opens on the current year, read at run time — never a fixed year.
+  const [year, setYear] = useState(() => new Date().getFullYear());
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createType, setCreateType] = useState<Exclude<CalendarType, "base">>("project");
