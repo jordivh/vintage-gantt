@@ -10,6 +10,7 @@
 
 import type * as auth from "../auth.js";
 import type * as auth_emailOtp from "../auth/emailOtp.js";
+import type * as auth_passwordReset from "../auth/passwordReset.js";
 import type * as companies from "../companies.js";
 import type * as http from "../http.js";
 import type * as planner from "../planner.js";
@@ -24,6 +25,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   "auth/emailOtp": typeof auth_emailOtp;
+  "auth/passwordReset": typeof auth_passwordReset;
   companies: typeof companies;
   http: typeof http;
   planner: typeof planner;

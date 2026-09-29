@@ -1,7 +1,8 @@
-import { getAuthUserId } from "@convex-dev/auth/server";
+import { createAccount, getAuthUserId } from "@convex-dev/auth/server";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
-import { v } from "convex/values";
-import type { Doc, Id } from "./_generated/dataModel";
+import { ConvexError, v } from "convex/values";
+import type { GenericActionCtx } from "convex/server";
+import type { DataModel, Doc, Id } from "./_generated/dataModel";
 import {
   canManageMembers,
   COMPANY_ACTIVE,
@@ -24,6 +25,7 @@ import {
   type CompanyScopedTable,
   type WorkspaceSnapshot,
 } from "../lib/company-scope";
+import type { RegistrationErrorCode } from "../lib/auth-routes";
 import { companyRoleValidator } from "./schema";
 
 /**
@@ -457,6 +459,97 @@ export const addMemberByEmail = mutation({
     if (!decision.ok) throw new Error(decision.message ?? "Could not add this account.");
     await ctx.db.patch(target._id, { companyId: viewer.companyId, companyRole: COMPANY_USER });
     return { ok: true, userId: target._id as string };
+  },
+});
+
+/* ------------------------------------------------------------------ sign-up */
+
+/** The id of the email + password provider configured in src/convex/auth.ts. */
+const PASSWORD_PROVIDER_ID = "password";
+
+/** An email address looks like an email address. */
+const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/**
+ * Registration errors carry a code (never server text), so the screen can show
+ * one English message per situation and the deployment's logs stay quiet about
+ * what the database contains. The codes and their messages live in
+ * `src/lib/auth-routes.ts`, shared with the screens.
+ */
+const registrationError = (code: RegistrationErrorCode) => new ConvexError({ code });
+
+export interface RegisteredCompany {
+  companyId: string;
+  companyName: string;
+  email: string;
+  name: string;
+}
+
+/**
+ * Registers a company together with its first account, in a single transaction.
+ *
+ * The account (user document + password account with its Scrypt hash) is created
+ * through Convex Auth's own `createAccount`, which runs inside this mutation's
+ * transaction. The company and the `company_admin` link are written right after.
+ * Any failure — a rejected password, a rejected company name, a clash, or a
+ * failed write — throws and rolls the whole transaction back, so a registration
+ * either creates the company with its first company admin or creates nothing.
+ *
+ * An email address can never back two credential accounts: the check below runs
+ * before any write and Convex Auth's `authAccounts` (provider + account id) stays
+ * the single source of truth for which email is taken.
+ */
+export const registerCompany = mutation({
+  args: {
+    companyName: v.string(),
+    name: v.string(),
+    email: v.string(),
+    password: v.string(),
+  },
+  handler: async (ctx, args): Promise<RegisteredCompany> => {
+    const companyName = args.companyName.trim();
+    const name = args.name.trim();
+    const email = args.email.trim().toLowerCase();
+
+    if (!name) throw registrationError("missing_name");
+    if (!companyName) throw registrationError("missing_company");
+    if (!EMAIL_PATTERN.test(email)) throw registrationError("invalid_email");
+    if (args.password.length < 8) throw registrationError("weak_password");
+
+    // One active account per email address, checked before anything is written:
+    // once against the credential store Convex Auth uses, then against the
+    // account table (an address that another provider already registered).
+    const credential = await ctx.db
+      .query("authAccounts")
+      .withIndex("providerAndAccountId", (q) =>
+        q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email),
+      )
+      .unique();
+    if (credential) throw registrationError("email_taken");
+    if (await findAccountByEmail(ctx, email)) throw registrationError("email_taken");
+
+    // Creates the user document and its password account inside this
+    // transaction; a throw below takes them back down with everything else.
+    const created = await createAccount<DataModel>(
+      ctx as unknown as GenericActionCtx<DataModel>,
+      {
+        provider: PASSWORD_PROVIDER_ID,
+        account: { id: email, secret: args.password },
+        profile: { email, name },
+      },
+    );
+    const userId = created.user._id as Id<"users">;
+
+    // The company, with this account as its first company admin.
+    const companyId = await ctx.db.insert("companies", {
+      name: companyName,
+      status: COMPANY_ACTIVE,
+      createdAt: new Date().toISOString(),
+      createdByUserId: userId,
+    });
+    await ctx.db.patch(userId, { companyId, companyRole: COMPANY_ADMIN });
+
+    return { companyId: companyId as string, companyName, email, name };
   },
 });
 

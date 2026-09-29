@@ -15,6 +15,9 @@ import "./types/global.d.ts";
 // Lazy load route components for better code splitting
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
+const RegisterCompany = lazy(() => import("./pages/RegisterCompany.tsx"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword.tsx"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const Calendars = lazy(() => import("./pages/Calendars.tsx"));
 const Resources = lazy(() => import("./pages/Resources.tsx"));
@@ -76,6 +79,9 @@ createRoot(document.getElementById("root")!).render(
                   path="/auth"
                   element={<AuthPage redirectAfterAuth="/dashboard" />}
                 />
+                <Route path="/auth/register" element={<RegisterCompany />} />
+                <Route path="/auth/forgot" element={<ForgotPassword />} />
+                <Route path="/auth/reset" element={<ResetPassword />} />
                 <Route
                   path="/dashboard"
                   element={

@@ -691,3 +691,30 @@
 .company-message { margin: 6px 7px 0; color: #71836c; font-size: 10px; line-height: 1.5; }
 .company-message.error { color: #9a593f; }
 .user-popover { min-width: 268px; }
+
+/* The four auth screens — sign in, register a company, forgot the password and
+   reset it. Same archival paper palette and print-like texture as the rest of
+   the app: one card per screen, the brand seal on top, nothing else. */
+.auth-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 44px 18px; background: #e9e0cc; background-image: radial-gradient(rgba(81,61,39,.055) .7px, transparent .7px); background-size: 5px 5px; color: #40372d; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.auth-card { width: 100%; max-width: 412px; padding: 30px 30px 26px; border: 1px solid #b8a485; background: #f8f0df; box-shadow: 7px 8px 0 rgba(72,49,29,.12); }
+.auth-card-wide { max-width: 468px; }
+.auth-brand { display: inline-flex; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; cursor: pointer; color: #6f5b45; font-size: 10px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
+.auth-brand:hover { color: #9b533d; }
+.auth-seal { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #8d765a; border-radius: 50%; font: 21px Georgia, serif; color: #97543d; transform: rotate(-10deg); }
+.auth-eyebrow { margin-top: 24px; color: #9a8464; font-size: 9px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
+.auth-title { margin: 7px 0 8px; font: 30px/1.12 Georgia, serif; letter-spacing: -.025em; color: #44382c; }
+.auth-sub { margin: 0 0 20px; font: 13px/1.62 Georgia, serif; color: #806d54; }
+.auth-form { display: grid; gap: 13px; }
+.auth-field { display: grid; gap: 5px; }
+.auth-field > span { color: #887359; font-size: 9px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.auth-field input { height: 36px; border-color: #c4b292; background: #fff9eb; color: #4b3d2f; }
+.auth-hint { color: #98866b; font-size: 10.5px; line-height: 1.5; }
+.auth-code { display: flex; }
+.auth-error { margin: 0; padding: 9px 11px; border: 1px solid #c98a76; background: #f7ded5; color: #8f2f22; font-size: 11.5px; line-height: 1.5; }
+.auth-submit { height: 38px; gap: 8px; cursor: pointer; }
+.auth-alt { display: flex; flex-direction: column; gap: 7px; margin-top: 18px; padding-top: 15px; border-top: 1px solid #ded0b8; color: #87765e; font-size: 11.5px; }
+.auth-alt a { color: #8a5636; text-decoration: underline; text-underline-offset: 2px; }
+.auth-alt a:hover { color: #9b533d; }
+.auth-foot { margin: 0; color: #9b886d; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.auth-foot a { color: inherit; text-decoration: underline; }
+@media (max-width: 480px) { .auth-card { padding: 24px 20px 22px; } .auth-title { font-size: 26px; } }

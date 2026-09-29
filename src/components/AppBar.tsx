@@ -5,6 +5,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { NAV_ITEMS, type NavKey } from "@/lib/navigation";
 import { useCalendarStore } from "@/lib/calendar-store";
 import { COMPANY_ROLE_DESCRIPTIONS, COMPANY_ROLE_LABELS, type CompanyRole } from "@/lib/company-scope";
+import { AUTH_PATHS } from "@/lib/auth-routes";
 
 export { NAV_ITEMS };
 export type { NavKey };
@@ -52,6 +53,15 @@ export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearch
   const changeMemberRole = async (userId: string, role: CompanyRole) => {
     const result = await setCompanyMemberRole(userId, role);
     setMemberMessage(result.ok ? null : { text: result.message ?? "Could not change this account type.", error: true });
+  };
+
+  // Clears the session (the auth service drops its access and refresh tokens)
+  // and replaces this protected page in history with the sign-in screen, so
+  // going back cannot land on it again.
+  const signOutAndLeave = async () => {
+    setUserMenuOpen(false);
+    await signOut();
+    navigate(AUTH_PATHS.signIn, { replace: true });
   };
 
   const controlled = searchValue !== undefined;
@@ -187,7 +197,7 @@ export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearch
           className="icon-button"
           title="Sign out"
           aria-label="Sign out"
-          onClick={() => { signOut(); navigate("/"); }}
+          onClick={() => void signOutAndLeave()}
         ><LogOut size={17} /></button>
       </div>
     </header>

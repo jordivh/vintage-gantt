@@ -1,6 +1,62 @@
+import { useAuth } from "@/hooks/use-auth";
 import { ArrowRight, CalendarDays, Check, Layers3, MoveRight } from "lucide-react";
 import { Link } from "react-router";
 
+/** The public start page. Both calls to action lead into the product: the
+ *  signed-in visitor back to their workspace, everyone else into the sign-in
+ *  and company-registration screens. */
 export default function Landing() {
-  return <main className="vintage-landing"><nav className="landing-nav"><div className="landing-brand"><span className="landing-seal">⌁</span><span>VINTAGE GANTT</span></div><Link to="/auth" className="landing-login">Open my workspace <ArrowRight size={14} /></Link></nav><section className="landing-hero"><div className="hero-copy"><div className="eyebrow">INTERNAL PROJECT PLANNING, BEAUTIFULLY ORDERED</div><h1>Make the moving parts<br /><em>fall into place.</em></h1><p>A clean project scheduling workspace for teams who need the whole picture. Edit tasks like a spreadsheet, browse your project catalog, and keep dates, margins, dependencies, and resources in view.</p><div className="hero-actions"><Link to="/auth" className="hero-cta">Open Vintage GANTT <MoveRight size={17} /></Link><span className="hero-note"><Check size={14} /> Keyboard-first editing</span></div></div><div className="hero-art"><div className="paper-card"><div className="paper-top"><span>VINTAGE GANTT / 2025</span><span>04—30</span></div><h3>Project catalog</h3><div className="mini-rule" />{["Site & permissions", "Artist lineup", "Install & opening", "Press materials"].map((item, index) => <div className="mini-task" key={item}><span className={`mini-dot dot-${index}`} /><span>{item}</span><i style={{ width: `${[87, 64, 38, 23][index]}%` }} /></div>)}<div className="paper-stamp">IN<br />ORDER</div></div><div className="hero-scribble">est. 2025</div></div></section><section className="landing-features"><div><CalendarDays size={20} /><h2>See the plan at a glance.</h2><p>Keep the editable task grid and Gantt timeline aligned while you review dates, margins, and progress.</p></div><div><Layers3 size={20} /><h2>A catalog for the work ahead.</h2><p>Browse active projects, search what matters, and return to the schedules your team uses every day.</p></div><div><Check size={20} /><h2>Resources stay in view.</h2><p>Plan task margins and shared resources without losing the calm, readable shape of the schedule.</p></div></section><footer className="landing-footer"><span>Vintage GANTT / internal team workspace</span><Link to="/auth">View my dashboard <ArrowRight size={14} /></Link></footer></main>;
+  const { isAuthenticated } = useAuth();
+  const workspace = isAuthenticated ? "/dashboard" : "/auth";
+
+  return (
+    <main className="vintage-landing">
+      <nav className="landing-nav">
+        <div className="landing-brand"><span className="landing-seal">⌁</span><span>VINTAGE GANTT</span></div>
+        <Link to={workspace} className="landing-login">
+          {isAuthenticated ? "Open my workspace" : "Sign in"} <ArrowRight size={14} />
+        </Link>
+      </nav>
+      <section className="landing-hero">
+        <div className="hero-copy">
+          <div className="eyebrow">INTERNAL PROJECT PLANNING, BEAUTIFULLY ORDERED</div>
+          <h1>Make the moving parts<br /><em>fall into place.</em></h1>
+          <p>A clean project scheduling workspace for teams who need the whole picture. Edit tasks like a spreadsheet, browse your project catalog, and keep dates, margins, dependencies, and resources in view.</p>
+          <div className="hero-actions">
+            <Link to={isAuthenticated ? "/dashboard" : "/auth/register"} className="hero-cta">
+              {isAuthenticated ? "Open Vintage GANTT" : "Register your company"} <MoveRight size={17} />
+            </Link>
+            {isAuthenticated
+              ? <span className="hero-note"><Check size={14} /> Keyboard-first editing</span>
+              : <Link to="/auth" className="hero-note">Already have an account? Sign in <ArrowRight size={13} /></Link>}
+          </div>
+        </div>
+        <div className="hero-art">
+          <div className="paper-card">
+            <div className="paper-top"><span>VINTAGE GANTT / 2025</span><span>04—30</span></div>
+            <h3>Project catalog</h3>
+            <div className="mini-rule" />
+            {["Site & permissions", "Artist lineup", "Install & opening", "Press materials"].map((item, index) => (
+              <div className="mini-task" key={item}>
+                <span className={`mini-dot dot-${index}`} />
+                <span>{item}</span>
+                <i style={{ width: `${[87, 64, 38, 23][index]}%` }} />
+              </div>
+            ))}
+            <div className="paper-stamp">IN<br />ORDER</div>
+          </div>
+          <div className="hero-scribble">est. 2025</div>
+        </div>
+      </section>
+      <section className="landing-features">
+        <div><CalendarDays size={20} /><h2>See the plan at a glance.</h2><p>Keep the editable task grid and Gantt timeline aligned while you review dates, margins, and progress.</p></div>
+        <div><Layers3 size={20} /><h2>A catalog for the work ahead.</h2><p>Browse active projects, search what matters, and return to the schedules your team uses every day.</p></div>
+        <div><Check size={20} /><h2>Resources stay in view.</h2><p>Plan task margins and shared resources without losing the calm, readable shape of the schedule.</p></div>
+      </section>
+      <footer className="landing-footer">
+        <span>Vintage GANTT / internal team workspace</span>
+        <Link to={workspace}>View my dashboard <ArrowRight size={14} /></Link>
+      </footer>
+    </main>
+  );
 }
