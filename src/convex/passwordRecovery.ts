@@ -12,6 +12,7 @@ import {
   resetDecision,
   resetExpiry,
 } from "../lib/password-reset";
+import { scrubSecrets } from "../lib/secret-scrub";
 import { sendTransactionalEmail } from "./email";
 
 /**
@@ -40,7 +41,16 @@ const resetEmailHtml = (link: string, expiresAt: string) => {
 /** The app's own origin for the link; the caller's origin wins when it is a real URL. */
 const appOrigin = (requested?: string): string => {
   if (requested && /^https?:\/\//i.test(requested)) return requested;
-  return (process.env.VLY_APP_URL ?? process.env.SITE_URL ?? "").replace(/\/+$/, "");
+  const configured = (process.env.VLY_APP_URL ?? "").trim();
+  if (configured) return configured.replace(/\/+$/, "");
+  const site = (process.env.SITE_URL ?? "").replace(/\/+$/, "");
+  if (site) {
+    // SITE_URL is the Convex HTTP site, not the application. A server-side request
+    // would therefore mail a link to the wrong host, so the misconfiguration is
+    // said out loud instead of producing a link nobody can open.
+    console.warn(`[vintage-gantt] VLY_APP_URL is not set; the password reset link falls back to SITE_URL (${site}). Set VLY_APP_URL to the application's own URL.`);
+  }
+  return site;
 };
 
 /**
@@ -98,10 +108,11 @@ export const requestReset = action({
         to: issued.email,
         subject: "Set a new password for Vintage GANTT",
         html: resetEmailHtml(link, expiresAt),
-        value: link,
       });
-    } catch {
-      // Neutral by design: the answer is the same and nothing is logged.
+    } catch (error: unknown) {
+      // Neutral to the visitor, loud in the server log: why a link was not mailed
+      // has to be visible to an operator, and the reason never carries the link.
+      console.error("[vintage-gantt] a password reset link could not be emailed:", scrubSecrets(error instanceof Error ? error.message : String(error)));
     }
     return { ok: true };
   },

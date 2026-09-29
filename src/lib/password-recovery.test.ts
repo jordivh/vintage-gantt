@@ -220,3 +220,66 @@ describe("password recovery — issuing a link", () => {
     expect((await harness.t.run((ctx) => ctx.db.query("passwordResets").collect())).length).toBe(0);
   });
 });
+
+/**
+ * The request action itself: it answers one constant sentence either way, it only
+ * ever tries to mail an address that really has an account, and a failure to send
+ * is recorded for the operator instead of being swallowed.
+ *
+ * The mail channel is left unconfigured here, so the send path stops before any
+ * network call and the failure it reports is the configuration one.
+ */
+describe("password recovery — the request action", () => {
+  const MAIL_VARS = ["RESEND_API_KEY", "RESEND_EMAIL_FROM", "INVITATION_FROM_EMAIL"] as const;
+
+  async function loggedWhile(run: () => Promise<void>) {
+    const saved = MAIL_VARS.map((key) => [key, process.env[key]] as const);
+    for (const key of MAIL_VARS) delete process.env[key];
+    const lines: string[] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+    try {
+      await run();
+    } finally {
+      console.error = error;
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    return lines;
+  }
+
+  test("answers the same neutral sentence for a known and an unknown address", async () => {
+    const harness = await setup();
+    const known = await harness.t.action(api.passwordRecovery.requestReset, { email: EMAIL, origin: "https://app.vintagegantt.example" });
+    const unknown = await harness.t.action(api.passwordRecovery.requestReset, { email: "nobody@nowhere.example", origin: "https://app.vintagegantt.example" });
+    expect(known).toEqual({ ok: true });
+    expect(unknown).toEqual({ ok: true });
+    expect(JSON.stringify(known)).toBe(JSON.stringify(unknown));
+  });
+
+  test("tries to mail a real account, never an unknown address, and logs the failure", async () => {
+    const harness = await setup();
+
+    const unknownLines = await loggedWhile(async () => {
+      await harness.t.action(api.passwordRecovery.requestReset, { email: "nobody@nowhere.example" });
+    });
+    // No account, no link, no send attempted: nothing to report.
+    expect(unknownLines.length).toBe(0);
+
+    const knownLines = await loggedWhile(async () => {
+      await harness.t.action(api.passwordRecovery.requestReset, { email: EMAIL, origin: "https://app.vintagegantt.example" });
+    });
+    // The operator learns why nothing was delivered…
+    const output = knownLines.join("\n");
+    expect(output).toContain("could not be emailed");
+    expect(output).toContain("RESEND_API_KEY");
+    // …and the log carries no link, no token and no password.
+    expect(output).not.toContain("token=");
+    expect(output).not.toContain(OLD_PASSWORD);
+
+    // The link itself was stored (hashed) and is waiting to be used.
+    expect((await harness.t.run((ctx) => ctx.db.query("passwordResets").collect())).length).toBe(1);
+  });
+});

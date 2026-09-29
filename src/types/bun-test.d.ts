@@ -12,6 +12,9 @@ declare module "bun:test" {
     toContain(expected: unknown): void;
     toBeGreaterThan(expected: number): void;
     toBeLessThan(expected: number): void;
+    toBeDefined(): void;
+    rejects: Matchers<unknown>;
+    resolves: Matchers<unknown>;
     not: Matchers<T>;
   }
   export function expect<T = unknown>(actual: T): Matchers<T>;

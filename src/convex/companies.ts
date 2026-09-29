@@ -847,13 +847,12 @@ export const sendInvitationEmail = action({
     const link = args.link && args.link.startsWith("http") ? args.link : invitationAcceptHref(args.token);
     // The recipient is always the address stored on the invitation, never one
     // supplied by the caller, and the link is never returned or logged.
-    const provider = await sendTransactionalEmail({
+    const sent = await sendTransactionalEmail({
       to: target.email,
       subject: `Join ${target.companyName || "Vintage GANTT"} on Vintage GANTT`,
       html: invitationEmailHtml({ link, companyName: target.companyName, inviterName: target.inviterName, expiry: target.expiresAt }),
-      value: link,
     });
-    return { ok: true, email: target.email, provider };
+    return { ok: true, email: target.email, provider: sent.provider };
   },
 });
 
