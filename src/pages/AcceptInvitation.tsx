@@ -15,8 +15,8 @@ import { Link, useSearchParams } from "react-router";
  * becomes a regular user of the inviting company.
  *
  * The link carries one single-use value. A used, expired, revoked or unknown
- * link fails with one generic message and never creates an account, and no
- * failure here says anything about the company, its users or its data.
+ * link shows one generic message and never creates an account, and no message
+ * here says anything about the company, its users or its data.
  */
 export default function AcceptInvitation() {
   const [searchParams] = useSearchParams();
@@ -25,7 +25,7 @@ export default function AcceptInvitation() {
   const { signIn } = useAuth();
   const acceptInvitation = useMutation(api.companies.acceptInvitation);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(token ? null : INVITATION_ERROR_MESSAGES.invalid);
+  const [error, setError] = useState<string | null>(null);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -70,33 +70,37 @@ export default function AcceptInvitation() {
         </span>
       }
     >
-      <form className="auth-form" onSubmit={submit} noValidate>
-        <label className="auth-field">
-          <span>Your name</span>
-          <Input name="name" type="text" autoComplete="name" placeholder="Marta Visser" disabled={busy || !token} required />
-        </label>
-        <label className="auth-field">
-          <span>Password</span>
-          <Input name="password" type="password" autoComplete="new-password" placeholder="At least 8 characters" disabled={busy || !token} required />
-          <span className="auth-hint">At least 8 characters. Stored only as a hash by the auth service.</span>
-        </label>
+      {!token ? (
+        <p className="auth-error" role="alert">{INVITATION_ERROR_MESSAGES.invalid}</p>
+      ) : (
+        <form className="auth-form" onSubmit={submit} noValidate>
+          <label className="auth-field">
+            <span>Your name</span>
+            <Input name="name" type="text" autoComplete="name" placeholder="Marta Visser" disabled={busy} required />
+          </label>
+          <label className="auth-field">
+            <span>Password</span>
+            <Input name="password" type="password" autoComplete="new-password" placeholder="At least 8 characters" disabled={busy} required />
+            <span className="auth-hint">At least 8 characters. Stored only as a hash by the auth service.</span>
+          </label>
 
-        {error ? (
-          <p className="auth-error" role="alert">{error}</p>
-        ) : null}
+          {error ? (
+            <p className="auth-error" role="alert">{error}</p>
+          ) : null}
 
-        <Button type="submit" className="auth-submit" disabled={busy || !token}>
-          {busy ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" /> Joining…
-            </>
-          ) : (
-            <>
-              <UserPlus className="h-4 w-4" /> Join the company
-            </>
-          )}
-        </Button>
-      </form>
+          <Button type="submit" className="auth-submit" disabled={busy}>
+            {busy ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Joining…
+              </>
+            ) : (
+              <>
+                <UserPlus className="h-4 w-4" /> Join the company
+              </>
+            )}
+          </Button>
+        </form>
+      )}
     </AuthShell>
   );
 }

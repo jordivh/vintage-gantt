@@ -28,7 +28,7 @@ import {
   type CompanyRole,
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
-import { invitationAcceptHref } from "./company-users";
+import { REMOVED_ACCESS_MESSAGE, invitationAcceptHref } from "./company-users";
 import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -1090,7 +1090,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     resetWorkspace();
     if (access === "signed-out" || removalSignOutRef.current) return;
     removalSignOutRef.current = true;
-    toast.error(ACCESS_ENDED_MESSAGE);
+    // A removed account is told exactly that; any other ended session (signed
+    // out, expired, suspended company) gets the neutral message. Neither names
+    // a person, a project or another company.
+    toast.error(accessInfo?.removed === true ? REMOVED_ACCESS_MESSAGE : ACCESS_ENDED_MESSAGE);
     void signOut();
   }, [access, resetWorkspace, signOut]);
 

@@ -322,7 +322,7 @@
 .date-picker-button { width: 100%; height: 33px; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; border: 1px solid #d1bea1; border-radius: 3px; background: #fffaf1; color: #513e2e; font: 12px sans-serif; text-align: left; }.date-picker-button:hover, .date-picker-button:focus-visible { border-color: #9a593f; outline: 0; box-shadow: 0 0 0 2px #9a593f1f; }.date-picker-button svg { color: #4b3a2d; }.resource-calendar-popover { width: auto; padding: 0; background: #f8f0df; border-color: #b8a485; }
 .leave-entry { padding: 13px; background: #f1e6d2; border: 1px solid #e0cfb5; }.leave-entry-title { display: flex; justify-content: space-between; margin-bottom: 12px; color: #634b36; font-size: 12px; }.leave-entry-title span { color: #9b866b; font-size: 10px; }.leave-entry .tool-button { margin-top: 13px; }.leave-calendar-head { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 7px; color: #5f4937; font: 14px Georgia, serif; }.leave-calendar-head div { display: flex; align-items: center; gap: 7px; font: 12px sans-serif; }.leave-calendar-head .icon-button { width: 25px; height: 25px; }.resource-year-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }.mini-month { padding: 7px; background: #f8f0e1; border: 1px solid #dfceb5; border-radius: 3px; }.mini-month > b { display: block; margin-bottom: 5px; color: #70553e; font: 11px Georgia, serif; }.mini-weekdays, .mini-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; text-align: center; }.mini-weekdays { color: #ae9779; font-size: 8px; }.mini-days span { display: grid; place-items: center; height: 17px; color: #755f49; font-size: 8px; border-radius: 2px; }.mini-days span.nonworking { color: #b29e86; background: #eadfcd; }.mini-days span.leave-day { color: #fff8ec; background: #bf6d52; font-weight: 700; }.leave-list { margin-top: 18px; display: flex; flex-direction: column; gap: 7px; }.leave-list > b { color: #654d38; font: 14px Georgia, serif; }.leave-list-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid #e1d3c0; background: #fffaf1; }.leave-list-row span { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #5b4634; }.leave-list-row small { color: #a08365; font-size: 10px; }.empty-state { min-height: calc(100vh - 56px); display: grid; place-content: center; justify-items: center; gap: 12px; color: #8b765d; }.empty-state h2 { font: 24px Georgia, serif; color: #4b392b; }
 @media (max-width: 1100px) { .resource-layout { grid-template-columns: 1fr; } .resource-detail { min-height: auto; } }
-@media (max-width: 620px) { .planner-body { height: calc(100vh - 152px); }.project-sidebar { flex-basis: 220px; }.project-sidebar.collapsed { flex-basis: 32px; }.resource-screen { padding: 20px 14px; }.resource-heading { align-items: flex-start; flex-direction: column; }.resource-year-grid { grid-template-columns: repeat(2, 1fr); }.detail-grid { grid-template-columns: 1fr; }.topnav { display: none; } }
+@media (max-width: 620px) { .planner-body { height: calc(100vh - 152px); }.project-sidebar { flex-basis: 220px; }.project-sidebar.collapsed { flex-basis: 32px; }.resource-screen { padding: 20px 14px; }.resource-heading { align-items: flex-start; flex-direction: column; }.resource-year-grid { grid-template-columns: repeat(2, 1fr); }.detail-grid { grid-template-columns: 1fr; } }
 
 /* Float column: read-only working-day count, right aligned. A zero float is the
    critical path, so it uses the same accent as the critical bars. */
@@ -742,3 +742,36 @@
 .company-self-tag { color: #9a8464; font-size: 11px; }
 .tool-button.danger { border-color: #cfa595; background: #eed9d2; color: #7d3f32; }
 .tool-button.danger:hover { background: #e6c9c0; }
+
+/* The account area of the shared header: read-only company context, the Company
+   users entry (company admins only) and the signed-in user's name. None of it
+   changes planning data or an account's rights. */
+.company-context { display: inline-flex; align-items: center; gap: 6px; height: 32px; max-width: 200px; padding: 0 10px; border: 1px solid #cbbda4; border-radius: 4px; background: #f2eadb; color: #5a4d3e; font-size: 11px; }
+.company-context-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appbar-action { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 11px; border: 1px solid #c6b79d; border-radius: 4px; background: #efe5d2; color: #5a4d3e; font-size: 11px; cursor: pointer; }
+.appbar-action:hover { background: #e3d5bb; }
+.appbar-action:focus-visible { outline: 2px solid #9a593f; outline-offset: 1px; }
+.appbar-user { display: inline-flex; align-items: center; gap: 7px; height: 32px; color: #5a4d3e; font-size: 11px; }
+.appbar-user-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Progressive compaction of the account area, in one documented order: the
+   search width and the two names first, then the breadcrumb prefix, then the
+   Company users label, then the search itself. Nothing is clipped at 1280 px,
+   and the company name and the user's name are the last things to give way. */
+@media (max-width: 1600px) { .appbar-search input { width: 150px; } .company-context-name { max-width: 140px; } .appbar-user-name { max-width: 110px; } }
+@media (max-width: 1340px) { .breadcrumb-root { display: none; } }
+@media (max-width: 1200px) { .planner-appbar { gap: 12px; } .appbar-action-label { display: none; } .company-context-name { max-width: 110px; } .appbar-user-name { max-width: 90px; } }
+@media (max-width: 1050px) { .appbar-search { display: none; } }
+@media (max-width: 900px) { .planner-appbar .segment { padding: 0 9px; } .appbar-user-name { display: none; } .company-context-name { max-width: 104px; } }
+@media (max-width: 700px) { .planner-appbar { padding: 0 12px; gap: 10px; } }
+/* On a phone the five sections stay reachable: the nav row shrinks and scrolls
+   sideways instead of disappearing, and the header keeps its single 56 px row so
+   every screen's height calculation stays correct. */
+@media (max-width: 620px) {
+  .planner-appbar { gap: 8px; }
+  .planner-appbar .brand-mark { display: none; }
+  .planner-appbar .topnav.segmented { min-width: 0; flex: 1 1 auto; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .planner-appbar .topnav.segmented::-webkit-scrollbar { display: none; }
+  .planner-appbar .segment { flex: 0 0 auto; }
+  .company-context { max-width: 128px; padding: 0 8px; }
+}
