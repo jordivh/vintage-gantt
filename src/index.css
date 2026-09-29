@@ -646,3 +646,20 @@
 
 /* A fresh task row shows its fallback name as a real placeholder only. */
 .cell-input::placeholder { color: #a2917a; font-style: italic; }
+
+/* Catalog groups: a real, focusable header button that folds its rows away and
+   carries the item count. The collapsed/expanded state is remembered per group. */
+.project-table tbody tr.catalog-section { background: #f1e6d2; cursor: default; }
+.project-table tbody tr.catalog-section:hover { background: #eadfc8; }
+.project-table tbody tr.catalog-section td { padding: 8px 12px; color: #6b5741; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.catalog-toggle { display: inline-flex; align-items: center; gap: 7px; margin-left: -7px; padding: 3px 7px; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.catalog-toggle:hover { background: #e3d3b8; color: #5a4635; }
+.catalog-toggle:focus-visible { outline: 2px solid #9a593f; outline-offset: 1px; }
+.catalog-toggle svg { color: #9a8464; }
+.catalog-toggle span { font-weight: 700; }
+
+/* Restoring an archived project, from the row menu or the settings panel. */
+.context-menu.project-row-menu { min-width: 214px; }
+.project-settings-restore { margin: 4px 0 6px; padding: 12px 13px; border: 1px solid #d0bea0; background: #f3e9d7; }
+.project-settings-restore p { margin: 0 0 10px; color: #6b5741; font-size: 11px; line-height: 1.55; }
+.project-settings-restore b { color: #9a593f; }

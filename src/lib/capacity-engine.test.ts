@@ -195,6 +195,12 @@ describe("capacity — overview filters", () => {
     expect(selectCapacityProjects(projects).map((project) => project.id)).toEqual(["a", "b", "d"]);
   });
 
+  test("counts an archived project again as soon as it is restored to active", () => {
+    const restored = projects.map((project) => project.id === "c" ? { ...project, status: "active" } : project);
+    expect(selectCapacityProjects(projects).map((project) => project.id)).toEqual(["a", "b", "d"]);
+    expect(selectCapacityProjects(restored).map((project) => project.id)).toEqual(["a", "b", "c", "d"]);
+  });
+
   test("filters by project, by client, and by both", () => {
     expect(selectCapacityProjects(projects, { projectId: "b" }).map((project) => project.id)).toEqual(["b"]);
     expect(selectCapacityProjects(projects, { client: "Gemeente" }).map((project) => project.id)).toEqual(["a"]);

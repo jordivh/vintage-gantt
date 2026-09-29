@@ -197,6 +197,13 @@ interface CalendarStoreValue {
   setProjectClient: (projectId: string, client: string) => void;
   duplicateProject: (projectId: string, name: string) => string;
   archiveProject: (projectId: string) => void;
+  /**
+   * Puts an archived project back under the active projects. Only its status
+   * changes: tasks, plan versions, baselines and resource assignments are
+   * untouched, so nothing about the plan — dates, durations, workload, margin or
+   * assignments — moves, and the project counts in the capacity figures again.
+   */
+  restoreProject: (projectId: string) => void;
   deleteProject: (projectId: string) => { ok: boolean; taskCount: number };
   calendarsUsingProjects: (calendarId: string) => ProjectRecord[];
   projectsAffectedBy: (calendarId: string) => ProjectRecord[];
@@ -721,6 +728,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     if (activeProjectId === projectId) setActiveProjectId(projects.find((project) => project.id !== projectId && project.status === "active" && project.kind !== "template")?.id ?? "");
   }, [activeProjectId, projects]);
 
+  const restoreProject = useCallback<CalendarStoreValue["restoreProject"]>((projectId) => {
+    if (!projects.some((project) => project.id === projectId && project.status === "archived" && (project.kind ?? "project") === "project")) return;
+    setProjects((current) => current.map((project) => project.id === projectId ? { ...project, status: "active", updatedAt: new Date().toISOString() } : project));
+  }, [projects]);
+
   const deleteProject = useCallback<CalendarStoreValue["deleteProject"]>((projectId) => {
     const taskCount = (tasksByProject[projectId] ?? []).length;
     const project = projects.find((item) => item.id === projectId);
@@ -948,6 +960,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       renameProject,
       duplicateProject,
       archiveProject,
+      restoreProject,
       deleteProject,
       calendarsUsingProjects,
       projectsAffectedBy,
@@ -984,7 +997,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       clearFocusTask,
     }),
     [
-      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, deleteProject, calendarsUsingProjects,
+      system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, calendarsUsingProjects,
       projectsAffectedBy, previewCalendarChange, previewProjectRelink, applyCalendarSystem,
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
