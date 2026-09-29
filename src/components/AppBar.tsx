@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router";
-import { ChevronDown, CircleHelp, LogOut, Search, X } from "lucide-react";
+import { ChevronDown, CircleHelp, Loader2, LogOut, Search, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { NAV_ITEMS, type NavKey } from "@/lib/navigation";
+import { useCalendarStore } from "@/lib/calendar-store";
+import { COMPANY_ROLE_DESCRIPTIONS, COMPANY_ROLE_LABELS, type CompanyRole } from "@/lib/company-scope";
 
 export { NAV_ITEMS };
 export type { NavKey };
@@ -24,9 +26,33 @@ type AppBarProps = {
 export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearchKeyDown }: AppBarProps) {
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
+  const { company, companyRole, canManageMembers, addCompanyMember, setCompanyMemberRole } = useCalendarStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [localSearch, setLocalSearch] = useState("");
+  const [memberEmail, setMemberEmail] = useState("");
+  const [memberBusy, setMemberBusy] = useState(false);
+  const [memberMessage, setMemberMessage] = useState<{ text: string; error: boolean } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const inviteMember = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const email = memberEmail.trim();
+    if (!email || memberBusy) return;
+    setMemberBusy(true);
+    const result = await addCompanyMember(email);
+    setMemberBusy(false);
+    if (result.ok) {
+      setMemberEmail("");
+      setMemberMessage({ text: `${email} can now plan in ${company?.company.name ?? "this company"}.`, error: false });
+    } else {
+      setMemberMessage({ text: result.message ?? "Could not add this account.", error: true });
+    }
+  };
+
+  const changeMemberRole = async (userId: string, role: CompanyRole) => {
+    const result = await setCompanyMemberRole(userId, role);
+    setMemberMessage(result.ok ? null : { text: result.message ?? "Could not change this account type.", error: true });
+  };
 
   const controlled = searchValue !== undefined;
   const value = controlled ? searchValue : localSearch;
@@ -103,6 +129,56 @@ export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearch
                 <button onClick={() => setUserMenuOpen(false)}><X size={14} /></button>
               </div>
               <div className="user-save-state"><span className="live-dot" /> Saved just now</div>
+              {company && (
+                <div className="company-block">
+                  <div className="popover-heading"><span>COMPANY</span></div>
+                  <div className="company-name">
+                    <b>{company.company.name}</b>
+                    <span className={`role-chip${companyRole === "company_admin" ? " admin" : ""}`}>{COMPANY_ROLE_LABELS[companyRole]}</span>
+                  </div>
+                  <p className="company-hint">
+                    {canManageMembers ? COMPANY_ROLE_DESCRIPTIONS.company_admin : COMPANY_ROLE_DESCRIPTIONS.user}
+                  </p>
+                  <div className="company-members">
+                    {company.members.map((member) => (
+                      <div className="company-member" key={member.userId}>
+                        <span className="company-member-name" title={member.email || member.name}>
+                          {member.name || member.email || "Account"}{member.isSelf ? " (you)" : ""}
+                        </span>
+                        {canManageMembers ? (
+                          <select
+                            value={member.role}
+                            aria-label={`Account type of ${member.name || member.email}`}
+                            onChange={(event) => void changeMemberRole(member.userId, event.target.value as CompanyRole)}
+                          >
+                            <option value="company_admin">{COMPANY_ROLE_LABELS.company_admin}</option>
+                            <option value="user">{COMPANY_ROLE_LABELS.user}</option>
+                          </select>
+                        ) : (
+                          <span className="company-member-role">{COMPANY_ROLE_LABELS[member.role]}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {canManageMembers && (
+                    <form className="company-invite" onSubmit={inviteMember}>
+                      <input
+                        value={memberEmail}
+                        onChange={(event) => setMemberEmail(event.target.value)}
+                        placeholder="Add member by email"
+                        aria-label="Add member by email"
+                        disabled={memberBusy}
+                      />
+                      <button type="submit" disabled={memberBusy || !memberEmail.trim()}>
+                        {memberBusy ? <Loader2 size={13} className="animate-spin" /> : "Add"}
+                      </button>
+                    </form>
+                  )}
+                  {memberMessage && (
+                    <p className={memberMessage.error ? "company-message error" : "company-message"}>{memberMessage.text}</p>
+                  )}
+                </div>
+              )}
               <button title="Help"><CircleHelp size={14} /> Help</button>
             </div>
           )}

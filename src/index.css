@@ -669,3 +669,25 @@
 
 /* The Export to Excel button sits beside the period switch in the Capacity header. */
 .capacity-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+
+/* The company the signed-in account belongs to, in the account menu. Account
+   types differ only here: company admins manage users and invitations. */
+.company-block { margin-top: 6px; padding-top: 4px; border-top: 1px solid #d0bea0; }
+.company-name { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 7px; }
+.company-name b { color: #4d3f30; font-size: 12px; }
+.role-chip { padding: 2px 7px; border: 1px solid #c9b797; border-radius: 999px; background: #efe3cd; color: #6b5741; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.role-chip.admin { border-color: #c7a074; background: #f0dcc0; color: #8a4a2c; }
+.company-hint { margin: 2px 7px 8px; color: #87765e; font-size: 10px; line-height: 1.5; }
+.company-members { display: flex; flex-direction: column; gap: 2px; }
+.company-member { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 7px; }
+.company-member-name { overflow: hidden; color: #5e5141; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.company-member-role { color: #87765e; font-size: 10px; }
+.company-member select { max-width: 128px; padding: 2px 4px; border: 1px solid #cdbb9c; border-radius: 3px; background: #fffdf7; color: #5e5141; font-size: 10px; }
+.company-invite { display: flex; align-items: center; gap: 6px; margin-top: 7px; padding: 0 3px; }
+.company-invite input { flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid #cdbb9c; border-radius: 3px; background: #fffdf7; color: #4d3f30; font-size: 11px; }
+.company-invite button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; padding: 5px 9px; border: 1px solid #b8a68b; border-radius: 3px; background: #e7dac2; color: #5a4635; font-size: 11px; }
+.company-invite button:hover:not(:disabled) { background: #dccdb2; }
+.company-invite button:disabled { opacity: .55; }
+.company-message { margin: 6px 7px 0; color: #71836c; font-size: 10px; line-height: 1.5; }
+.company-message.error { color: #9a593f; }
+.user-popover { min-width: 268px; }

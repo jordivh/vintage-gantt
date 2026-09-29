@@ -21,7 +21,14 @@ import {
 } from "./scheduling-engine";
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
+import {
+  canManageMembers as roleCanManageMembers,
+  migrationSummaryLines,
+  type CompanyMigrationReport,
+  type CompanyRole,
+} from "./company-scope";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 
@@ -72,6 +79,11 @@ export interface BaselineDeleteResult {
   snapshotsRemoved?: number;
 }
 export interface BaselineTask { id: string; baselineId: string; taskId: string; startDate: string; finishDate: string; durationDays: number; marginPct: number; marginDaysOriginal: number; marginDaysConsumed: number; predecessors?: string; totalFloat?: number; startConstraint?: string; }
+
+/** The company of the signed-in account, as resolved by the server. */
+export interface CompanySummary { id: string; name: string; status: string; createdAt: string; }
+export interface CompanyMember { userId: string; name: string; email: string; role: CompanyRole; isSelf: boolean; }
+export interface CompanyInfo { company: CompanySummary; role: CompanyRole; canManageMembers: boolean; members: CompanyMember[]; }
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -243,6 +255,20 @@ interface CalendarStoreValue {
   focusTask: { projectId: string; versionId: string; taskId: string } | null;
   clearFocusTask: () => void;
   /**
+   * The company every record belongs to. The server links the signed-in account
+   * to exactly one company; the browser never supplies a company id and it is
+   * never treated as proof of access.
+   */
+  company: CompanyInfo | null;
+  /** "company_admin" or "user" — they differ only for user/invitation management. */
+  companyRole: CompanyRole;
+  /** True only for company admins. */
+  canManageMembers: boolean;
+  /** Admin-only: adds an existing account to this company. */
+  addCompanyMember: (email: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: changes an account type; the last company admin can never be demoted. */
+  setCompanyMemberRole: (userId: string, role: CompanyRole) => Promise<{ ok: boolean; message?: string }>;
+  /**
    * Switches a version between Planning and Monitoring. Monitoring requires a
    * baseline on that version, and a version can never go back to Planning —
    * that happens by creating a new version (Replan). Every switch is timestamped
@@ -335,9 +361,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const setTemplateHiddenRemote = useMutation(api.planner.hideTemplate);
   const deleteTemplateRemote = useMutation(api.planner.deleteTemplate);
   const replaceRemoteState = useMutation(api.planner.replaceState);
+  const ensureCompanyRemote = useMutation(api.companies.ensureCompany);
+  const addCompanyMemberRemote = useMutation(api.companies.addMemberByEmail);
+  const setCompanyMemberRoleRemote = useMutation(api.companies.setMemberRole);
+  const companyInfo = useQuery(api.companies.current, isAuthenticated ? {} : "skip");
+  const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
+  const companyRole: CompanyRole = company?.role ?? "user";
   const hydratedRef = useRef(false);
   const migrationStartedRef = useRef(false);
   const seedStartedRef = useRef(false);
+  const companyStartedRef = useRef(false);
   const suppressSaveRef = useRef(false);
   const lastServerStateRef = useRef<unknown>(null);
 
@@ -412,6 +445,28 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       toast.error("Could not prepare the server-side test project.");
     });
   }, [isAuthenticated, remoteState, ensureTestProject]);
+
+  /**
+   * Company-based access. The server creates exactly one company for the
+   * signed-in account, links every existing record to it and compares record
+   * counts and key planning totals before and after. A difference aborts the
+   * migration server-side, so nothing is deleted, recreated or rewritten.
+   */
+  useEffect(() => {
+    if (!isAuthenticated || companyStartedRef.current) return;
+    companyStartedRef.current = true;
+    void ensureCompanyRemote({})
+      .then((report) => {
+        const migration = report as CompanyMigrationReport;
+        if (migration.created) console.info("[vintage-gantt]", migrationSummaryLines(migration).join(" "));
+      })
+      .catch((error: unknown) => {
+        companyStartedRef.current = false;
+        const reason = error instanceof Error ? error.message : String(error);
+        console.error("[vintage-gantt] company migration failed:", error);
+        toast.error(`Could not prepare your company workspace. ${reason}`);
+      });
+  }, [isAuthenticated, ensureCompanyRemote]);
 
   useEffect(() => {
     if (!isAuthenticated || !hydratedRef.current) return;
@@ -941,6 +996,24 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [projects, system],
   );
 
+  const addCompanyMember = useCallback<CalendarStoreValue["addCompanyMember"]>(async (email) => {
+    try {
+      await addCompanyMemberRemote({ email: email.trim() });
+      return { ok: true };
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }, [addCompanyMemberRemote]);
+
+  const setCompanyMemberRole = useCallback<CalendarStoreValue["setCompanyMemberRole"]>(async (userId, role) => {
+    try {
+      await setCompanyMemberRoleRemote({ userId: userId as Id<"users">, role });
+      return { ok: true };
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }, [setCompanyMemberRoleRemote]);
+
   const value = useMemo<CalendarStoreValue>(
     () => ({
       system,
@@ -995,6 +1068,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       openTask,
       focusTask,
       clearFocusTask,
+      company,
+      companyRole,
+      canManageMembers: roleCanManageMembers(companyRole),
+      addCompanyMember,
+      setCompanyMemberRole,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, calendarsUsingProjects,
@@ -1002,6 +1080,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
       planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode, setProjectClient, openTask, focusTask, clearFocusTask,
+      company, companyRole, addCompanyMember, setCompanyMemberRole,
     ],
   );
 
