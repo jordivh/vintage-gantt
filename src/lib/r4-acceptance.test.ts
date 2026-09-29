@@ -11,7 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createAccount, retrieveAccount } from "@convex-dev/auth/server";
-import type { GenericActionCtx } from "convex/server";
+import type { GenericActionCtx, GenericMutationCtx } from "convex/server";
 import { convexTest } from "convex-test";
 import { api, internal } from "../convex/_generated/api";
 import type { DataModel, Id } from "../convex/_generated/dataModel";
@@ -34,6 +34,24 @@ const NOW = "2026-01-01T09:00:00.000Z";
 const ALPHA_ADMIN_EMAIL = "admin@alpha.example";
 const ALPHA_ADMIN_PASSWORD = "alphapassword1";
 
+/**
+ * Inserts a complete workspace directly for an account that has no company yet,
+ * which is how the pre-company ("legacy") workspaces in the deployment look.
+ */
+async function insertLegacyWorkspace(ctx: GenericMutationCtx<DataModel>, ownerId: Id<"users">, tag: string) {
+  const w = workspace(tag);
+  for (const row of w.projects) await ctx.db.insert("projects", { ...row, ownerId });
+  for (const row of w.calendars) await ctx.db.insert("calendars", { ...row, ownerId });
+  for (const row of w.resources) await ctx.db.insert("resources", { ...row, ownerId });
+  for (const row of w.tasks) await ctx.db.insert("tasks", { ...row, ownerId });
+  for (const row of w.planVersions) await ctx.db.insert("planVersions", { ...row, ownerId });
+  for (const row of w.dependencies) await ctx.db.insert("dependencies", { ...row, ownerId });
+  for (const row of w.assignments) await ctx.db.insert("taskAssignments", { ...row, ownerId });
+  for (const row of w.exceptions) await ctx.db.insert("calendarExceptions", { ...row, ownerId });
+  for (const row of w.baselines) await ctx.db.insert("baselines", { ...row, ownerId });
+  for (const row of w.baselineTasks) await ctx.db.insert("baselineTasks", { ...row, ownerId });
+}
+
 /** Runs something that must be refused, and returns the refusal message. */
 async function refusal(run: () => Promise<unknown>): Promise<string> {
   try {
@@ -46,7 +64,7 @@ async function refusal(run: () => Promise<unknown>): Promise<string> {
 
 /** One complete workspace, tagged so a leak is unmistakable. */
 const workspace = (tag: string) => ({
-  projects: [{ id: `proj-${tag}`, name: `Project ${tag}`, status: "active", kind: "project", startDate: "2026-01-05", schedulingDirection: "forward", calendarId: `cal-${tag}`, createdAt: NOW, updatedAt: NOW }],
+  projects: [{ id: `proj-${tag}`, name: `Project ${tag}`, status: "active", kind: "project" as const, startDate: "2026-01-05", schedulingDirection: "forward", calendarId: `cal-${tag}`, createdAt: NOW, updatedAt: NOW }],
   calendars: [{ id: `cal-${tag}`, name: `Calendar ${tag}`, type: "base", parentCalendarId: null, isDefault: true, workingDays: [1, 2, 3, 4, 5] }],
   resources: [{ id: `res-${tag}`, name: `Person ${tag}`, role: "", email: `person@${tag}.example`, colour: "sage", hoursPerWeek: 40, isActive: true, calendarId: `cal-${tag}` }],
   tasks: [
@@ -202,12 +220,12 @@ describe("R4 — company accounts", () => {
       email: "admin@gamma.example",
       password: "gammapassword1",
     });
-    const company = await h.t.run((ctx) => ctx.db.get(registered.companyId as Id<"companies">));
+    const company = await h.t.run((ctx) => ctx.db.get(registered.companyId as unknown as Id<"companies">));
     expect(company?.name).toBe("Gamma Works");
     expect(company?.status).toBe("active");
     const account = await h.t.run((ctx) => ctx.db.query("users").withIndex("email", (q) => q.eq("email", "admin@gamma.example")).first());
     expect(account?.companyRole).toBe("company_admin");
-    expect(account?.companyId).toBe(registered.companyId);
+    expect(account?.companyId).toBe(company?._id);
   });
 
   test("R4-08 an admin invites an address and only the value's hash is stored", async () => {
@@ -333,7 +351,9 @@ describe("R4 — company isolation", () => {
       expect(message.includes("alpha")).toBe(false);
     }
     // Alpha's own workspace is untouched by every refused save.
-    expect((await h.t.withIdentity({ subject: h.alphaAdmin }).query(api.planner.getState, {}))?.resources?.[0].resourceId ?? "res-alpha").toBeDefined();
+    const alphaNow = await h.t.withIdentity({ subject: h.alphaAdmin }).query(api.planner.getState, {});
+    expect(alphaNow?.resources?.[0].id).toBe("res-alpha");
+    expect(alphaNow?.projects?.[0].id).toBe("proj-alpha");
   });
 
   test("R4-18 a company cannot delete or rewrite another company's records", async () => {
@@ -382,5 +402,59 @@ describe("R4 — company isolation", () => {
     expect((await h.t.withIdentity({ subject: h.betaAdmin }).query(api.companies.pendingInvitations, {}))?.length).toBe(0);
     expect(await refusal(() => h.t.withIdentity({ subject: h.betaAdmin }).mutation(api.companies.revokeInvitation, { invitationId: created.invitationId as never }))).not.toBe("");
     expect((await h.t.run((ctx) => ctx.db.query("invitations").collect()))[0].status).toBe("pending");
+  });
+
+  test("R4-23 a pre-company workspace stays readable and survives its company unchanged", async () => {
+    const t = convexTest(schema, modules);
+    const userId = await t.run(async (ctx) => {
+      const id = await ctx.db.insert("users", { name: "Legacy account", isAnonymous: true });
+      await insertLegacyWorkspace(ctx, id, "legacy");
+      return id;
+    });
+
+    // Before adoption the account still sees its own workspace, with no company.
+    const before = await t.withIdentity({ subject: userId }).query(api.planner.getState, {});
+    expect(before?.companyId).toBeNull();
+    expect((before?.projects ?? []).length).toBe(1);
+    expect((before?.tasks ?? []).length).toBe(2);
+    expect((before?.baselines ?? []).length).toBe(1);
+
+    // Adoption links every row and reports identical counts and planning totals.
+    const report = await t.withIdentity({ subject: userId }).mutation(api.companies.ensureCompany, {});
+    expect(report.created).toBe(true);
+    expect(report.mismatch.length).toBe(0);
+    expect(report.counts.before).toEqual(report.counts.after);
+    expect(report.totals.before).toEqual(report.totals.after);
+    expect(report.rowsLinked).toBeGreaterThan(0);
+
+    // The workspace itself is byte-identical: nothing was lost, duplicated or changed.
+    const after = await t.withIdentity({ subject: userId }).query(api.planner.getState, {});
+    expect(after?.companyId).toBe(report.companyId);
+    for (const table of ["projects", "tasks", "dependencies", "calendars", "exceptions", "resources", "assignments", "planVersions", "baselines", "baselineTasks"] as const) {
+      expect(`${table}: ${JSON.stringify(after?.[table])}`).toBe(`${table}: ${JSON.stringify(before?.[table])}`);
+    }
+  });
+
+  test("R4-24 one pre-company workspace is invisible to another pre-company account", async () => {
+    const t = convexTest(schema, modules);
+    const [delta, omega] = await t.run(async (ctx) => {
+      const a = await ctx.db.insert("users", { name: "Legacy delta", isAnonymous: true });
+      const b = await ctx.db.insert("users", { name: "Legacy omega", isAnonymous: true });
+      await insertLegacyWorkspace(ctx, a, "delta");
+      await insertLegacyWorkspace(ctx, b, "omega");
+      return [a, b] as const;
+    });
+
+    const seen = (await t.withIdentity({ subject: omega }).query(api.planner.getState, {})) as unknown as Record<string, { id: string }[]>;
+    expect(seen?.projects?.[0]?.id).toBe("proj-omega");
+    expect((seen?.tasks ?? []).length).toBe(2);
+    const serialised = JSON.stringify(seen);
+    for (const leak of ["proj-delta", "task-delta-1", "person@delta.example", "Leave delta", "Baseline delta"]) {
+      expect(serialised.includes(leak)).toBe(false);
+    }
+    // Delta still sees only its own.
+    const deltaSeen = (await t.withIdentity({ subject: delta }).query(api.planner.getState, {})) as unknown as Record<string, { id: string }[]>;
+    expect(deltaSeen?.projects?.[0]?.id).toBe("proj-delta");
+    expect(JSON.stringify(deltaSeen).includes("proj-omega")).toBe(false);
   });
 });
