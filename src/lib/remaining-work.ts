@@ -378,7 +378,6 @@ function withLogAndMargin(scheduled: PlannerTask[], planned: PlannerTask, taskId
 function beforeSnapshot(task: PlannerTask): TaskAdjustment["before"] {
   return {
     allocations: task.allocations,
-    adjustments: task.adjustments,
     work: task.work,
     duration: task.duration,
     durationUnit: task.durationUnit,
@@ -387,6 +386,33 @@ function beforeSnapshot(task: PlannerTask): TaskAdjustment["before"] {
     marginPct: task.marginPct,
     marginDaysOriginal: task.marginDaysOriginal,
     marginDaysConsumed: task.marginDaysConsumed,
+  };
+}
+
+/**
+ * Drops a copy of the log that an earlier version stored inside every entry's
+ * `before` snapshot.
+ *
+ * The snapshot only has to put task fields back; the log itself lives in
+ * `PlannerTask.adjustments`. Storing it per entry nested a copy of every
+ * earlier entry (and its snapshot) in each new one, so the stored task doubled
+ * with every adjustment until the workspace save grew past what the database
+ * accepts and the whole save was refused. Nothing reads the nested copy, so it
+ * is removed on the way in and on the way out.
+ */
+export function withoutSnapshotLog(task: PlannerTask): PlannerTask {
+  const log = task.adjustments;
+  if (!log?.length) return task;
+  const carriesLog = (entry: TaskAdjustment) => (entry.before as { adjustments?: unknown }).adjustments !== undefined;
+  if (!log.some(carriesLog)) return task;
+  const withoutNestedLog = (before: TaskAdjustment["before"]): TaskAdjustment["before"] => {
+    const copy: Record<string, unknown> = { ...before };
+    delete copy.adjustments;
+    return copy as unknown as TaskAdjustment["before"];
+  };
+  return {
+    ...task,
+    adjustments: log.map((entry) => (carriesLog(entry) ? { ...entry, before: withoutNestedLog(entry.before) } : entry)),
   };
 }
 

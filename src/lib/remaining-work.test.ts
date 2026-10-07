@@ -17,6 +17,7 @@ import {
   removeLastAdjustment,
   undoLastAdjustment,
   validateAdjustment,
+  withoutSnapshotLog,
   type AdjustmentContext,
   type AdjustmentInput,
 } from "./remaining-work";
@@ -518,5 +519,70 @@ describe("adjust remaining work — removal and edit", () => {
     expect(afterSecond.allocations?.length).toBe(2);
     expect(afterSecond.adjustments?.length).toBe(2);
     expect(afterSecond.adjustments?.every((entry) => !entry.removedAt)).toBe(true);
+  });
+});
+
+/**
+ * The stored task has to stay small: a save rewrites the whole workspace, so a
+ * log entry that carried a copy of the log grew the document for every
+ * adjustment until the save was refused as a server error.
+ */
+describe("adjustment log stays compact", () => {
+  const actor = { id: "u1", name: "Ada" };
+  const chain = (rounds: number): PlannerTask => {
+    let task = scenarioTask();
+    for (let round = 0; round < rounds; round += 1) {
+      const plan = planAdjustment([task], task.id, input({ keepUntil: "2026-09-14", remainingWork: 40, newFinish: "2026-09-21", reason: `round ${round}` }), context(), { actor, at: `2026-09-1${round % 9}T09:00:00.000Z` });
+      if ("error" in plan) throw new Error(plan.error);
+      task = plan.task;
+    }
+    return task;
+  };
+
+  test("a log entry carries no copy of the log", () => {
+    const task = chain(3);
+    expect(task.adjustments?.length).toBe(3);
+    for (const entry of task.adjustments ?? []) {
+      expect("adjustments" in entry.before).toBe(false);
+    }
+  });
+
+  test("the stored task grows with the number of adjustments, not with their nesting", () => {
+    const four = JSON.stringify(chain(4)).length;
+    const eight = JSON.stringify(chain(8)).length;
+    // Twice the adjustments, roughly twice the size. A snapshot that nested the
+    // log made the eighth round around sixteen times the fourth.
+    expect(eight).toBeLessThan(four * 3);
+  });
+
+  test("a log written by the earlier version is trimmed without losing an entry", () => {
+    const task = chain(2);
+    const legacy: PlannerTask = {
+      ...task,
+      adjustments: task.adjustments!.map((entry) => ({ ...entry, before: { ...entry.before, adjustments: task.adjustments! } })),
+    };
+    expect(JSON.stringify(legacy).length).toBeGreaterThan(JSON.stringify(task).length * 2);
+    const trimmed = withoutSnapshotLog(legacy);
+    expect(trimmed.adjustments?.length).toBe(2);
+    expect(trimmed.adjustments?.map((entry) => entry.id)).toEqual(task.adjustments!.map((entry) => entry.id));
+    expect(trimmed.adjustments?.map((entry) => entry.reason)).toEqual(task.adjustments!.map((entry) => entry.reason));
+    expect(trimmed.adjustments?.every((entry) => !("adjustments" in entry.before))).toBe(true);
+    expect(trimmed.adjustments?.[1].before.finish).toBe(task.adjustments![1].before.finish);
+    // Nothing to trim: the task is handed back untouched.
+    expect(withoutSnapshotLog(trimmed)).toBe(trimmed);
+    // And the history still behaves: the newest entry can be removed and edited.
+    const removed = removeLastAdjustment(legacy, actor, "2026-09-20T09:00:00.000Z")!;
+    expect(removed.finish).toBe(task.adjustments![1].before.finish);
+    expect(removed.adjustments?.filter((entry) => entry.removedAt).length).toBe(1);
+    const edited = editLastAdjustment([legacy], legacy.id, input({ reason: "Edited after a refresh" }), context(), { actor, at: "2026-09-21T09:00:00.000Z" });
+    if ("error" in edited) throw new Error(edited.error);
+    expect(edited.entry.reason).toBe("Edited after a refresh");
+    // What the save writes is the trimmed log: the edited entry replaces the
+    // newest one, the earlier round stays, and no entry nests the log.
+    const stored = withoutSnapshotLog(edited.task);
+    expect(stored.adjustments?.length).toBe(2);
+    expect(stored.adjustments?.[0].reason).toBe(task.adjustments![0].reason);
+    expect(stored.adjustments?.[1].reason).toBe("Edited after a refresh");
+    expect(stored.adjustments?.every((entry) => !("adjustments" in entry.before))).toBe(true);
   });
 });

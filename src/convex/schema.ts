@@ -162,7 +162,6 @@ const schema = defineSchema(
         removedByName: v.optional(v.string()),
         before: v.object({
           allocations: v.optional(v.array(v.any())),
-          adjustments: v.optional(v.array(v.any())),
           work: v.optional(v.number()),
           duration: v.number(),
           durationUnit: v.string(),

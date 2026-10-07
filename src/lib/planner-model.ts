@@ -568,6 +568,11 @@ export interface AllocationSegment {
  * figures the change produced (margin absorbed, days passed to successors) and
  * the task state immediately before it, so “Undo last adjustment” can restore
  * exactly that state and nothing older.
+ *
+ * The `before` snapshot holds planning fields only. It deliberately does NOT
+ * hold the log: every entry already lives in `PlannerTask.adjustments`, and a
+ * copy of the log inside each entry would nest a copy of itself in every
+ * earlier entry — the stored document then doubles for every adjustment.
  */
 export interface TaskAdjustment {
   id: string;
@@ -595,7 +600,6 @@ export interface TaskAdjustment {
   /** Everything a removal has to put back. */
   before: {
     allocations?: AllocationSegment[];
-    adjustments?: TaskAdjustment[];
     work?: number;
     duration: number;
     durationUnit: DurationUnit;

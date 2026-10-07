@@ -28,6 +28,7 @@ import {
   type CompanyRole,
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
+import { withoutSnapshotLog } from "./remaining-work";
 import { REMOVED_ACCESS_MESSAGE, invitationAcceptHref } from "./company-users";
 import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
 import { api } from "@/convex/_generated/api";
@@ -462,7 +463,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     }) => {
       const state = {
         projects: source.projects,
-        tasks: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...task, projectId, sortOrder: index }))),
+        tasks: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...withoutSnapshotLog(task), projectId, sortOrder: index }))),
         dependencies: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
         calendars: source.system.calendars,
         exceptions: source.system.exceptions,
@@ -515,7 +516,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     });
     for (const task of state.tasks ?? []) {
       const versionId = task.versionId ?? versions.find((version) => version.projectId === task.projectId && version.isActive)?.id ?? `version-${task.projectId}-1`;
-      (grouped[task.projectId] ??= []).push({ ...task, versionId });
+      // A stored task never carries a copy of its own adjustment log inside an
+      // entry's snapshot: dropping it here keeps the workspace small and leaves
+      // every entry of the history in place.
+      (grouped[task.projectId] ??= []).push(withoutSnapshotLog({ ...task, versionId }));
     }
     setProjects(state.projects ?? []);
     setSystem({ calendars: state.calendars ?? [], exceptions: state.exceptions ?? [], defaultCalendarId: state.calendars?.find((calendar) => calendar.isDefault)?.id ?? "" });
