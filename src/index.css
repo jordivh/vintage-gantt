@@ -867,3 +867,24 @@
 .tool-button.danger:hover { background: #efd5ca; }
 .adjust-floating-error { position: fixed; left: 50%; transform: translateX(-50%); bottom: 60px; z-index: 40; background: #f7e6df; border: 1px solid #a9533f; color: #8b3f2c; padding: 8px 14px; font-size: 12px; box-shadow: 4px 4px 0 rgba(80,54,31,.14); }
 .adjust-modal .eyebrow { color: #9b8a72; }
+.adjust-fixed-value { display: flex; align-items: center; height: 34px; border: 1px dashed #c4b292; background: #f2eadb; padding: 0 8px; color: #4b3d2f; font-size: 12px; text-transform: none; letter-spacing: 0; }
+
+/* The adjustment log: a removed entry stays visible, plainly marked, so the
+   history is never lost. Only the newest active entry carries actions. */
+.adjust-log ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 8px; }
+.adjust-log li { border-left: 3px solid #c6b79d; padding: 4px 0 4px 9px; }
+.adjust-log li.removed { border-left-color: #cbbda4; background: #f6efe1; opacity: .85; }
+.adjust-log li.removed .adjust-log-line b { text-decoration: line-through; color: #8d795f; }
+.adjust-log-removed { color: #a9533f; font-size: 10.5px; margin-top: 3px; font-style: italic; }
+.adjust-log-actions { display: flex; gap: 6px; margin-top: 6px; }
+.adjust-log-actions .tool-button { height: 26px; font-size: 10.5px; padding: 0 9px; }
+.adjust-remove-all { margin-top: 12px; font-size: 11px; }
+.removal-preview { margin-top: 14px; border: 1px solid #d8b48a; background: #fdf4e6; padding: 12px 14px; }
+.removal-preview p { margin: 6px 0; color: #7a5320; font-size: 11.5px; }
+.removal-preview dl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; margin: 8px 0; }
+.removal-preview dl > div { display: flex; flex-direction: column; gap: 2px; }
+.removal-preview dt { color: #9b8a72; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.removal-preview dd { margin: 0; color: #44372a; font-size: 12.5px; }
+.removal-preview dd small { color: #8d795f; font-size: 10.5px; }
+.removal-successors { color: #7a5320; }
+.removal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }

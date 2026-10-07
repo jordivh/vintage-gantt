@@ -142,18 +142,35 @@ export function adjustmentDefaults(task: PlannerTask, ctx: AdjustmentContext): A
 
 /* -------------------------------------------------------------- validation */
 
-/** The reason an adjustment is refused, or null when it may proceed. */
+/**
+ * The finish the adjustment will actually use. A later new finish wins; an empty
+ * one, or one that is not after the keep-until date, means the task ends on the
+ * keep-until date itself — which is exactly what a 0 h remainder does.
+ */
+export function normalizedFinish(input: AdjustmentInput): string {
+  return isIsoCalendarDate(input.newFinish) && input.newFinish >= input.keepUntil ? input.newFinish : input.keepUntil;
+}
+
+/**
+ * The reason an adjustment is refused, or null when it may proceed. A 0 h
+ * remainder is valid and needs no working day after the keep-until date; only a
+ * positive remainder has to have somewhere to put its hours.
+ */
 export function validateAdjustment(task: PlannerTask, input: AdjustmentInput, ctx: AdjustmentContext): string | null {
   const calendarId = calendarIdOf(task, ctx);
+  if (!isIsoCalendarDate(input.keepUntil)) return "Choose a keep-until date.";
   if (!input.reason.trim()) return "Enter a reason for this adjustment.";
-  if (!input.keepUntil || input.keepUntil < task.start) return `Keep current plan until must be on or after the task start (${task.start}).`;
+  if (input.keepUntil < task.start) return `Keep current plan until must be on or after the task start (${task.start}).`;
   if (input.keepUntil > task.finish) return `Keep current plan until must not be later than the current finish (${task.finish}).`;
-  if (!input.newFinish || !(input.newFinish > input.keepUntil)) return "New finish must be after the keep-until date.";
-  if (input.remainingWork < 0) return "Remaining work cannot be negative.";
-  const from = nextWorkingDayAfter(input.keepUntil, calendarId, ctx.system);
-  if (from > input.newFinish) return "New finish must be after the keep-until date.";
-  if (!workingDaysInRange(from, input.newFinish, calendarId, ctx.system).length) {
-    return "There are no working days between the keep-until date and the new finish.";
+  if (!Number.isFinite(input.remainingWork) || input.remainingWork < 0) return "Remaining work cannot be negative.";
+  const finish = normalizedFinish(input);
+  if (input.remainingWork > 0) {
+    if (!(finish > input.keepUntil)) return "New finish must be after the keep-until date.";
+    const from = nextWorkingDayAfter(input.keepUntil, calendarId, ctx.system);
+    if (!from || from > finish) return "New finish must be after the keep-until date.";
+    if (!workingDaysInRange(from, finish, calendarId, ctx.system).length) {
+      return "There are no working days between the keep-until date and the new finish.";
+    }
   }
   return null;
 }
@@ -188,19 +205,23 @@ export function applyAdjustment(task: PlannerTask, input: AdjustmentInput, ctx: 
     .filter((entry) => entry.date <= input.keepUntil && entry.hours > 0)
     .map((entry) => ({ date: entry.date, hours: entry.hours }));
   const fixedHours = fixedDays.reduce((sum, day) => sum + day.hours, 0);
+  const finish = normalizedFinish(input);
   const remainingStart = nextWorkingDayAfter(input.keepUntil, calendarId, ctx.system);
-  const remainingDays = workingDaysInRange(remainingStart, input.newFinish, calendarId, ctx.system).length;
+  const remainingDays = workingDaysInRange(remainingStart, finish, calendarId, ctx.system).length;
+  const remainingHours = Math.max(0, input.remainingWork);
+  // With no remaining work the planned segment is empty: it carries no hours and
+  // the task simply ends on the keep-until date (or on the later new finish).
   const segments: AllocationSegment[] = [
     { kind: "fixed", days: fixedDays },
-    { kind: "planned", hours: input.remainingWork, start: remainingStart, finish: input.newFinish, distribution: input.distribution },
+    { kind: "planned", hours: remainingHours, start: remainingStart, finish, distribution: input.distribution },
   ];
-  const newWork = fixedHours + Math.max(0, input.remainingWork);
-  const duration = Math.max(1, workingDaysBetween(task.start, input.newFinish, calendarId, ctx.system));
+  const newWork = fixedHours + remainingHours;
+  const duration = Math.max(1, workingDaysBetween(task.start, finish, calendarId, ctx.system));
   const adjusted: PlannerTask = {
     ...task,
     duration,
     durationUnit: "days",
-    finish: input.newFinish,
+    finish,
     work: newWork,
     distribution: input.distribution,
     allocations: segments,
@@ -209,13 +230,13 @@ export function applyAdjustment(task: PlannerTask, input: AdjustmentInput, ctx: 
     task: adjusted,
     fixedHours,
     fixedDays: fixedDays.length,
-    remainingHours: Math.max(0, input.remainingWork),
+    remainingHours,
     remainingStart,
     remainingDays,
     oldWork: current.reduce((sum, entry) => sum + entry.hours, 0),
     newWork,
     oldFinish: task.finish,
-    newFinish: input.newFinish,
+    newFinish: finish,
   };
 }
 
@@ -305,7 +326,7 @@ function buildPreview(
     remainingDays: outcome.remainingDays,
     hoursPerDay: outcome.remainingDays > 0 ? outcome.remainingHours / outcome.remainingDays : 0,
     oldFinish: task.finish,
-    newFinish: input.newFinish,
+    newFinish: outcome.newFinish,
     oldWork: outcome.oldWork,
     newWork: outcome.newWork,
     baselineWork: baselineWork ?? null,
@@ -340,6 +361,20 @@ export function previewAdjustment(
 
 /* ------------------------------------------------------------------- plan */
 
+/**
+ * Merges the settled task into the planned one: the new segments, workload and
+ * finish come from the plan, while the margin bookkeeping comes from the settled
+ * result — so the returned task list and the returned task can never disagree.
+ */
+function withLogAndMargin(scheduled: PlannerTask[], planned: PlannerTask, taskId: string, log: TaskAdjustment[]): PlannerTask {
+  const settled = scheduled.find((item) => item.id === taskId);
+  return {
+    ...planned,
+    ...(settled ? { marginDaysOriginal: settled.marginDaysOriginal, marginDaysConsumed: settled.marginDaysConsumed } : {}),
+    adjustments: log,
+  };
+}
+
 function beforeSnapshot(task: PlannerTask): TaskAdjustment["before"] {
   return {
     allocations: task.allocations,
@@ -348,10 +383,47 @@ function beforeSnapshot(task: PlannerTask): TaskAdjustment["before"] {
     duration: task.duration,
     durationUnit: task.durationUnit,
     finish: task.finish,
+    distribution: task.distribution,
     marginPct: task.marginPct,
     marginDaysOriginal: task.marginDaysOriginal,
     marginDaysConsumed: task.marginDaysConsumed,
   };
+}
+
+/** Puts back everything a removal has to restore, and nothing else. */
+function restoreFrom(task: PlannerTask, before: TaskAdjustment["before"]): PlannerTask {
+  const restored: PlannerTask = {
+    ...task,
+    work: before.work,
+    duration: before.duration,
+    durationUnit: before.durationUnit,
+    finish: before.finish,
+    distribution: before.distribution,
+    marginPct: before.marginPct,
+    marginDaysOriginal: before.marginDaysOriginal,
+    marginDaysConsumed: before.marginDaysConsumed,
+  };
+  if (before.allocations === undefined) delete restored.allocations;
+  else restored.allocations = before.allocations;
+  return restored;
+}
+
+/** The index of the newest adjustment that has not been removed, or -1. */
+function lastActiveIndex(log: TaskAdjustment[]): number {
+  for (let index = log.length - 1; index >= 0; index -= 1) if (!log[index].removedAt) return index;
+  return -1;
+}
+
+/** The newest adjustment that has not been removed, or null. */
+export function lastActiveAdjustment(task: PlannerTask): TaskAdjustment | null {
+  const log = task.adjustments ?? [];
+  const index = lastActiveIndex(log);
+  return index < 0 ? null : log[index];
+}
+
+/** The removal record written onto an entry: who removed it, and when. */
+function removalRecord(entry: TaskAdjustment, actor: AdjustmentActor, at: string): TaskAdjustment {
+  return { ...entry, removedAt: at, removedByUserId: actor.id, removedByName: actor.name };
 }
 
 export interface AdjustmentPlan {
@@ -396,7 +468,7 @@ export function planAdjustment(
     userName: options.actor.name,
     keepUntil: input.keepUntil,
     oldFinish: task.finish,
-    newFinish: input.newFinish,
+    newFinish: outcome.newFinish,
     oldWork: outcome.oldWork,
     newWork: outcome.newWork,
     marginConsumed: change?.absorbed ?? 0,
@@ -404,7 +476,7 @@ export function planAdjustment(
     reason: input.reason.trim(),
     before: beforeSnapshot(task),
   };
-  const adjusted: PlannerTask = { ...outcome.task, adjustments: [...(task.adjustments ?? []), entry] };
+  const adjusted = withLogAndMargin(scheduled, outcome.task, taskId, [...(task.adjustments ?? []), entry]);
   return {
     task: adjusted,
     scheduled: scheduled.map((item) => (item.id === taskId ? adjusted : item)),
@@ -413,34 +485,164 @@ export function planAdjustment(
   };
 }
 
-/* -------------------------------------------------------------------- undo */
+/* ------------------------------------------------ removal and editing */
 
 /**
- * Restores the task to exactly the state it had immediately before its most
- * recent adjustment — including its segments, workload, finish, margin figures
- * and the log without that last entry. Older adjustments are kept. Returns null
- * when there is nothing to undo.
+ * Restores the task to exactly the state before an adjustment without recording
+ * anything. Used by the edit path, which immediately writes a fresh adjustment;
+ * removal goes through `removeLastAdjustment` so the history is kept.
  */
 export function undoLastAdjustment(task: PlannerTask): PlannerTask | null {
   const log = task.adjustments ?? [];
-  const last = log[log.length - 1];
-  if (!last) return null;
-  const restored: PlannerTask = {
-    ...task,
-    work: last.before.work,
-    duration: last.before.duration,
-    durationUnit: last.before.durationUnit,
-    finish: last.before.finish,
-    marginPct: last.before.marginPct,
-    marginDaysOriginal: last.before.marginDaysOriginal,
-    marginDaysConsumed: last.before.marginDaysConsumed,
-  };
-  if (last.before.allocations === undefined) delete restored.allocations;
-  else restored.allocations = last.before.allocations;
-  const remainingLog = log.slice(0, -1);
-  if (remainingLog.length === 0) delete restored.adjustments;
-  else restored.adjustments = remainingLog;
+  const index = lastActiveIndex(log);
+  if (index < 0) return null;
+  const restored = restoreFrom(task, log[index].before);
+  const remaining = log.filter((_, position) => position !== index);
+  if (remaining.length === 0) delete restored.adjustments;
+  else restored.adjustments = remaining;
   return restored;
+}
+
+/**
+ * Removes the most recent adjustment: the task goes back to exactly the state it
+ * had before that one (segments, daily hours, workload, finish, distribution,
+ * margin figures). The entry itself stays in the log, marked as removed by whom
+ * and when, so nothing is silently lost. Returns null when there is no active
+ * adjustment to remove.
+ */
+export function removeLastAdjustment(task: PlannerTask, actor: AdjustmentActor, at: string): PlannerTask | null {
+  const log = task.adjustments ?? [];
+  const index = lastActiveIndex(log);
+  if (index < 0) return null;
+  const restored = restoreFrom(task, log[index].before);
+  return { ...restored, adjustments: log.map((entry, position) => (position === index ? removalRecord(entry, actor, at) : entry)) };
+}
+
+/**
+ * Removes every adjustment: the task goes back to its state before the first
+ * one — a single planned segment, the original workload (editable again) and no
+ * fixed part. Every entry stays in the log, marked as removed.
+ */
+export function removeAllAdjustments(task: PlannerTask, actor: AdjustmentActor, at: string): PlannerTask | null {
+  const log = task.adjustments ?? [];
+  const active = log.filter((entry) => !entry.removedAt);
+  if (!active.length) return null;
+  const restored = restoreFrom(task, active[0].before);
+  return { ...restored, adjustments: log.map((entry) => (entry.removedAt ? entry : removalRecord(entry, actor, at))) };
+}
+
+/**
+ * Re-opens the most recent adjustment: the task returns to the state before it,
+ * and a fresh adjustment is planned in its place with the same keep-until date.
+ * The entry is replaced (its `before` snapshot is identical), so the log stays a
+ * faithful record of what the task looked like beforehand.
+ */
+export function editLastAdjustment(
+  tasks: PlannerTask[],
+  taskId: string,
+  input: AdjustmentInput,
+  ctx: AdjustmentContext,
+  options: PlanAdjustmentOptions,
+): AdjustmentPlan | { error: string } {
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return { error: "Task not found." };
+  const log = task.adjustments ?? [];
+  const index = lastActiveIndex(log);
+  if (index < 0) return { error: "There is no adjustment to edit." };
+  // The keep-until date belongs to the adjustment; changing it is a new one.
+  const edited: AdjustmentInput = { ...input, keepUntil: log[index].keepUntil };
+  const base: PlannerTask = { ...restoreFrom(task, log[index].before), adjustments: log.filter((_, position) => position !== index) };
+  if (!base.adjustments?.length) delete base.adjustments;
+  const invalid = validateAdjustment(base, edited, ctx);
+  if (invalid) return { error: invalid };
+  const outcome = applyAdjustment(base, edited, ctx);
+  const { change, scheduled } = settleAdjustment(tasks, outcome.task, ctx, taskId);
+  const preview = buildPreview(tasks, base, edited, ctx, outcome, change, scheduled, options.baselineWork);
+  const entry: TaskAdjustment = {
+    id: log[index].id,
+    at: options.at,
+    userId: options.actor.id,
+    userName: options.actor.name,
+    keepUntil: edited.keepUntil,
+    oldFinish: base.finish,
+    newFinish: outcome.newFinish,
+    oldWork: outcome.oldWork,
+    newWork: outcome.newWork,
+    marginConsumed: change?.absorbed ?? 0,
+    daysPushed: change?.passed ?? 0,
+    reason: edited.reason.trim(),
+    before: beforeSnapshot(base),
+  };
+  const adjusted = withLogAndMargin(scheduled, outcome.task, taskId, [...(base.adjustments ?? []), entry]);
+  return {
+    task: adjusted,
+    scheduled: scheduled.map((item) => (item.id === taskId ? adjusted : item)),
+    preview,
+    entry,
+  };
+}
+
+/* ------------------------------------------------------ removal preview */
+
+export interface RemovalSuccessor {
+  taskId: string;
+  name: string;
+  oldStart: string;
+  oldFinish: string;
+  newStart: string;
+  newFinish: string;
+}
+
+export interface RemovalPreview {
+  mode: "last" | "all";
+  /** How many log entries the removal marks. */
+  removed: number;
+  finish: string;
+  work: number;
+  /** Working days given back to the task's own reserve. */
+  marginReturned: number;
+  /** Successors whose dates move back, with both dates. */
+  successors: RemovalSuccessor[];
+  projectFinishBefore: string;
+  projectFinishAfter: string;
+}
+
+/**
+ * What a removal would restore, before it is confirmed: the earlier finish and
+ * workload, the margin the task gets back and the successors that move back.
+ */
+export function previewRemoval(
+  tasks: PlannerTask[],
+  taskId: string,
+  ctx: AdjustmentContext,
+  mode: "last" | "all",
+): RemovalPreview | null {
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return null;
+  const log = task.adjustments ?? [];
+  const restored = mode === "all"
+    ? removeAllAdjustments(task, { id: "preview", name: "preview" }, "")
+    : removeLastAdjustment(task, { id: "preview", name: "preview" }, "");
+  if (!restored) return null;
+  const { change, scheduled } = settleAdjustment(tasks, restored, ctx, taskId);
+  const successors: RemovalSuccessor[] = tasks
+    .filter((item) => item.id !== taskId)
+    .map((item) => {
+      const after = scheduled.find((candidate) => candidate.id === item.id);
+      if (!after || (after.start === item.start && after.finish === item.finish)) return null;
+      return { taskId: item.id, name: item.name, oldStart: item.start, oldFinish: item.finish, newStart: after.start, newFinish: after.finish };
+    })
+    .filter((item): item is RemovalSuccessor => item !== null);
+  return {
+    mode,
+    removed: mode === "all" ? log.filter((entry) => !entry.removedAt).length : 1,
+    finish: restored.finish,
+    work: restored.work ?? 0,
+    marginReturned: change?.returned ?? 0,
+    successors,
+    projectFinishBefore: planFinishDate(tasks),
+    projectFinishAfter: planFinishDate(scheduled),
+  };
 }
 
 /* --------------------------------------------------------------- display */

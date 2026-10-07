@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { createDefaultCalendarSystem, type CalendarException, type CalendarSystem } from "./scheduling-engine";
-import { dailyAllocation, remapCopiedTasks, type PlannerTask } from "./planner-model";
+import { dailyAllocation, hasAllocationSegments, recalculateTasks, remapCopiedTasks, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask } from "./planner-model";
 import { aggregatePeriods, computeResourceLoads } from "./capacity-engine";
 import {
   adjustmentDefaults,
   applyAdjustment,
   canAdjustTask,
+  editLastAdjustment,
   fixedDaysOnNonWorkingDays,
   fixedUntil,
+  lastActiveAdjustment,
   planAdjustment,
   previewAdjustment,
+  previewRemoval,
+  removeAllAdjustments,
+  removeLastAdjustment,
   undoLastAdjustment,
   validateAdjustment,
   type AdjustmentContext,
@@ -321,5 +326,197 @@ describe("adjust remaining work — capacity and work in period", () => {
     })[0];
     expect(close(report.assignedWork[0].total, 80)).toBe(true);
     expect(close(report.assignedWork[0].inPeriod, 40)).toBe(true);
+  });
+});
+
+describe("adjust remaining work — zero remainder", () => {
+  test("0 h with the finish on the keep-until date is accepted and ends the task there", () => {
+    const task = scenarioTask();
+    const draft = input({ remainingWork: 0, newFinish: "2026-09-14" });
+    expect(validateAdjustment(task, draft, context())).toBeNull();
+    const outcome = applyAdjustment(task, draft, context());
+    expect(outcome.newFinish).toBe("2026-09-14");
+    expect(outcome.task.finish).toBe("2026-09-14");
+    expect(outcome.task.duration).toBe(10);
+    expect(close(outcome.task.work ?? 0, 40)).toBe(true);
+    expect(outcome.task.allocations?.find((segment) => segment.kind === "planned")?.hours).toBe(0);
+    // No planned hours at all: nothing after 14 September.
+    expect(dailyAllocation(outcome.task, context().system, "base").filter((entry) => entry.date > "2026-09-14").length).toBe(0);
+  });
+
+  test("0 h with an empty finish falls back to the keep-until date", () => {
+    const task = scenarioTask();
+    const outcome = applyAdjustment(task, input({ remainingWork: 0, newFinish: "" }), context());
+    expect(outcome.newFinish).toBe("2026-09-14");
+    expect(close(totalHours(outcome.task), 40)).toBe(true);
+  });
+
+  test("Capacity shows no hours after the keep-until date", () => {
+    const task = scenarioTask();
+    const outcome = applyAdjustment(task, input({ remainingWork: 0, newFinish: "2026-09-14" }), context());
+    const report = computeResourceLoads({
+      system: context().system,
+      resources: [{ id: "res1", name: "Chris", hoursPerWeek: 40, calendarId: "base" }],
+      assignments: [{ taskId: outcome.task.id, resourceId: "res1" }],
+      projects: [{ projectId: "p1", projectName: "Project", projectCalendarId: "base", tasks: [outcome.task] }],
+      range: { start: "2026-09-15", end: "2026-09-30" },
+    })[0];
+    expect(close(report.totalAllocated, 0)).toBe(true);
+    expect(close(report.assignedWork[0].total, 40)).toBe(true);
+    expect(close(report.assignedWork[0].inPeriod, 0)).toBe(true);
+  });
+
+  test("negative remaining work stays blocked", () => {
+    expect(validateAdjustment(scenarioTask(), input({ remainingWork: -1 }), context())).toBeTruthy();
+  });
+
+  test("editing an adjustment can set the remainder to 0", () => {
+    const task = scenarioTask();
+    const first = planAdjustment([task], task.id, input(), context(), { actor: { id: "u1", name: "Ada" }, at: "2026-09-12T09:00:00.000Z" });
+    if ("error" in first) throw new Error(first.error);
+    const edited = editLastAdjustment([first.task], task.id, input({ remainingWork: 0, newFinish: "2026-09-14" }), context(), { actor: { id: "u1", name: "Ada" }, at: "2026-09-13T09:00:00.000Z" });
+    if ("error" in edited) throw new Error(edited.error);
+    expect(edited.task.allocations?.find((segment) => segment.kind === "planned")?.hours).toBe(0);
+    expect(edited.task.finish).toBe("2026-09-14");
+    expect(close(edited.task.work ?? 0, 40)).toBe(true);
+  });
+});
+
+describe("adjust remaining work — removal and edit", () => {
+  const actor = { id: "u1", name: "Ada" };
+  const twoAdjustments = () => {
+    const task = scenarioTask();
+    const first = planAdjustment([task], task.id, input({ keepUntil: "2026-09-07", remainingWork: 32, newFinish: "2026-09-18", reason: "First" }), context(), { actor, at: "2026-09-08T09:00:00.000Z" });
+    if ("error" in first) throw new Error(first.error);
+    const second = planAdjustment([first.task], task.id, input({ keepUntil: "2026-09-14", remainingWork: 20, newFinish: "2026-09-25", reason: "Second" }), context(), { actor, at: "2026-09-15T09:00:00.000Z" });
+    if ("error" in second) throw new Error(second.error);
+    return { task, afterFirst: first.task, afterSecond: second.task };
+  };
+
+  test("removing the newest adjustment restores the previous state and keeps the history", () => {
+    const { afterFirst, afterSecond } = twoAdjustments();
+    const removed = removeLastAdjustment(afterSecond, actor, "2026-09-16T09:00:00.000Z")!;
+    expect(removed.adjustments?.length).toBe(2);
+    expect(removed.adjustments?.filter((entry) => entry.removedAt).length).toBe(1);
+    const mark = removed.adjustments!.find((entry) => entry.removedAt)!;
+    expect(mark.removedByUserId).toBe("u1");
+    expect(mark.removedByName).toBe("Ada");
+    expect(mark.removedAt).toBe("2026-09-16T09:00:00.000Z");
+    // Exact restore of the state before that adjustment.
+    expect(removed.finish).toBe(afterFirst.finish);
+    expect(removed.work).toBe(afterFirst.work);
+    expect(removed.duration).toBe(afterFirst.duration);
+    expect(removed.distribution).toBe(afterFirst.distribution);
+    expect(removed.marginDaysConsumed).toBe(afterFirst.marginDaysConsumed);
+    expect(removed.allocations).toEqual(afterFirst.allocations);
+    // The newest ACTIVE entry is the first adjustment again.
+    expect(lastActiveAdjustment(removed)?.id).toBe(afterFirst.adjustments?.[0]?.id);
+  });
+
+  test("removing all adjustments restores the state before the first one", () => {
+    const { task, afterSecond } = twoAdjustments();
+    const all = removeAllAdjustments(afterSecond, actor, "2026-09-16T09:00:00.000Z")!;
+    // One planned segment again, the original workload, no fixed part.
+    expect(all.allocations).toBeUndefined();
+    expect(hasAllocationSegments(all)).toBe(false);
+    expect(fixedUntil(all)).toBeNull();
+    expect(all.finish).toBe(task.finish);
+    expect(all.work).toBe(40);
+    expect(all.duration).toBe(10);
+    expect(all.adjustments?.length).toBe(2);
+    expect(all.adjustments?.every((entry) => Boolean(entry.removedAt))).toBe(true);
+    expect(lastActiveAdjustment(all)).toBeNull();
+  });
+
+  test("removing twice empties the adjustments even though the log keeps every entry", () => {
+    const { afterFirst, afterSecond } = twoAdjustments();
+    const once = removeLastAdjustment(afterSecond, actor, "2026-09-16T09:00:00.000Z")!;
+    const twice = removeLastAdjustment(once, actor, "2026-09-17T09:00:00.000Z")!;
+    const firstBefore = afterFirst.adjustments![0].before;
+    expect(twice.allocations).toBeUndefined();
+    expect(twice.work).toBe(firstBefore.work);
+    expect(twice.finish).toBe(firstBefore.finish);
+    expect(twice.adjustments?.length).toBe(2);
+    expect(twice.adjustments?.every((entry) => Boolean(entry.removedAt))).toBe(true);
+    expect(removeLastAdjustment(twice, actor, "2026-09-18T09:00:00.000Z")).toBeNull();
+    expect(removeAllAdjustments(twice, actor, "2026-09-18T09:00:00.000Z")).toBeNull();
+  });
+
+  test("the removal preview names the restored finish, workload, margin and successors", () => {
+    const task = scenarioTask();
+    const successor: PlannerTask = { ...scenarioTask({ id: "t2", start: "2026-09-22", finish: "2026-09-23", duration: 2, work: 16, marginPct: 0, marginDaysOriginal: 0, predecessors: "t1FS" }), name: "Successor" };
+    const plan = planAdjustment([task, successor], task.id, input(), context(), { baselineWork: 40, actor, at: "2026-09-12T09:00:00.000Z" });
+    if ("error" in plan) throw new Error(plan.error);
+    const current = plan.scheduled as PlannerTask[];
+    const preview = previewRemoval(current, task.id, context(), "last")!;
+    expect(preview.mode).toBe("last");
+    expect(preview.removed).toBe(1);
+    expect(preview.finish).toBe("2026-09-14");
+    expect(close(preview.work, 40)).toBe(true);
+    expect(preview.marginReturned).toBeGreaterThan(0);
+    // The successor moves back to where it was before the adjustment.
+    const currentSuccessor = current.find((item) => item.id === "t2")!;
+    const restoredSuccessor = preview.successors.find((item) => item.taskId === "t2")!;
+    expect(restoredSuccessor.oldStart).toBe(currentSuccessor.start);
+    expect(restoredSuccessor.newStart < currentSuccessor.start).toBe(true);
+  });
+
+  test("editing the newest adjustment keeps the keep-until date and replaces the entry", () => {
+    const task = scenarioTask();
+    const first = planAdjustment([task], task.id, input(), context(), { actor, at: "2026-09-12T09:00:00.000Z" });
+    if ("error" in first) throw new Error(first.error);
+    const edited = editLastAdjustment([first.task], task.id, input({ keepUntil: "2030-01-01", remainingWork: 10, newFinish: "2026-09-25", distribution: "back", reason: "Changed" }), context(), { actor, at: "2026-09-13T09:00:00.000Z" });
+    if ("error" in edited) throw new Error(edited.error);
+    expect(edited.entry.keepUntil).toBe("2026-09-14");
+    expect(edited.entry.reason).toBe("Changed");
+    expect(edited.entry.userName).toBe("Ada");
+    expect(edited.task.adjustments?.length).toBe(1);
+    expect(edited.task.finish).toBe("2026-09-25");
+    const planned = (edited.task.allocations ?? []).find((segment) => segment.kind === "planned");
+    expect(planned).toBeDefined();
+    expect(close(planned?.hours ?? 0, 10)).toBe(true);
+    expect(planned?.distribution).toBe("back");
+    expect(edited.task.allocations?.[0].days?.length).toBe(10);
+  });
+
+  test("apply then remove: the task, its margin and its successors are exactly as before", () => {
+    const ctx = context();
+    const commitPipeline = (previous: PlannerTask[], edited: PlannerTask[], taskId: string): PlannerTask[] => {
+      const settled = settleMonitoringPlan(previous, edited, { calendarSystem: ctx.system, projectCalendarId: "base", anchoredTaskIds: [taskId] });
+      const result = recalculateTasks(settled.tasks, { direction: "forward", calendarSystem: ctx.system, projectCalendarId: "base" });
+      return withCalculatedPlanningFields(result.error ? settled.tasks : result.tasks, ctx.system, "base");
+    };
+    const successor: PlannerTask = { ...scenarioTask({ id: "t2", start: "2026-09-17", finish: "2026-09-21", duration: 3, work: 24, marginPct: 0, marginDaysOriginal: 0, predecessors: "t1FS" }), name: "Successor" };
+    const original = commitPipeline([scenarioTask(), successor], [scenarioTask(), successor], "t1");
+    const plan = planAdjustment(original, "t1", input(), ctx, { baselineWork: 40, actor, at: "2026-09-12T09:00:00.000Z" });
+    if ("error" in plan) throw new Error(plan.error);
+    const afterApply = commitPipeline(original, original.map((item) => (item.id === "t1" ? plan.task : item)), "t1");
+    const adjusted = afterApply.find((item) => item.id === "t1")!;
+    expect(adjusted.marginDaysConsumed).toBe(2);
+    expect(afterApply.find((item) => item.id === "t2")!.start > original.find((item) => item.id === "t2")!.start).toBe(true);
+
+    const removed = removeLastAdjustment(adjusted, actor, "2026-09-16T09:00:00.000Z")!;
+    const afterRemove = commitPipeline(afterApply, afterApply.map((item) => (item.id === "t1" ? removed : item)), "t1");
+    const t1 = afterRemove.find((item) => item.id === "t1")!;
+    const t2 = afterRemove.find((item) => item.id === "t2")!;
+    expect(t1.finish).toBe("2026-09-14");
+    expect(t1.work).toBe(40);
+    expect(t1.marginDaysConsumed).toBe(0);
+    expect(t1.allocations).toBeUndefined();
+    expect(dailyAllocation(t1, ctx.system, "base").every((entry) => entry.hours === 4)).toBe(true);
+    expect(t2.start).toBe(original.find((item) => item.id === "t2")!.start);
+    expect(t2.finish).toBe(original.find((item) => item.id === "t2")!.finish);
+  });
+
+  test("removing after a replan leaves the old version untouched", () => {
+    const { afterSecond } = twoAdjustments();
+    const copy = remapCopiedTasks([afterSecond], new Map([[afterSecond.id, "copy-1"]]), "ver-2");
+    if (copy.error) throw new Error(copy.error);
+    const copyRemoved = removeAllAdjustments(copy.tasks[0], actor, "2026-09-20T09:00:00.000Z")!;
+    expect(copyRemoved.allocations).toBeUndefined();
+    // The source version still holds its two segments and its two live entries.
+    expect(afterSecond.allocations?.length).toBe(2);
+    expect(afterSecond.adjustments?.length).toBe(2);
+    expect(afterSecond.adjustments?.every((entry) => !entry.removedAt)).toBe(true);
   });
 });

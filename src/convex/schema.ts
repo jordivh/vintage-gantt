@@ -156,6 +156,10 @@ const schema = defineSchema(
         marginConsumed: v.number(),
         daysPushed: v.number(),
         reason: v.string(),
+        // A removal is recorded on the entry instead of deleting it.
+        removedAt: v.optional(v.string()),
+        removedByUserId: v.optional(v.string()),
+        removedByName: v.optional(v.string()),
         before: v.object({
           allocations: v.optional(v.array(v.any())),
           adjustments: v.optional(v.array(v.any())),
@@ -163,6 +167,7 @@ const schema = defineSchema(
           duration: v.number(),
           durationUnit: v.string(),
           finish: v.string(),
+          distribution: v.optional(v.string()),
           marginPct: v.optional(v.number()),
           marginDaysOriginal: v.optional(v.number()),
           marginDaysConsumed: v.optional(v.number()),

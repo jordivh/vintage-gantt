@@ -17,6 +17,9 @@ import {
  * hours per day, the new total workload and its deviation from the active
  * baseline, the finish move, the margin consumed, the days pushed to successors,
  * the new project finish and any day on which the resource becomes overloaded.
+ *
+ * The same dialog edits the most recent adjustment, in which case its keep-until
+ * date is fixed (that date belongs to the adjustment — changing it is a new one).
  */
 export interface AdjustRemainingWorkDialogProps {
   task: PlannerTask;
@@ -27,6 +30,10 @@ export interface AdjustRemainingWorkDialogProps {
   availableHours?: (date: string) => number;
   today: string;
   baselineWork?: number;
+  /** \"edit\" re-opens the most recent adjustment instead of adding a new one. */
+  mode?: "create" | "edit";
+  /** Starting values when editing an existing adjustment. */
+  initial?: AdjustmentInput;
   onCancel: () => void;
   onApply: (input: AdjustmentInput) => void;
 }
@@ -43,6 +50,8 @@ export function AdjustRemainingWorkDialog({
   availableHours,
   today,
   baselineWork,
+  mode = "create",
+  initial,
   onCancel,
   onApply,
 }: AdjustRemainingWorkDialogProps) {
@@ -51,14 +60,15 @@ export function AdjustRemainingWorkDialog({
   // figures can never lag a keystroke behind the fields.
   const defaults = adjustmentDefaults(task, context);
   const calendarId = task.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+  const editing = mode === "edit" && Boolean(initial);
 
-  const [keepUntil, setKeepUntil] = useState(defaults.keepUntil);
-  const [remainingWork, setRemainingWork] = useState(String(defaults.remainingWork));
+  const [keepUntil, setKeepUntil] = useState(editing ? initial!.keepUntil : defaults.keepUntil);
+  const [remainingWork, setRemainingWork] = useState(String(editing ? initial!.remainingWork : defaults.remainingWork));
   const [finishMode, setFinishMode] = useState<"date" | "duration">("date");
-  const [newFinish, setNewFinish] = useState(defaults.newFinish);
+  const [newFinish, setNewFinish] = useState(editing ? initial!.newFinish : defaults.newFinish);
   const [durationDays, setDurationDays] = useState("");
-  const [distribution, setDistribution] = useState<Distribution>(defaults.distribution);
-  const [reason, setReason] = useState("");
+  const [distribution, setDistribution] = useState<Distribution>(editing ? initial!.distribution : defaults.distribution);
+  const [reason, setReason] = useState(editing ? initial!.reason : "");
   const [draftError, setDraftError] = useState<string | null>(null);
 
   const remainingStart = nextWorkingDayAfter(keepUntil, calendarId, system);
@@ -73,6 +83,7 @@ export function AdjustRemainingWorkDialog({
     distribution,
     reason,
   };
+  const zeroRemainder = draft.remainingWork === 0;
 
   const validation = validateAdjustment(task, draft, context);
   const preview = previewAdjustment(tasks, task.id, draft, context, baselineWork);
@@ -88,7 +99,7 @@ export function AdjustRemainingWorkDialog({
       <div className="task-modal adjust-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-heading">
           <div>
-            <div className="eyebrow">ADJUST REMAINING WORK</div>
+            <div className="eyebrow">{editing ? "EDIT ADJUSTMENT" : "ADJUST REMAINING WORK"}</div>
             <h2>{task.name}</h2>
           </div>
           <button className="icon-button" onClick={onCancel} aria-label="Close">✕</button>
@@ -97,13 +108,15 @@ export function AdjustRemainingWorkDialog({
         <div className="adjust-grid">
           <label>
             Keep current plan until
-            <input type="date" value={keepUntil} min={task.start} max={task.finish} onChange={(event) => setKeepUntil(event.target.value)} />
-            <small>Everything up to and including this date keeps its current hours.</small>
+            {editing
+              ? <output className="adjust-fixed-value">{formatDate(keepUntil)}</output>
+              : <input type="date" value={keepUntil} min={task.start} max={task.finish} onChange={(event) => setKeepUntil(event.target.value)} />}
+            <small>{editing ? "Fixed by this adjustment — change it with a new one." : "Everything up to and including this date keeps its current hours."}</small>
           </label>
           <label>
             Remaining work (h)
             <input type="number" min={0} step="0.5" value={remainingWork} onChange={(event) => setRemainingWork(event.target.value)} />
-            <small>The hours planned after the keep-until date.</small>
+            <small>{zeroRemainder ? "0 h: the task ends with no extra hours planned." : "The hours planned after the keep-until date."}</small>
           </label>
 
           <fieldset className="adjust-finish">
@@ -139,7 +152,7 @@ export function AdjustRemainingWorkDialog({
             <div className="eyebrow">PREVIEW</div>
             <dl>
               <div><dt>Hours kept (fixed)</dt><dd>{displayHours(preview.fixedHours)} h over {preview.fixedDays} working day{preview.fixedDays === 1 ? "" : "s"}</dd></div>
-              <div><dt>Remaining work</dt><dd>{displayHours(preview.remainingHours)} h over {preview.remainingDays} working day{preview.remainingDays === 1 ? "" : "s"} (≈ {displayHours(preview.hoursPerDay)} h/day)</dd></div>
+              <div><dt>Remaining work</dt><dd>{displayHours(preview.remainingHours)} h over {preview.remainingDays} working day{preview.remainingDays === 1 ? "" : "s"}{preview.remainingHours > 0 ? ` (≈ ${displayHours(preview.hoursPerDay)} h/day)` : " — none planned"}</dd></div>
               <div><dt>Total workload</dt><dd>{displayHours(preview.newWork)} h <small>from {displayHours(preview.oldWork)} h</small>{preview.workDeviation !== null && <small className={`deviation ${preview.workDeviation >= 0 ? "later" : "earlier"}`}> · baseline {preview.workDeviation >= 0 ? "+" : ""}{displayHours(preview.workDeviation)} h</small>}</dd></div>
               <div><dt>Finish</dt><dd>{formatDate(preview.oldFinish)} → {formatDate(preview.newFinish)}</dd></div>
               <div><dt>Margin consumed</dt><dd>{preview.marginConsumed} d{preview.marginReturned > 0 ? ` (${preview.marginReturned} d returned)` : ""}</dd></div>
@@ -164,7 +177,7 @@ export function AdjustRemainingWorkDialog({
 
         <div className="modal-actions">
           <button className="tool-button" onClick={onCancel}>Cancel</button>
-          <button className="tool-button primary" disabled={Boolean(validation)} title={validation ?? undefined} onClick={apply}>Apply adjustment</button>
+          <button className="tool-button primary" disabled={Boolean(validation)} title={validation ?? undefined} onClick={apply}>{editing ? "Save adjustment" : "Apply adjustment"}</button>
         </div>
       </div>
     </div>

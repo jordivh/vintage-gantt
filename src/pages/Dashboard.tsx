@@ -42,7 +42,7 @@ import {
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
 import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
-import { allocationSegments, canAdjustTask, displayHours, fixedDaysOnNonWorkingDays, fixedUntil, planAdjustment, undoLastAdjustment, type AdjustmentInput } from "@/lib/remaining-work";
+import { allocationSegments, canAdjustTask, displayHours, editLastAdjustment, fixedDaysOnNonWorkingDays, fixedUntil, lastActiveAdjustment, planAdjustment, previewRemoval, removeAllAdjustments, removeLastAdjustment, type AdjustmentInput } from "@/lib/remaining-work";
 import { availableHours } from "@/lib/resource-capacity";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
@@ -214,7 +214,10 @@ export default function Dashboard() {
   // The task whose remaining work is being re-planned, and the inline undo confirm.
   const [adjustTaskId, setAdjustTaskId] = useState<string | null>(null);
   const [adjustError, setAdjustError] = useState<string | null>(null);
-  const [undoConfirmTaskId, setUndoConfirmTaskId] = useState<string | null>(null);
+  // Re-opening the most recent adjustment instead of adding a new one.
+  const [adjustEdit, setAdjustEdit] = useState<AdjustmentInput | null>(null);
+  // The pending removal, with the preview shown before it is confirmed.
+  const [removalPrompt, setRemovalPrompt] = useState<{ taskId: string; mode: "last" | "all" } | null>(null);
   const [cellError, setCellError] = useState<{ taskId: string; column: ColumnKey; message: string } | null>(null);
   const [marginNotice, setMarginNotice] = useState<{ taskId: string; message: string } | null>(null);
   // Reported under the Finish cell: how a task's finish move used its reserve.
@@ -608,13 +611,14 @@ export default function Dashboard() {
   /**
    * Applies the adjustment through the normal commit path, so margin consumption,
    * successor movement and history behave exactly like any other Monitoring edit.
+   * Editing the most recent adjustment goes through the same path, with the same
+   * preview and validation.
    */
-  const applyAdjustment = (task: Task, input: AdjustmentInput) => {
-    const plan = planAdjustment(tasks, task.id, input, adjustmentContext(task), {
-      baselineWork: baselineWorkFor(task.id),
-      actor: adjustmentActor,
-      at: new Date().toISOString(),
-    });
+  const runAdjustmentPlan = (task: Task, input: AdjustmentInput, editing: boolean) => {
+    const options = { baselineWork: baselineWorkFor(task.id), actor: adjustmentActor, at: new Date().toISOString() };
+    const plan = editing
+      ? editLastAdjustment(tasks, task.id, input, adjustmentContext(task), options)
+      : planAdjustment(tasks, task.id, input, adjustmentContext(task), options);
     if ("error" in plan) {
       setAdjustError(plan.error);
       return;
@@ -624,18 +628,28 @@ export default function Dashboard() {
     // so successors move exactly as the preview promised instead of absorbing margin.
     commit(tasks.map((item) => (item.id === task.id ? plan.task : item)), task.id);
     setAdjustTaskId(null);
+    setAdjustEdit(null);
     setModalTask(null);
-    toast.success(`Remaining work adjusted: ${displayHours(plan.preview.fixedHours)} h kept, ${displayHours(plan.preview.remainingHours)} h re-planned.`);
+    toast.success(editing
+      ? "Adjustment updated."
+      : `Remaining work adjusted: ${displayHours(plan.preview.fixedHours)} h kept, ${displayHours(plan.preview.remainingHours)} h re-planned.`);
   };
 
-  /** Restores the task to the state just before its most recent adjustment. */
-  const applyUndoAdjustment = (task: Task) => {
-    const restored = undoLastAdjustment(task);
+  /**
+   * Removes the most recent adjustment, or all of them. The state goes back
+   * exactly as it was, and every removed entry stays in the log, marked with who
+   * removed it and when.
+   */
+  const confirmRemoval = (task: Task, mode: "last" | "all") => {
+    const at = new Date().toISOString();
+    const restored = mode === "all"
+      ? removeAllAdjustments(task, adjustmentActor, at)
+      : removeLastAdjustment(task, adjustmentActor, at);
     if (!restored) return;
     commit(tasks.map((item) => (item.id === task.id ? restored : item)), task.id);
-    setUndoConfirmTaskId(null);
+    setRemovalPrompt(null);
     setModalTask(restored);
-    toast("Last adjustment undone");
+    toast(mode === "all" ? "All adjustments removed" : "Adjustment removed");
   };
 
   /** Applies one cell edit and returns the task list it committed, so callers can
@@ -1864,7 +1878,7 @@ export default function Dashboard() {
                       const adjustLocked = hasAllocationSegments(task) && ["start", "finish", "duration", "work", "distribution"].includes(column.key);
                       const structuralLock = ["id", "wbs", "availability", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || adjustLocked || ((summary || milestone) && column.key === "distribution");
                       const canEdit = !structuralLock && !modeLock;
-                      const readOnlyReason = modeLock ?? (adjustLocked ? (column.key === "work" ? "Total workload is fixed after an adjustment: the sum of the fixed and the re-planned hours." : "Fixed after an adjustment — use Adjust remaining work or Undo last adjustment.") : milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
+                      const readOnlyReason = modeLock ?? (adjustLocked ? (column.key === "work" ? "Total workload is fixed after an adjustment: the sum of the fixed and the re-planned hours." : "Fixed after an adjustment — use Adjust remaining work, or Edit / Remove it in the task panel.") : milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
                         <div
                           key={column.key}
@@ -2164,7 +2178,7 @@ export default function Dashboard() {
           {(() => {
             const task = taskById.get(showMenu.id);
             return task && canAdjustTask(task, activeMode, todayLineDate, tasks) === null
-              ? <button onClick={() => { setAdjustError(null); setAdjustTaskId(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Adjust remaining work</button>
+              ? <button onClick={() => { setAdjustError(null); setAdjustEdit(null); setAdjustTaskId(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Adjust remaining work</button>
               : null;
           })()}
           <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button>
@@ -2205,11 +2219,11 @@ export default function Dashboard() {
       )}
 
       {modalTask && (
-        <div className="modal-backdrop" onClick={() => setModalTask(null)}>
+        <div className="modal-backdrop" onClick={() => { setModalTask(null); setRemovalPrompt(null); }}>
           <div className="task-modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-heading">
               <div><div className="eyebrow">TASK INFORMATION</div><h2>{modalTask.name}</h2></div>
-              <button className="icon-button" onClick={() => setModalTask(null)}><X size={18} /></button>
+              <button className="icon-button" onClick={() => { setModalTask(null); setRemovalPrompt(null); }}><X size={18} /></button>
             </div>
             <div className="modal-grid">
               {(["name", "start", "finish", "duration", "predecessors", "resource", "percent", "notes"] as ColumnKey[]).map((field) => (
@@ -2254,42 +2268,88 @@ export default function Dashboard() {
                       </table>
                     </div>
                   )}
-                  {log.length > 0 && (
-                    <div className="adjust-log">
-                      <div className="eyebrow">ADJUSTMENT LOG</div>
-                      <ul>
-                        {[...log].reverse().map((entry) => (
-                          <li key={entry.id}>
-                            <div className="adjust-log-line"><b>{entry.reason}</b><span>{entry.userName} · {new Date(entry.at).toLocaleString("en-GB")}</span></div>
-                            <div className="adjust-log-meta">Keep until {entry.keepUntil} · finish {entry.oldFinish} → {entry.newFinish} · workload {displayHours(entry.oldWork)} h → {displayHours(entry.newWork)} h · margin {entry.marginConsumed} d · pushed {entry.daysPushed} d</div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                  {log.length > 0 && (() => {
+                    const newest = lastActiveAdjustment(live);
+                    const monitoring = activeMode === "monitoring";
+                    const plannedSegment = (live.allocations ?? []).find((segment) => segment.kind === "planned");
+                    return (
+                      <div className="adjust-log">
+                        <div className="eyebrow">ADJUSTMENT LOG</div>
+                        <ul>
+                          {[...log].reverse().map((entry) => {
+                            const removed = Boolean(entry.removedAt);
+                            const isNewest = !removed && newest?.id === entry.id;
+                            return (
+                              <li key={entry.id} className={removed ? "removed" : ""}>
+                                <div className="adjust-log-line"><b>{entry.reason}</b><span>{entry.userName} · {new Date(entry.at).toLocaleString("en-GB")}</span></div>
+                                <div className="adjust-log-meta">Keep until {entry.keepUntil} · finish {entry.oldFinish} → {entry.newFinish} · workload {displayHours(entry.oldWork)} h → {displayHours(entry.newWork)} h · margin {entry.marginConsumed} d · pushed {entry.daysPushed} d</div>
+                                {removed
+                                  ? <div className="adjust-log-removed">Removed{entry.removedByName ? ` by ${entry.removedByName}` : ""}{entry.removedAt ? ` · ${new Date(entry.removedAt).toLocaleString("en-GB")}` : ""}</div>
+                                  : isNewest && monitoring
+                                    ? <div className="adjust-log-actions">
+                                        <button className="tool-button" onClick={() => {
+                                          setAdjustError(null);
+                                          setAdjustEdit({
+                                            keepUntil: entry.keepUntil,
+                                            remainingWork: Math.max(0, plannedSegment?.hours ?? 0),
+                                            newFinish: entry.newFinish,
+                                            distribution: plannedSegment?.distribution ?? normalizeDistribution(live.distribution),
+                                            reason: entry.reason,
+                                          });
+                                          setAdjustTaskId(live.id);
+                                        }}>Edit</button>
+                                        <button className="tool-button danger" onClick={() => setRemovalPrompt({ taskId: live.id, mode: "last" })}>Remove</button>
+                                      </div>
+                                    : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        {monitoring && log.some((entry) => !entry.removedAt) && (
+                          <button className="tool-button danger adjust-remove-all" onClick={() => setRemovalPrompt({ taskId: live.id, mode: "all" })}>Remove all adjustments</button>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {activeMode === "monitoring" && removalPrompt && removalPrompt.taskId === live.id && (() => {
+                    const preview = previewRemoval(tasks, live.id, adjustmentContext(live), removalPrompt.mode);
+                    return (
+                      <div className="removal-preview" role="alert">
+                        <div className="eyebrow">REMOVE {removalPrompt.mode === "all" ? "ALL ADJUSTMENTS" : "LAST ADJUSTMENT"}</div>
+                        {preview
+                          ? <>
+                              <p>This restores the task to its earlier state. The adjustment log keeps every entry, marked as removed.</p>
+                              <dl>
+                                <div><dt>Restored finish</dt><dd>{preview.finish}</dd></div>
+                                <div><dt>Restored workload</dt><dd>{displayHours(preview.work)} h</dd></div>
+                                <div><dt>Margin returned</dt><dd>{preview.marginReturned} d</dd></div>
+                                <div><dt>Entries removed</dt><dd>{preview.removed}</dd></div>
+                                <div><dt>Project finish</dt><dd>{preview.projectFinishAfter} <small>from {preview.projectFinishBefore}</small></dd></div>
+                              </dl>
+                              <p className="removal-successors">{preview.successors.length
+                                ? `Successors move back: ${preview.successors.map((successor) => `${successor.name} ${successor.oldStart} → ${successor.newStart}`).join(", ")}`
+                                : "No successor dates change."}</p>
+                            </>
+                          : <p>There is nothing to remove.</p>}
+                        <div className="removal-actions">
+                          <button className="tool-button" onClick={() => setRemovalPrompt(null)}>Cancel</button>
+                          <button className="tool-button danger" disabled={!preview} onClick={() => confirmRemoval(live, removalPrompt.mode)}>Remove</button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })()}
             <div className="modal-actions">
-              {(() => {
-                const live = taskById.get(modalTask.id) ?? modalTask;
-                const blocked = canAdjustTask(live, activeMode, todayLineDate, tasks);
-                return (
-                  <div className="modal-actions-left">
-                    {blocked === null && (
-                      <button className="tool-button" onClick={() => { setAdjustError(null); setAdjustTaskId(live.id); }} title="Re-plan the remaining work from a chosen date"><RotateCcw size={14} /> Adjust remaining work</button>
-                    )}
-                    {(live.adjustments?.length ?? 0) > 0 && (undoConfirmTaskId === live.id
-                      ? <span className="undo-confirm" role="alert">
-                          Undo the last adjustment?
-                          <button className="tool-button danger" onClick={() => applyUndoAdjustment(live)}>Undo</button>
-                          <button className="tool-button" onClick={() => setUndoConfirmTaskId(null)}>Keep</button>
-                        </span>
-                      : <button className="tool-button" onClick={() => setUndoConfirmTaskId(live.id)}><Undo2 size={14} /> Undo last adjustment</button>)}
-                  </div>
-                );
-              })()}
-              <button className="tool-button" onClick={() => setModalTask(null)}>Cancel</button>
+              <div className="modal-actions-left">
+                {(() => {
+                  const live = taskById.get(modalTask.id) ?? modalTask;
+                  if (canAdjustTask(live, activeMode, todayLineDate, tasks) !== null) return null;
+                  return <button className="tool-button" onClick={() => { setAdjustError(null); setAdjustEdit(null); setAdjustTaskId(live.id); }} title="Re-plan the remaining work from a chosen date"><RotateCcw size={14} /> Adjust remaining work</button>;
+                })()}
+              </div>
+              <button className="tool-button" onClick={() => { setModalTask(null); setRemovalPrompt(null); }}>Cancel</button>
               <button
                 className="tool-button primary"
                 onClick={() => {
@@ -2320,8 +2380,10 @@ export default function Dashboard() {
             availableHours={context.availableHours}
             today={todayLineDate}
             baselineWork={baselineWorkFor(task.id)}
-            onCancel={() => { setAdjustTaskId(null); setAdjustError(null); }}
-            onApply={(input) => applyAdjustment(task, input)}
+            mode={adjustEdit ? "edit" : "create"}
+            initial={adjustEdit ?? undefined}
+            onCancel={() => { setAdjustTaskId(null); setAdjustEdit(null); setAdjustError(null); }}
+            onApply={(input) => runAdjustmentPlan(task, input, Boolean(adjustEdit))}
           />
         );
       })()}

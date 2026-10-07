@@ -585,7 +585,14 @@ export interface TaskAdjustment {
   /** Working days passed on to successors after the reserve was spent. */
   daysPushed: number;
   reason: string;
-  /** Everything the undo has to put back. */
+  /**
+   * Set when this adjustment was removed. The entry is never deleted, so the
+   * history says who removed what and when; a removal is a log record of its own.
+   */
+  removedAt?: string;
+  removedByUserId?: string;
+  removedByName?: string;
+  /** Everything a removal has to put back. */
   before: {
     allocations?: AllocationSegment[];
     adjustments?: TaskAdjustment[];
@@ -593,6 +600,7 @@ export interface TaskAdjustment {
     duration: number;
     durationUnit: DurationUnit;
     finish: string;
+    distribution?: Distribution;
     marginPct?: number;
     marginDaysOriginal?: number;
     marginDaysConsumed?: number;
