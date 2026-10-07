@@ -521,7 +521,7 @@ export function normalizeWorkHours(value: string | number): number {
 export type Distribution = "even" | "front" | "back" | "center";
 
 export const DISTRIBUTION_OPTIONS: { value: Distribution; label: string }[] = [
-  { value: "even", label: "Gelijk (even)" },
+  { value: "even", label: "Evenly spread" },
   { value: "front", label: "Front-loaded" },
   { value: "back", label: "Back-loaded" },
   { value: "center", label: "Center-loaded" },
@@ -529,7 +529,7 @@ export const DISTRIBUTION_OPTIONS: { value: Distribution; label: string }[] = [
 
 const DISTRIBUTION_VALUES = new Set<Distribution>(["even", "front", "back", "center"]);
 
-/** Falls back to the default profile (Gelijk/even) for anything unrecognized. */
+/** Falls back to the default profile (evenly spread) for anything unrecognized. */
 export function normalizeDistribution(value: string | null | undefined): Distribution {
   return value && DISTRIBUTION_VALUES.has(value as Distribution) ? (value as Distribution) : "even";
 }

@@ -56,6 +56,12 @@ export interface CapacityExportInput {
   /** The day the file is made on (ISO), written as a real Excel date. */
   exportDate: string;
   granularity: CapacityGranularity;
+  /**
+   * The exact period on screen (`Week 40 · 28 Sep – 4 Oct 2026`, `October 2026`).
+   * The sheet names it instead of only the view, so a file always says which
+   * week or month it holds.
+   */
+  periodLabel?: string;
   /** Exactly the people the screen is showing, filters already applied. */
   reports: ResourceCapacityReport[];
   /** The screen's own aggregated periods for one person. */
@@ -105,7 +111,7 @@ function headerBlock(title: string, input: CapacityExportInput): ExportRow[] {
   return [
     [{ value: title, type: String, fontWeight: "bold", fontSize: 13 }],
     [label("Export date"), dateCell(input.exportDate)],
-    [label("Selected period"), text(input.granularity === "month" ? "Month" : "Week")],
+    [label("Selected period"), text(input.periodLabel?.trim() || (input.granularity === "month" ? "Month" : "Week"))],
     [label("Active filters"), text(filterSummary(input.filters))],
     [label("Basis"), text("Hours are based on the active plan version of each project only.")],
     [],

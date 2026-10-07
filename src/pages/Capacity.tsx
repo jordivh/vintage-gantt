@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CalendarRange, CheckCircle2, ExternalLink, FileSpreadsheet, FilterX, Loader2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { AlertTriangle, CalendarRange, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, FileSpreadsheet, FilterX, Loader2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { useCalendarStore } from "@/lib/calendar-store";
@@ -10,18 +10,32 @@ import {
   type PlannerTask,
 } from "@/lib/planner-model";
 import {
-  aggregatePeriods,
+  aggregateSpans,
   capacityClients,
   computeResourceLoads,
-  matchesResourceFilter,
-  selectCapacityProjects,
+  dayOverloadWarning,
   formatCapacityHours,
+  isOverloaded,
+  matchesResourceFilter,
   overloadWarning,
+  reportAssignmentCount,
+  reportUtilisation,
+  selectCapacityProjects,
   unavailableWarning,
-  type CapacityGranularity,
   type CapacityPeriod,
   type ResourceCapacityReport,
 } from "@/lib/capacity-engine";
+import {
+  PARTIAL_WEEK,
+  isCurrentPeriod,
+  isIsoDate,
+  periodLabel,
+  periodRows,
+  periodWindow,
+  shiftPeriod,
+  weekRangeLabel,
+  type CapacityView,
+} from "@/lib/capacity-period";
 import { isoDate } from "@/lib/scheduling-engine";
 import { buildCapacityWorkbook, capacityExportFileName } from "@/lib/capacity-export";
 import { downloadCapacityWorkbook } from "@/lib/capacity-workbook";
@@ -39,22 +53,22 @@ interface AssignmentRow {
 }
 
 const distributionLabel = (value: string) =>
-  DISTRIBUTION_OPTIONS.find((option) => option.value === value)?.label ?? "Gelijk (even)";
-
-/** The peak utilisation across the shown periods, or null when there is none. */
-const peakUtilisation = (periods: CapacityPeriod[]): number | null => {
-  const values = periods.map((period) => period.utilisation).filter((value): value is number => value !== null);
-  return values.length ? Math.max(...values) : null;
-};
+  DISTRIBUTION_OPTIONS.find((option) => option.value === value)?.label ?? "Evenly spread";
 
 export default function Capacity() {
   const navigate = useNavigate();
   const { system, resources, assignments, projects, projectTasks, planVersions, openTask, setActiveProject } = useCalendarStore();
   // The planner's overload indicators deep-link here: a resource (warning icon)
-  // or a project (context-bar chip), optionally scrolled to the first heavy week.
+  // or a project (context-bar chip), with the week to open.
   const [searchParams] = useSearchParams();
   const focusWeek = searchParams.get("week") ?? "";
-  const [granularity, setGranularity] = useState<CapacityGranularity>("week");
+  const today = useMemo(() => isoDate(new Date()), []);
+  // Week and Month are two levels of detail of the same thing, so one reference
+  // date drives both: the week or the month containing it. Switching the view
+  // keeps that date, and the period buttons only move it — the selected resource
+  // and every filter live outside this state and therefore survive the switch.
+  const [view, setView] = useState<CapacityView>("week");
+  const [reference, setReference] = useState(() => (isIsoDate(focusWeek) ? focusWeek : isoDate(new Date())));
   const [selectedId, setSelectedId] = useState("");
   // A deep link only ever carries an id of this company's own records. Anything
   // else — a stranger's id, a record that has since been deleted — is dropped on
@@ -69,6 +83,12 @@ export default function Capacity() {
   });
   const [filterClient, setFilterClient] = useState("");
   const [exporting, setExporting] = useState(false);
+
+  // The shown period and its rows: seven days for a week, one row per
+  // Monday–Sunday week for a month (the first and last clipped to the month).
+  const periodRange = useMemo(() => periodWindow(view, reference), [view, reference]);
+  const rows = useMemo(() => periodRows(view, reference), [view, reference]);
+  const selectedPeriodLabel = periodLabel(view, reference);
 
   const clients = useMemo(() => capacityClients(projects), [projects]);
   // Every regular, non-archived project — the options the filters offer.
@@ -91,12 +111,15 @@ export default function Capacity() {
 
   // Load comes from the active version of each remaining project only, so no
   // version is counted twice and nothing archived or deleted leaves ghost load.
+  // The window is the shown period, so every total below — the table, the person
+  // list, the header figures and the overload count — is a sum over those days.
   const reports = useMemo(() => computeResourceLoads({
     system,
     resources: resources.map((resource) => ({ id: resource.id, name: resource.name, hoursPerWeek: resource.hoursPerWeek, calendarId: resource.calendarId })),
     assignments,
     projects: filteredProjects.map((project) => ({ projectId: project.id, projectName: project.name, projectCalendarId: project.calendarId, tasks: projectTasks(project.id) })),
-  }), [system, resources, assignments, filteredProjects, projectTasks]);
+    range: periodRange,
+  }), [system, resources, assignments, filteredProjects, projectTasks, periodRange]);
 
   const visibleReports = reports.filter((report) => matchesResourceFilter(report.resourceId, { resourceId: filterResource }));
 
@@ -131,25 +154,29 @@ export default function Capacity() {
   }, [assignments, taskIndex]);
 
   const periodsByResource = useMemo(
-    () => new Map(visibleReports.map((report) => [report.resourceId, aggregatePeriods(report, granularity)])),
-    [visibleReports, granularity],
+    () => new Map(visibleReports.map((report) => [report.resourceId, aggregateSpans(report, rows)])),
+    [visibleReports, rows],
   );
 
+  // One entry per row that holds at least one overloaded day — in a week view
+  // those rows are the days themselves, in a month view the weeks. A week whose
+  // own total stays under 100% still appears as soon as one of its days does not,
+  // so "no overload" can never be said while a day inside the period is over.
   const overloads = useMemo(
     () => visibleReports.flatMap((report) => (periodsByResource.get(report.resourceId) ?? [])
-      .filter((period) => period.overload)
-      .map((period) => ({ resourceId: report.resourceId, warning: overloadWarning(report.resourceName, period) ?? "" }))),
+      .filter((period) => period.overloadedDays > 0)
+      .map((period) => ({
+        resourceId: report.resourceId,
+        key: period.key,
+        days: period.overloadedDays,
+        warning: overloadWarning(report.resourceName, period) ?? "",
+      }))),
     [visibleReports, periodsByResource],
   );
+  const overloadedDays = overloads.reduce((total, entry) => total + entry.days, 0);
 
   const selected = visibleReports.find((report) => report.resourceId === selectedId) ?? visibleReports[0];
   const selectedPeriods = selected ? periodsByResource.get(selected.resourceId) ?? [] : [];
-  // Scroll the deep-linked week into view once the filtered person is rendered.
-  useEffect(() => {
-    if (!focusWeek || !selected) return;
-    const target = document.querySelector(`[data-capacity-week="${focusWeek}"]`);
-    if (target) target.scrollIntoView({ block: "center" });
-  }, [focusWeek, selected?.resourceId, granularity]);
   const selectedAssignments = selected ? assignmentsByResource.get(selected.resourceId) ?? [] : [];
   const activeFilters = [
     filterResource && resources.some((resource) => resource.id === filterResource) ? { label: `Resource: ${resources.find((resource) => resource.id === filterResource)?.name ?? ""}`, clear: () => setFilterResource("") } : null,
@@ -165,19 +192,29 @@ export default function Capacity() {
     scopedRefStatus(searchParams.get("project") ?? "", projects.map((project) => project.id)),
   ].includes("unavailable");
 
+  const stepPeriod = (amount: number) => setReference((current) => shiftPeriod(view, current, amount));
+  // The picker opens the week (or the month) containing the chosen date; picking
+  // a month keeps the reference date inside it.
+  const pickDate = (value: string) => {
+    const candidate = view === "month" ? `${value}-01` : value;
+    if (isIsoDate(candidate)) setReference(candidate);
+  };
+
   /**
    * Downloads exactly what is on screen as a real .xlsx workbook: the same filtered
-   * people, the same aggregated periods and the same figures the tables show. It only
-   * reads them, so exporting can never change a plan, a date or an assignment.
+   * people, the same rows of the same selected period, and the same figures the
+   * tables show. It only reads them, so exporting can never change a plan, a date
+   * or an assignment.
    */
   const exportToExcel = async () => {
     const exportDate = isoDate(new Date());
-    const fileName = capacityExportFileName(granularity, exportDate);
+    const fileName = capacityExportFileName(view, exportDate);
     setExporting(true);
     try {
       const sheets = buildCapacityWorkbook({
         exportDate,
-        granularity,
+        granularity: view,
+        periodLabel: selectedPeriodLabel,
         reports: visibleReports,
         periodsFor: (resourceId) => periodsByResource.get(resourceId) ?? [],
         clients: clientByProject,
@@ -214,6 +251,9 @@ export default function Capacity() {
     navigate("/dashboard");
   };
 
+  const nextLabel = view === "week" ? "Next week" : "Next month";
+  const previousLabel = view === "week" ? "Previous week" : "Previous month";
+
   return (
     <div className="planner-shell">
       <AppBar activeKey="capacity" />
@@ -223,7 +263,7 @@ export default function Capacity() {
           <div>
             <div className="eyebrow">WORKLOAD / OVERLOAD</div>
             <h2>Who is over capacity</h2>
-            <p>Every active plan version of every project, measured against each person’s own available hours. Click an assignment to open that task in its project and version.</p>
+            <p>Every active plan version of every project, measured against each person’s own available hours. Week shows one day per row, Month one week per row. Click an assignment to open that task in its project and version.</p>
           </div>
           <div className="capacity-heading-actions">
             <button
@@ -231,7 +271,7 @@ export default function Capacity() {
               className="tool-button primary"
               onClick={() => void exportToExcel()}
               disabled={exporting}
-              title="Download the figures shown below as an Excel workbook (.xlsx)"
+              title={`Download the ${view} shown below as an Excel workbook (.xlsx)`}
             >
               {exporting ? <Loader2 size={15} className="animate-spin" /> : <FileSpreadsheet size={15} />}
               {exporting ? "Exporting…" : "Export to Excel"}
@@ -239,8 +279,28 @@ export default function Capacity() {
             <div className="capacity-toggle" role="group" aria-label="Aggregation period">
               <CalendarRange size={15} />
               {(["week", "month"] as const).map((value) => (
-                <button key={value} className={granularity === value ? "active" : ""} onClick={() => setGranularity(value)}>{value === "week" ? "Week" : "Month"}</button>
+                <button key={value} className={view === value ? "active" : ""} onClick={() => setView(value)}>{value === "week" ? "Week" : "Month"}</button>
               ))}
+            </div>
+            <div className="capacity-period" role="group" aria-label="Selected period">
+              <button type="button" className="capacity-period-nav" aria-label={previousLabel} title={previousLabel} onClick={() => stepPeriod(-1)}><ChevronLeft size={14} /></button>
+              <span className="capacity-period-label" title={selectedPeriodLabel}>{selectedPeriodLabel}</span>
+              <input
+                type={view === "week" ? "date" : "month"}
+                className="capacity-period-picker"
+                aria-label={view === "week" ? "Open the week containing a date" : "Open the month to show"}
+                title={view === "week" ? "Open the week containing a date" : "Open the month to show"}
+                value={view === "week" ? reference : reference.slice(0, 7)}
+                onChange={(event) => pickDate(event.target.value)}
+              />
+              <button type="button" className="capacity-period-nav" aria-label={nextLabel} title={nextLabel} onClick={() => stepPeriod(1)}><ChevronRight size={14} /></button>
+              <button
+                type="button"
+                className="capacity-period-today"
+                onClick={() => setReference(today)}
+                disabled={isCurrentPeriod(view, reference, today)}
+                title={view === "week" ? "Show the current week" : "Show the current month"}
+              >{view === "week" ? "This week" : "This month"}</button>
             </div>
           </div>
         </div>
@@ -282,37 +342,47 @@ export default function Capacity() {
           <>
             {overloads.length > 0 ? (
               <section className="capacity-banner card-surface" role="alert">
-                <div className="capacity-banner-head"><AlertTriangle size={18} /><b>{overloads.length} overbelasting{overloads.length === 1 ? "" : "en"}</b></div>
+                <div className="capacity-banner-head">
+                  <AlertTriangle size={18} />
+                  <b>{overloadedDays} overloaded {overloadedDays === 1 ? "day" : "days"} in this {view}</b>
+                </div>
                 <ul>
                   {overloads.map((item, index) => (
-                    <li key={`${item.resourceId}-${index}`}>
+                    <li key={`${item.resourceId}-${item.key}-${index}`}>
                       <button type="button" className="capacity-banner-link" onClick={() => setSelectedId(item.resourceId)}>{item.warning}</button>
                     </li>
                   ))}
                 </ul>
               </section>
             ) : (
-              <section className="capacity-ok card-surface"><CheckCircle2 size={17} /> Geen overbelasting: elke periode blijft binnen de beschikbare uren.</section>
+              <section className="capacity-ok card-surface"><CheckCircle2 size={17} /> No overload: every day in this {view} stays within the available hours.</section>
             )}
 
             <div className="capacity-layout">
               <aside className="capacity-list card-surface">
-                <div className="capacity-list-head"><span>{visibleReports.length} people</span><span className="muted">{overloads.length ? `${overloads.length} overloaded periods` : "all within capacity"}</span></div>
+                <div className="capacity-list-head">
+                  <span>{visibleReports.length} people</span>
+                  <span className="muted">{overloadedDays ? `${overloadedDays} overloaded ${overloadedDays === 1 ? "day" : "days"}` : "all within capacity"}</span>
+                </div>
                 {visibleReports.map((report) => {
-                  const periods = periodsByResource.get(report.resourceId) ?? [];
-                  const peak = peakUtilisation(periods);
-                  const overloaded = periods.filter((period) => period.overload).length;
-                  const rows = assignmentsByResource.get(report.resourceId) ?? [];
+                  const utilisation = reportUtilisation(report);
+                  const rowsForPerson = assignmentsByResource.get(report.resourceId) ?? [];
                   return (
                     <button key={report.resourceId} className={`capacity-person ${report.resourceId === selected?.resourceId ? "current" : ""}`} onClick={() => setSelectedId(report.resourceId)}>
                       <span className="capacity-person-avatar" style={{ background: resources.find((resource) => resource.id === report.resourceId)?.colour ?? "#9a8e78" }}>{report.resourceName.slice(0, 1).toUpperCase()}</span>
                       <span className="capacity-person-copy">
                         <b>{report.resourceName}</b>
-                        <small>{rows.length} assignment{rows.length === 1 ? "" : "s"} · {formatCapacityHours(report.totalAllocated)} h</small>
+                        <small title={`${rowsForPerson.length} assignment${rowsForPerson.length === 1 ? "" : "s"} in the current filter, ${reportAssignmentCount(report)} with hours in this ${view}`}>
+                          {reportAssignmentCount(report)} assignment{reportAssignmentCount(report) === 1 ? "" : "s"} · {formatCapacityHours(report.totalAllocated)} h
+                        </small>
                       </span>
                       <span className="capacity-person-meta">
-                        {peak === null ? "—" : `${Math.round(peak * 100)}%`}
-                        {overloaded > 0 && <em className="capacity-person-badge"><AlertTriangle size={11} /> {overloaded}</em>}
+                        {utilisation === null ? "—" : `${Math.round(utilisation * 100)}%`}
+                        {report.overloadedDays > 0 && (
+                          <em className="capacity-person-badge" title={`${report.overloadedDays} overloaded day${report.overloadedDays === 1 ? "" : "s"} in this ${view}`}>
+                            <AlertTriangle size={11} /> {report.overloadedDays}
+                          </em>
+                        )}
                       </span>
                     </button>
                   );
@@ -325,7 +395,8 @@ export default function Capacity() {
                     report={selected}
                     periods={selectedPeriods}
                     assignments={selectedAssignments}
-                    focusWeek={focusWeek}
+                    view={view}
+                    periodLabelText={selectedPeriodLabel}
                     canOpenProject={canOpenProject}
                     onOpenProject={openProjectById}
                     onOpenAssignment={openAssignment}
@@ -340,11 +411,12 @@ export default function Capacity() {
   );
 }
 
-function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProject, onOpenProject, onOpenAssignment }: {
+function ResourceDetail({ report, periods, assignments, view, periodLabelText, canOpenProject, onOpenProject, onOpenAssignment }: {
   report: ResourceCapacityReport;
   periods: CapacityPeriod[];
   assignments: AssignmentRow[];
-  focusWeek?: string;
+  view: CapacityView;
+  periodLabelText: string;
   canOpenProject: (projectId: string) => boolean;
   onOpenProject: (projectId: string) => void;
   onOpenAssignment: (row: AssignmentRow) => void;
@@ -362,7 +434,11 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
   return (
     <div className="capacity-detail-body">
       <div className="capacity-detail-head">
-        <div><div className="eyebrow">RESOURCE</div><h3>{report.resourceName}</h3></div>
+        <div>
+          <div className="eyebrow">RESOURCE</div>
+          <h3>{report.resourceName}</h3>
+          <p className="capacity-detail-period">Selected period: {periodLabelText}</p>
+        </div>
         <div className="capacity-totals">
           <span><small>Available</small><b>{formatCapacityHours(report.totalAvailable)} h</b></span>
           <span><small>Allocated</small><b>{formatCapacityHours(report.totalAllocated)} h</b></span>
@@ -372,7 +448,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
 
       {report.unavailableTasks.length > 0 && (
         <div className="capacity-unavailable" role="alert">
-          <b><AlertTriangle size={14} /> Niet beschikbaar</b>
+          <b><AlertTriangle size={14} /> Not available</b>
           <ul>
             {report.unavailableTasks.map((task) => (
               <li key={`${task.projectId}-${task.taskId}`}>
@@ -388,9 +464,9 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
         <table className="capacity-table">
           <thead><tr><th>Period</th><th>Available</th><th>Allocated</th><th>Remaining</th><th>Utilisation</th></tr></thead>
           <tbody>
-            {periods.length === 0 && <tr><td colSpan={5} className="muted">No planned work in this project range.</td></tr>}
+            {periods.length === 0 && <tr><td colSpan={5} className="muted">No days in this {view}.</td></tr>}
             {periods.map((period) => (
-              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} focus={period.key === focusWeek} canOpenProject={canOpenProject} onOpenProject={onOpenProject} />
+              <PeriodRows key={period.key} period={period} resourceName={report.resourceName} canOpenProject={canOpenProject} onOpenProject={onOpenProject} />
             ))}
           </tbody>
         </table>
@@ -398,6 +474,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
 
       <div className="capacity-assignments">
         <b>Assignments</b>
+        <p className="muted">Every assignment in the current filter. The table above counts only the hours that fall inside the selected period.</p>
         {assignments.length === 0 ? (
           <p className="muted">No assignments in the current filter — this person is shown with zero utilisation.</p>
         ) : (
@@ -413,7 +490,7 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
                         type="button"
                         className="capacity-project-link"
                         aria-label={`Open project ${row.projectName}`}
-                        title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "Project is gearchiveerd"}
+                        title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "The project is archived"}
                         disabled={!canOpenProject(row.projectId)}
                         onClick={(event) => { event.stopPropagation(); onOpenProject(row.projectId); }}
                       >{row.projectName}</button>
@@ -451,20 +528,32 @@ function ResourceDetail({ report, periods, assignments, focusWeek, canOpenProjec
   );
 }
 
-function PeriodRows({ period, resourceName, focus, canOpenProject, onOpenProject }: { period: CapacityPeriod; resourceName: string; focus?: boolean; canOpenProject: (projectId: string) => boolean; onOpenProject: (projectId: string) => void }) {
+function PeriodRows({ period, resourceName, canOpenProject, onOpenProject }: { period: CapacityPeriod; resourceName: string; canOpenProject: (projectId: string) => boolean; onOpenProject: (projectId: string) => void }) {
   const warning = overloadWarning(resourceName, period);
   const percent = period.utilisation === null ? null : Math.round(period.utilisation * 100);
+  // A row can be under its own total and still hold a day over capacity — a week
+  // clipped to a month, or one heavy day in a light week. Those days are named.
+  const overloadedDayWarnings = useMemo(
+    () => period.overload ? [] : period.days
+      .filter((day) => isOverloaded(day.allocated, day.available))
+      .map((day) => ({ date: day.date, text: dayOverloadWarning(resourceName, day) ?? "" })),
+    [period, resourceName],
+  );
+  const rowState = period.overload ? "overload" : period.overloadedDays > 0 ? "has-overload-days" : period.available === 0 && period.allocated === 0 ? "idle" : "";
   return (
     <>
-      <tr data-capacity-week={period.key} className={`capacity-row ${period.overload ? "overload" : ""}${focus ? " focused" : ""}`}>
-        <td><b>{period.label}</b></td>
+      <tr data-capacity-week={period.key} className={`capacity-row ${rowState}`}>
+        <td>
+          <b>{period.label}</b>
+          {period.partial && <span className="capacity-partial-chip" title={`This row is not a whole week: only ${weekRangeLabel(period.start, period.end)} falls inside the selected month, and only those days are counted.`}>{PARTIAL_WEEK}</span>}
+        </td>
         <td>{formatCapacityHours(period.available)} h</td>
         <td>{formatCapacityHours(period.allocated)} h</td>
         <td className={period.remaining < 0 ? "negative" : ""}>{formatCapacityHours(period.remaining)} h</td>
         <td>
           <div className="capacity-util"><span className={`capacity-util-fill ${period.overload ? "over" : ""}`} style={{ width: `${Math.min(100, percent ?? 0)}%` }} /></div>
           <span className="capacity-util-label">
-            {period.overload && <AlertTriangle size={13} />}
+            {period.overloadedDays > 0 && <AlertTriangle size={13} />}
             {percent === null ? "—" : `${percent}%`}
           </span>
         </td>
@@ -472,7 +561,13 @@ function PeriodRows({ period, resourceName, focus, canOpenProject, onOpenProject
       {(period.allocated > 0 || warning) && (
         <tr className={`capacity-row-detail ${period.overload ? "overload" : ""}`}>
           <td colSpan={5}>
-            {warning && <p className="capacity-warning" role="alert">{warning}</p>}
+            {period.overload && warning && <p className="capacity-warning" role="alert"><AlertTriangle size={13} /> {warning}</p>}
+            {overloadedDayWarnings.length > 0 && (
+              <ul className="capacity-day-list" role="alert">
+                {overloadedDayWarnings.slice(0, 3).map((day) => <li key={day.date}><AlertTriangle size={12} /> {day.text}</li>)}
+                {overloadedDayWarnings.length > 3 && <li>+ {overloadedDayWarnings.length - 3} more overloaded days in this week</li>}
+              </ul>
+            )}
             {period.breakdown.length > 0 && (
               <div className="capacity-breakdown">
                 <span className="muted">Breakdown:</span>
@@ -482,7 +577,7 @@ function PeriodRows({ period, resourceName, focus, canOpenProject, onOpenProject
                     type="button"
                     className="capacity-chip"
                     aria-label={`Open project ${row.projectName}`}
-                    title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "Project is gearchiveerd"}
+                    title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "The project is archived"}
                     disabled={!canOpenProject(row.projectId)}
                     onClick={() => onOpenProject(row.projectId)}
                   >{row.projectName} · {formatCapacityHours(row.allocated)} h</button>

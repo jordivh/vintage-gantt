@@ -1,6 +1,16 @@
 import { isoDate, parseIsoDate, type CalendarSystem } from "./scheduling-engine";
 import { dailyAllocation, taskWorkingDates, type DailyAllocation, type PlannerTask } from "./planner-model";
 import { availableHours } from "./resource-capacity";
+import {
+  dayLabel,
+  monthEnd,
+  monthLabel,
+  monthStart,
+  weekEnd,
+  weekRangeLabel,
+  weekStart,
+  type CapacityPeriodRow,
+} from "./capacity-period";
 
 /**
  * The capacity engine: it turns each active task's daily work allocation (step 2)
@@ -42,6 +52,13 @@ export interface CapacityInput {
   resources: CapacityPerson[];
   assignments: CapacityAssignment[];
   projects: CapacityProjectInput[];
+  /**
+   * The window to report on: the day series covers exactly these days, and the
+   * report's own totals therefore cover exactly them too. Leaving it out keeps
+   * the whole span of the plan — the period a screen shows is the caller's
+   * choice, the per-day figures never change either way.
+   */
+  range?: { start: string; end: string };
 }
 
 /* --------------------------------------------------------------- filters */
@@ -151,12 +168,21 @@ export interface CapacityPeriod {
   label: string;
   start: string;
   end: string;
+  /** True on a month view's first and last week: the row is not a whole week. */
+  partial?: boolean;
+  /** The daily figures this row is the exact sum of, in date order. */
+  days: CapacityDay[];
   available: number;
   allocated: number;
   remaining: number;
   /** allocated / available, or null when there is no availability at all. */
   utilisation: number | null;
+  /** The row itself is over capacity: its allocated hours exceed its available hours. */
   overload: boolean;
+  /** Days inside the row that are over capacity, even when the row's own total is not. */
+  overloadedDays: number;
+  /** Distinct tasks that put hours on this row. */
+  assignments: number;
   breakdown: CapacityBreakdownRow[];
   conflicts: CapacityConflict[];
 }
@@ -176,49 +202,29 @@ const eachDate = (start: string, end: string): string[] => {
   return dates;
 };
 
-const shiftDays = (date: string, amount: number): string => {
-  const value = parseIsoDate(date);
-  value.setDate(value.getDate() + amount);
-  return isoDate(value);
-};
-
-const mondayOf = (date: string): string => {
-  const weekday = parseIsoDate(date).getDay(); // 0 Sun … 6 Sat
-  return shiftDays(date, -((weekday + 6) % 7));
-};
-
-const lastDayOfMonth = (monthKey: string): string => {
-  const [year, month] = monthKey.split("-").map(Number);
-  return `${monthKey}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
-};
-
-const nlDay = new Intl.DateTimeFormat("nl-BE", { day: "numeric", month: "short" });
-const nlMonth = new Intl.DateTimeFormat("nl-BE", { month: "long", year: "numeric" });
-
-const periodOf = (date: string, granularity: CapacityGranularity): { key: string; label: string; start: string; end: string } => {
+/** The whole calendar week (Monday–Sunday) or the whole calendar month around a date. */
+const periodOf = (date: string, granularity: CapacityGranularity): CapacityPeriodRow => {
   if (granularity === "month") {
-    const key = date.slice(0, 7);
-    const start = `${key}-01`;
-    const end = lastDayOfMonth(key);
-    return { key, label: nlMonth.format(parseIsoDate(start)), start, end };
+    return { key: date.slice(0, 7), label: monthLabel(date), start: monthStart(date), end: monthEnd(date) };
   }
-  const start = mondayOf(date);
-  const end = shiftDays(start, 6);
-  const label = `${nlDay.format(parseIsoDate(start))} – ${nlDay.format(parseIsoDate(end))} ${end.slice(0, 4)}`;
-  return { key: start, label, start, end };
+  const start = weekStart(date);
+  const end = weekEnd(start);
+  return { key: start, label: weekRangeLabel(start, end), start, end };
 };
 
 /* --------------------------------------------------------------- compute */
 
 /**
- * Per resource, the allocated and available hours on each calendar day across the
- * whole span of the active plan, plus the conflicting-assignment pairs. Only the
- * tasks handed in (one active version per project) are counted, so a resource is
- * never charged twice for two versions of the same project.
+ * Per resource, the allocated and available hours on each calendar day of the
+ * report — the whole span of the active plan, or exactly the window the caller
+ * asked for — plus the conflicting-assignment pairs. Only the tasks handed in
+ * (one active version per project) are counted, so a resource is never charged
+ * twice for two versions of the same project. A window only decides which days
+ * are reported and summed; each day's own figures are computed the same way
+ * either way.
  */
 export function computeResourceLoads(input: CapacityInput): ResourceCapacityReport[] {
-  const { system, resources, assignments, projects } = input;
-
+  const { system, resources, assignments, projects, range } = input;
   const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
   const taskIndex = new Map<string, { task: PlannerTask; projectId: string; projectName: string; calendarId?: string }>();
   let rangeStart = "";
@@ -226,6 +232,9 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
   for (const project of projects) {
     for (const task of project.tasks) {
       taskIndex.set(task.id, { task, projectId: project.projectId, projectName: project.projectName, calendarId: project.projectCalendarId });
+      // A caller that hands in a window shows exactly that window, so the plan's
+      // own span — and this extra walk over every task — is not needed.
+      if (range) continue;
       // The task's own working days (calendar only) define the plan's time span.
       for (const entry of dailyAllocation(task, system, project.projectCalendarId)) {
         if (!rangeStart || entry.date < rangeStart) rangeStart = entry.date;
@@ -282,7 +291,10 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
     }
   }
 
-  const dates = rangeStart && rangeEnd ? eachDate(rangeStart, rangeEnd) : [];
+  // The shown period, or the whole plan when no window was asked for. Availability
+  // and the daily allocation are computed per day either way, so windowing never
+  // changes a single day's figure — it only decides which days are summed.
+  const dates = range ? eachDate(range.start, range.end) : rangeStart && rangeEnd ? eachDate(rangeStart, rangeEnd) : [];
 
   return resources.map((resource) => {
     const loadDays = loadByResource.get(resource.id) ?? new Map<string, CapacityContribution[]>();
@@ -349,37 +361,74 @@ function conflictsFromDays(days: CapacityDay[]): CapacityConflict[] {
 }
 
 /**
- * Groups a resource's daily load into weeks (Monday–Sunday) or calendar months.
- * Both are pure sums over the same daily figures, so a month always equals the
- * sum of its days — even for a week that straddles two months.
+ * Aggregates a resource's daily load into the given rows — one day of a week, a
+ * whole week, or a week clipped to a month. Every figure is a pure sum over the
+ * days inside the row, so a row can never disagree with the days it covers, and
+ * a clipped week can never count hours that belong to the next month. The rows
+ * come back in the order they were given.
+ */
+export function aggregateSpans(report: ResourceCapacityReport, rows: CapacityPeriodRow[]): CapacityPeriod[] {
+  return rows.map((row) => {
+    const days = report.days.filter((day) => day.date >= row.start && day.date <= row.end);
+    const available = sum(days.map((day) => day.available));
+    const allocated = sum(days.map((day) => day.allocated));
+    return {
+      key: row.key,
+      label: row.label,
+      start: row.start,
+      end: row.end,
+      partial: row.partial,
+      days,
+      available,
+      allocated,
+      remaining: available - allocated,
+      utilisation: utilisationOf(allocated, available),
+      overload: isOverloaded(allocated, available),
+      overloadedDays: days.filter((day) => isOverloaded(day.allocated, day.available)).length,
+      assignments: new Set(days.flatMap((day) => day.contributions.map((contribution) => contribution.taskId))).size,
+      breakdown: breakdownFor(days),
+      conflicts: report.conflicts.filter((conflict) => conflict.date >= row.start && conflict.date <= row.end),
+    };
+  });
+}
+
+/**
+ * Groups a resource's daily load into every week (Monday–Sunday) or calendar
+ * month the plan touches, biggest-first order not needed: display order is by
+ * start date. Both are pure sums over the same daily figures, so a month always
+ * equals the sum of its days — even for a week that straddles two months.
+ * A screen that shows one period instead builds its rows from
+ * `capacity-period.ts` and hands them to `aggregateSpans`.
  */
 export function aggregatePeriods(report: ResourceCapacityReport, granularity: CapacityGranularity): CapacityPeriod[] {
-  const groups = new Map<string, { key: string; label: string; start: string; end: string; days: CapacityDay[] }>();
+  const rows = new Map<string, CapacityPeriodRow>();
   for (const day of report.days) {
-    const info = periodOf(day.date, granularity);
-    const group = groups.get(info.key) ?? { ...info, days: [] };
-    group.days.push(day);
-    groups.set(info.key, group);
+    const row = periodOf(day.date, granularity);
+    rows.set(row.key, row);
   }
-  return [...groups.values()]
-    .map((group) => {
-      const available = sum(group.days.map((day) => day.available));
-      const allocated = sum(group.days.map((day) => day.allocated));
-      return {
-        key: group.key,
-        label: group.label,
-        start: group.start,
-        end: group.end,
-        available,
-        allocated,
-        remaining: available - allocated,
-        utilisation: available > 0 ? allocated / available : null,
-        overload: isOverloaded(allocated, available),
-        breakdown: breakdownFor(group.days),
-        conflicts: report.conflicts.filter((conflict) => conflict.date >= group.start && conflict.date <= group.end),
-      };
-    })
-    .sort((left, right) => left.start.localeCompare(right.start));
+  const ordered = [...rows.values()].sort((left, right) => left.start.localeCompare(right.start));
+  return aggregateSpans(report, ordered);
+}
+
+/** allocated / available, or null when there is not a single available hour. */
+export function utilisationOf(allocated: number, available: number): number | null {
+  return available > 0 ? allocated / available : null;
+}
+
+/**
+ * The report's own utilisation — total allocated ÷ total available, never an
+ * average of daily or weekly percentages. Null when the report has no available
+ * hours at all, which the screen shows as a dash rather than as 0%.
+ */
+export function reportUtilisation(report: ResourceCapacityReport): number | null {
+  return utilisationOf(report.totalAllocated, report.totalAvailable);
+}
+
+/** The distinct tasks that put hours on the report's days — its assignments. */
+export function reportAssignmentCount(report: ResourceCapacityReport): number {
+  const tasks = new Set<string>();
+  for (const day of report.days) for (const contribution of day.contributions) tasks.add(contribution.taskId);
+  return tasks.size;
 }
 
 /** Allocated hours per project over the given days, biggest first. */
@@ -396,21 +445,39 @@ function breakdownFor(days: CapacityDay[]): CapacityBreakdownRow[] {
 }
 
 /**
- * The explicit Dutch overload warning — naming the resource, the period, the
- * available hours and the requested hours. Colour is never the only signal.
+ * The explicit English overload warning for one row of the table, naming the
+ * resource, the row, the available hours and the allocated hours. Colour is
+ * never the only signal.
+ *
+ * A row whose own total stays under 100% can still hold an overloaded day (a
+ * week clipped to a month, or a light week with one heavy day), so that case is
+ * reported separately and by day count — a day over capacity is never hidden
+ * behind a comfortable average.
  */
 export function overloadWarning(resourceName: string, period: CapacityPeriod): string | null {
-  if (!period.overload) return null;
-  return `Overbelasting: ${resourceName} heeft in ${period.label} ${formatCapacityHours(period.available)} u beschikbaar maar ${formatCapacityHours(period.allocated)} u toegewezen.`;
+  if (period.overload) {
+    return `Overload: ${resourceName} has ${formatCapacityHours(period.allocated)} h allocated in ${period.label} but only ${formatCapacityHours(period.available)} h available.`;
+  }
+  if (period.overloadedDays > 0) {
+    const days = period.overloadedDays === 1 ? "1 day" : `${period.overloadedDays} days`;
+    return `Overload: ${days} inside ${period.label} exceed ${resourceName}’s available hours.`;
+  }
+  return null;
+}
+
+/** The explicit English warning for a single overloaded day. */
+export function dayOverloadWarning(resourceName: string, day: CapacityDay): string | null {
+  if (!isOverloaded(day.allocated, day.available)) return null;
+  return `Overload: ${resourceName} has ${formatCapacityHours(day.allocated)} h planned on ${dayLabel(day.date)} but only ${formatCapacityHours(day.available)} h available.`;
 }
 
 /**
- * The explicit Dutch warning for a task whose whole span falls on days the
+ * The explicit English warning for a task whose whole span falls on days the
  * person cannot work: the hours have nowhere to land, so the tool says so rather
  * than moving the task or dropping the work (BES-008).
  */
 export function unavailableWarning(resourceName: string, work: number): string {
-  return `${resourceName} is niet beschikbaar tijdens deze taak: ${formatCapacityHours(work)} u kan niet verdeeld worden.`;
+  return `${resourceName} is unavailable during this task: ${formatCapacityHours(work)} h cannot be distributed.`;
 }
 
 /** Compact hour figure: whole hours as-is, otherwise one decimal. */

@@ -78,7 +78,7 @@ describe("distribution — weighting profiles", () => {
     expect(hours[hours.length - 1] <= hours[hours.length - 2]).toBe(true);
   });
 
-  test("the default profile is Gelijk (even)", () => {
+  test("the default profile is evenly spread", () => {
     expect(normalizeDistribution(undefined)).toBe("even");
     expect(normalizeDistribution("nonsense")).toBe("even");
     expect(normalizeDistribution("front")).toBe("front");

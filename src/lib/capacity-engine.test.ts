@@ -80,14 +80,14 @@ describe("capacity — load, availability and overload", () => {
     expect(close(week.utilisation ?? 0, 2.75)).toBe(true);
   });
 
-  test("the Dutch warning names the resource, period, available and requested hours", () => {
+  test("the warning names the resource, period, available and allocated hours", () => {
     const anna = computeResourceLoads(fullInput()).find((report) => report.resourceId === "res-r3-anna")!;
     const week = aggregatePeriods(anna, "week").find((period) => period.start === "2026-10-05")!;
     const warning = overloadWarning("Anna", week) ?? "";
-    expect(warning).toContain("Overbelasting: Anna");
-    expect(warning).toContain("okt");
-    expect(warning).toContain("40 u beschikbaar");
-    expect(warning).toContain("110 u toegewezen");
+    expect(warning).toContain("Overload: Anna");
+    expect(warning).toContain("Oct");
+    expect(warning).toContain("110 h allocated");
+    expect(warning).toContain("only 40 h available");
   });
 
   test("no false overload: a long task with little work stays under capacity", () => {
@@ -116,7 +116,8 @@ describe("capacity — load, availability and overload", () => {
     expect(week.allocated).toBe(20);
     expect(week.overload).toBe(true);
     expect(week.utilisation).toBeNull();
-    expect(overloadWarning("Chris", week)).toContain("0 u beschikbaar maar 20 u toegewezen");
+    expect(overloadWarning("Chris", week)).toContain("20 h allocated");
+    expect(overloadWarning("Chris", week)).toContain("only 0 h available");
   });
 
   test("Bram's Friday off gives a short week: 20 h over Mon–Thu", () => {
@@ -248,7 +249,7 @@ describe("capacity — distribution is availability aware", () => {
     const chris = computeResourceLoads(input).find((report) => report.resourceId === "res-r3-chris")!;
     expect(chris.unavailableTasks.map((entry) => [entry.taskName, entry.work])).toEqual([["Volledig verlof", 40]]);
     expect(close(chris.totalAllocated, 40)).toBe(true);
-    expect(unavailableWarning("Chris", 40)).toBe("Chris is niet beschikbaar tijdens deze taak: 40 u kan niet verdeeld worden.");
+    expect(unavailableWarning("Chris", 40)).toBe("Chris is unavailable during this task: 40 h cannot be distributed.");
   });
 
   test("a day off in the person's week moves the hours off that day", () => {

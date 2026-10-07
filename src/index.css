@@ -787,3 +787,27 @@
 .detail-heading-actions { display: flex; align-items: center; gap: 4px; }
 .icon-button.danger { color: #9a4f3d; }
 .icon-button.danger:hover { border-color: #cfa595; background: #eed9d2; }
+
+/* The capacity period selector: the week or month the screen shows, with the
+   same paper treatment as the Week/Month switch it sits beside. */
+.capacity-period { display: inline-flex; align-items: center; gap: 6px; padding: 3px 7px; border: 1px solid #c6b79d; background: #f4ead8; border-radius: 3px; color: #7c5f3f; }
+.capacity-period-nav { display: inline-flex; align-items: center; border: 0; background: transparent; padding: 4px 5px; border-radius: 2px; color: #78664f; }
+.capacity-period-nav:hover { background: #ecdcbe; color: #5a4635; }
+.capacity-period-nav:focus-visible { outline: 2px solid #9a593f; outline-offset: 1px; }
+.capacity-period-label { min-width: 172px; text-align: center; color: #5d4b36; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.capacity-period-picker { height: 26px; border: 1px solid #c4b292; background: #fff9eb; color: #4b3d2f; font-size: 11px; padding: 0 4px; }
+.capacity-period-today { border: 1px solid #c6b79d; background: #f2eadb; color: #5a4d3e; border-radius: 3px; padding: 4px 9px; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.capacity-period-today:hover:not(:disabled) { background: #e4d6bc; }
+.capacity-period-today:disabled { opacity: .5; cursor: default; }
+
+/* A week clipped to the selected month says so, and a row whose own total stays
+   under capacity but which holds an overloaded day is marked separately — the
+   day is never hidden behind a comfortable average. */
+.capacity-partial-chip { display: inline-flex; margin-left: 6px; padding: 1px 6px; border-radius: 99px; background: #ece0c8; color: #6b5741; font-size: 10px; font-weight: 600; }
+.capacity-row.has-overload-days td { background: #fdf4e6; }
+.capacity-row.has-overload-days td:first-child { box-shadow: inset 3px 0 #d0a24a; }
+.capacity-row.has-overload-days .capacity-util-label { color: #8a5a2a; font-weight: 700; }
+.capacity-row.idle td { color: #9b8a72; }
+.capacity-day-list { list-style: none; margin: 0 0 7px; padding: 0; display: grid; gap: 3px; color: #8a5a2a; font-size: 11.5px; }
+.capacity-day-list li { display: flex; align-items: center; gap: 6px; }
+.capacity-detail-period { margin: 4px 0 0; color: #8d795f; font-size: 11px; }

@@ -45,11 +45,14 @@ const week = (overrides: Partial<CapacityPeriod> = {}): CapacityPeriod => ({
   label: "28 sep – 4 okt 2026",
   start: "2026-09-28",
   end: "2026-10-04",
+  days: [],
   available: 40,
   allocated: 0,
   remaining: 40,
   utilisation: 0,
   overload: false,
+  overloadedDays: 0,
+  assignments: 0,
   breakdown: [],
   conflicts: [],
   ...overrides,
@@ -118,6 +121,16 @@ describe("header block on both sheets", () => {
   test("follows the on-screen period setting", () => {
     const monthly = buildCapacityWorkbook(input({ granularity: "month" }));
     expect(monthly[0].data[2][1].value).toBe("Month");
+  });
+
+  test("names the exact week or month the screen selected", () => {
+    const named = buildCapacityWorkbook(input({ granularity: "month", periodLabel: "October 2026" }));
+    expect(named[0].data[2][1].value).toBe("October 2026");
+    expect(named[1].data[2][1].value).toBe("October 2026");
+    const weekly = buildCapacityWorkbook(input({ periodLabel: "Week 41 · 5 – 11 Oct 2026" }));
+    expect(weekly[0].data[2][1].value).toBe("Week 41 · 5 – 11 Oct 2026");
+    // a blank label never leaves the file without a period
+    expect(buildCapacityWorkbook(input({ periodLabel: "   " }))[0].data[2][1].value).toBe("Week");
   });
 
   test("freezes the block and the table header row", () => {
