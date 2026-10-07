@@ -9,6 +9,7 @@ import {
   scheduleTasks,
   type CalendarSystem,
   type DependencyType,
+  type DurationUnit,
   type PlanningDirection,
   type ScheduleDependency,
   type ScheduleTask,
@@ -50,6 +51,15 @@ export interface PlannerTask extends ScheduleTask {
   /** Template rows store task dates as working-day offsets from the project start. */
   startOffsetDays?: number;
   finishOffsetDays?: number;
+  /**
+   * The task's workload as stored slices once it has been adjusted: a fixed part
+   * (explicit hours per date, never recalculated) followed by a re-planned part.
+   * Absent means the task still behaves exactly as before — one even planned
+   * segment spread over the whole task by its duration and distribution.
+   */
+  allocations?: AllocationSegment[];
+  /** The adjustment log, oldest first. Empty/absent means never adjusted. */
+  adjustments?: TaskAdjustment[];
 }
 
 /** Returns task order as displayed by the hierarchical grid. */
@@ -534,6 +544,66 @@ export function normalizeDistribution(value: string | null | undefined): Distrib
   return value && DISTRIBUTION_VALUES.has(value as Distribution) ? (value as Distribution) : "even";
 }
 
+/**
+ * One stored slice of a task's workload. An adjusted task holds exactly one
+ * fixed segment (the hours already planned up to the keep-until date) and one
+ * planned segment (the remaining work, spread over its own range).
+ */
+export interface AllocationSegment {
+  kind: "fixed" | "planned";
+  /** Fixed: explicit hours per date, stored exactly as they were calculated. */
+  days?: { date: string; hours: number }[];
+  /** Planned: the segment's total hours. */
+  hours?: number;
+  /** Planned: first day of the segment (a working day of the resource). */
+  start?: string;
+  /** Planned: last day of the segment. */
+  finish?: string;
+  /** Planned: how the segment's hours are spread across its working days. */
+  distribution?: Distribution;
+}
+
+/**
+ * The immutable record of one “Adjust remaining work” action. It carries the
+ * figures the change produced (margin absorbed, days passed to successors) and
+ * the task state immediately before it, so “Undo last adjustment” can restore
+ * exactly that state and nothing older.
+ */
+export interface TaskAdjustment {
+  id: string;
+  at: string;
+  userId: string;
+  userName: string;
+  /** The date the current plan was kept unchanged up to and including. */
+  keepUntil: string;
+  oldFinish: string;
+  newFinish: string;
+  oldWork: number;
+  newWork: number;
+  /** Working days the task's own reserve absorbed. */
+  marginConsumed: number;
+  /** Working days passed on to successors after the reserve was spent. */
+  daysPushed: number;
+  reason: string;
+  /** Everything the undo has to put back. */
+  before: {
+    allocations?: AllocationSegment[];
+    adjustments?: TaskAdjustment[];
+    work?: number;
+    duration: number;
+    durationUnit: DurationUnit;
+    finish: string;
+    marginPct?: number;
+    marginDaysOriginal?: number;
+    marginDaysConsumed?: number;
+  };
+}
+
+/** True when a task carries stored allocation segments instead of one plain span. */
+export function hasAllocationSegments(task: PlannerTask): boolean {
+  return Array.isArray(task.allocations) && task.allocations.length > 0;
+}
+
 /** One calendar day's share of a task's work. `date` is ISO (yyyy-mm-dd). */
 export interface DailyAllocation {
   date: string;
@@ -576,6 +646,30 @@ function workingDaysFrom(start: string, count: number, calendarId: string, syste
 }
 
 /**
+ * The working days of the calendar between two dates, inclusive on both ends.
+ * Used by the allocation segments, whose range is stored explicitly rather than
+ * derived from a duration. Returns an empty list when `start` lies after
+ * `finish` or either date is missing.
+ */
+export function workingDaysInRange(
+  start: string | undefined,
+  finish: string | undefined,
+  calendarId: string,
+  system: CalendarSystem,
+): string[] {
+  // A missing or half-typed date (an empty dialog field) has no working days;
+  // refusing it here also keeps the working-day walk from looping on a bad date.
+  if (!start || !finish || !/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(finish)) return [];
+  const dates: string[] = [];
+  let cursor = ensureWorkingDay(start, calendarId, system);
+  while (cursor <= finish) {
+    dates.push(cursor);
+    cursor = addWorkingDays(cursor, 1, calendarId, system);
+  }
+  return dates;
+}
+
+/**
  * The task's own working days: its work duration on the project calendar, with
  * margin days excluded. These are the days a task could put hours on before any
  * availability is considered.
@@ -588,12 +682,74 @@ export function taskWorkingDates(
   // A milestone has no work at all, so there is nothing to distribute.
   if (task.isMilestone || task.duration === 0) return [];
   const calendarId = task.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+  // An adjusted task spans its whole bar: the fixed part up to the keep-until
+  // date and the re-planned part up to the new finish together cover start…finish.
+  if (hasAllocationSegments(task)) {
+    const dates: string[] = [];
+    let cursor = ensureWorkingDay(task.start, calendarId, system);
+    while (cursor <= task.finish) {
+      dates.push(cursor);
+      cursor = addWorkingDays(cursor, 1, calendarId, system);
+    }
+    return dates;
+  }
   const start = ensureWorkingDay(task.start, calendarId, system);
   // The engine's work finish: the task's working days only, before any reserve.
   const span = durationInWorkingDays(task);
   const finish = span <= 1 ? start : addWorkingDays(start, span - 1, calendarId, system);
   const count = workingDaysBetween(start, finish, calendarId, system);
   return workingDaysFrom(start, count, calendarId, system);
+}
+
+/**
+ * Splits `hours` over `dates` following `profile`. The split runs in quarter-hour
+ * units so it stays exact and integer; the rounding remainder rides on the last
+ * day, so the parts always add up to `hours` exactly.
+ */
+function spreadHours(profile: Distribution, hours: number, dates: string[]): DailyAllocation[] {
+  if (dates.length === 0) return [];
+  const totalQuarters = Math.round(Math.max(0, hours) * 4);
+  if (totalQuarters <= 0) return dates.map((date) => ({ date, hours: 0 }));
+  const weights = distributionWeights(profile, dates.length);
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const quarters = weights.map((weight) => Math.round((totalQuarters * weight) / totalWeight));
+  const distributed = quarters.reduce((sum, value) => sum + value, 0);
+  quarters[quarters.length - 1] += totalQuarters - distributed;
+  return dates.map((date, index) => ({ date, hours: quarters[index] / 4 }));
+}
+
+/**
+ * The allocation of a task that carries stored segments. Fixed days contribute
+ * their stored hours verbatim (they are never recalculated, even when the day
+ * later stops being a working day — the planner warns instead of moving them),
+ * and each planned segment is spread over its own range with the profile it was
+ * given, honouring the resource's availability.
+ */
+function segmentDailyAllocation(
+  task: PlannerTask,
+  system: CalendarSystem,
+  projectCalendarId?: string,
+  isAvailable?: (date: string) => boolean,
+): DailyAllocation[] {
+  const calendarId = task.calendarId ?? projectCalendarId ?? system.defaultCalendarId;
+  const hoursByDate = new Map<string, number>();
+  const add = (date: string, hours: number) => hoursByDate.set(date, (hoursByDate.get(date) ?? 0) + hours);
+  for (const segment of task.allocations ?? []) {
+    if (segment.kind === "fixed") {
+      for (const day of segment.days ?? []) add(day.date, day.hours);
+      continue;
+    }
+    const dates = workingDaysInRange(segment.start, segment.finish, calendarId, system);
+    const available = isAvailable ? dates.filter((date) => isAvailable(date)) : dates;
+    // No available day at all: keep the calendar split rather than dropping hours.
+    const target = available.length ? available : dates;
+    for (const entry of spreadHours(normalizeDistribution(segment.distribution), Math.max(0, segment.hours ?? 0), target)) {
+      add(entry.date, entry.hours);
+    }
+  }
+  return [...hoursByDate.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([date, hours]) => ({ date, hours }));
 }
 
 /**
@@ -624,25 +780,17 @@ export function dailyAllocation(
   projectCalendarId?: string,
   isAvailable?: (date: string) => boolean,
 ): DailyAllocation[] {
+  if (hasAllocationSegments(task)) return segmentDailyAllocation(task, system, projectCalendarId, isAvailable);
   const dates = taskWorkingDates(task, system, projectCalendarId);
   if (dates.length === 0) return [];
-  const work = Math.max(0, task.work ?? 0);
   // Distribute in quarter-hour units so the split stays exact and integer.
-  const totalQuarters = Math.round(work * 4);
-  if (totalQuarters <= 0) return dates.map((date) => ({ date, hours: 0 }));
+  const work = Math.max(0, task.work ?? 0);
 
   const available = isAvailable ? dates.filter((date) => isAvailable(date)) : dates;
   // No available day at all: keep the calendar split rather than dropping hours.
   const target = available.length ? available : dates;
-  const weights = distributionWeights(normalizeDistribution(task.distribution), target.length);
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const quarters = weights.map((weight) => Math.round((totalQuarters * weight) / totalWeight));
-  const distributed = quarters.reduce((sum, value) => sum + value, 0);
-  // Keep the total exact: the rounding remainder rides on the last target day.
-  quarters[quarters.length - 1] += totalQuarters - distributed;
-
-  const hoursByDate = new Map<string, number>();
-  target.forEach((date, index) => hoursByDate.set(date, quarters[index] / 4));
+  const allocated = spreadHours(normalizeDistribution(task.distribution), work, target);
+  const hoursByDate = new Map(allocated.map((entry) => [entry.date, entry.hours]));
   return dates.map((date) => ({ date, hours: hoursByDate.get(date) ?? 0 }));
 }
 

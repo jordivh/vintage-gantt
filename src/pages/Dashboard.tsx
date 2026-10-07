@@ -41,7 +41,9 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { allocationSegments, canAdjustTask, displayHours, fixedDaysOnNonWorkingDays, fixedUntil, planAdjustment, undoLastAdjustment, type AdjustmentInput } from "@/lib/remaining-work";
+import { availableHours } from "@/lib/resource-capacity";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
@@ -50,6 +52,7 @@ import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/cal
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { AppBar } from "@/components/AppBar";
+import { AdjustRemainingWorkDialog } from "@/components/AdjustRemainingWorkDialog";
 
 type Task = PlannerTask;
 type ColumnKey = "id" | "wbs" | "name" | "duration" | "work" | "distribution" | "start" | "finish" | "predecessors" | "resource" | "availability" | "percent" | "actualStart" | "actualFinish" | "notes" | "margin" | "marginOriginal" | "marginConsumed" | "marginRemaining" | "totalFloat" | "baselineStart" | "baselineFinish" | "variance";
@@ -90,7 +93,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "marginRemaining", label: "Margin remaining", width: 120 },
   { key: "baselineStart", label: "Baseline start", width: 112 },
   { key: "baselineFinish", label: "Baseline finish", width: 120 },
-  { key: "variance", label: "Variance", width: 88 },
+  { key: "variance", label: "Variance", width: 120 },
 ];
 
 const parseDate = (date: string) => new Date(`${date}T12:00:00`);
@@ -173,7 +176,11 @@ export default function Dashboard() {
     saveAsTemplate,
     focusTask,
     clearFocusTask,
+    company,
   } = useCalendarStore();
+  // The signed-in account, recorded on every adjustment log entry.
+  const selfMember = company?.members.find((member) => member.isSelf);
+  const adjustmentActor = { id: selfMember?.userId ?? "unknown", name: selfMember?.name || selfMember?.email || "You" };
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
   // The mode belongs to the active version, not the project. A version with no
@@ -204,6 +211,10 @@ export default function Dashboard() {
   const [split, setSplit] = useState(58);
   const [showMenu, setShowMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [modalTask, setModalTask] = useState<Task | null>(null);
+  // The task whose remaining work is being re-planned, and the inline undo confirm.
+  const [adjustTaskId, setAdjustTaskId] = useState<string | null>(null);
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [undoConfirmTaskId, setUndoConfirmTaskId] = useState<string | null>(null);
   const [cellError, setCellError] = useState<{ taskId: string; column: ColumnKey; message: string } | null>(null);
   const [marginNotice, setMarginNotice] = useState<{ taskId: string; message: string } | null>(null);
   // Reported under the Finish cell: how a task's finish move used its reserve.
@@ -572,6 +583,59 @@ export default function Dashboard() {
       ?? [...relevant].sort((a, b) => (b.absorbed + b.passed + b.returned) - (a.absorbed + a.passed + a.returned))[0];
     if (focus) setAbsorptionNotice({ taskId: focus.taskId, message: formatAbsorption(focus) });
     return true;
+  };
+
+  /* ------------------------------------------- adjust remaining work (Monitoring) */
+
+  /** The employee an adjustment is measured against (the task's first assignment). */
+  const taskResourceFor = (taskId: string) => resources.find((resource) => assignments.some((assignment) => assignment.taskId === taskId && assignment.resourceId === resource.id));
+
+  const adjustmentContext = (task: Task) => {
+    const resource = taskResourceFor(task.id);
+    const hoursFor = resource ? (date: string) => availableHours(resource, date, system) : undefined;
+    return {
+      system,
+      projectCalendarId: calendarId,
+      isAvailable: hoursFor ? (date: string) => hoursFor(date) > 0 : undefined,
+      availableHours: hoursFor,
+      today: todayLineDate,
+    };
+  };
+
+  /** The workload the active baseline recorded for a task, if it captured one. */
+  const baselineWorkFor = (taskId: string) => activeBaselineSnapshots.get(taskId)?.work;
+
+  /**
+   * Applies the adjustment through the normal commit path, so margin consumption,
+   * successor movement and history behave exactly like any other Monitoring edit.
+   */
+  const applyAdjustment = (task: Task, input: AdjustmentInput) => {
+    const plan = planAdjustment(tasks, task.id, input, adjustmentContext(task), {
+      baselineWork: baselineWorkFor(task.id),
+      actor: adjustmentActor,
+      at: new Date().toISOString(),
+    });
+    if ("error" in plan) {
+      setAdjustError(plan.error);
+      return;
+    }
+    setAdjustError(null);
+    // Only the adjusted task is handed on; commit re-schedules the network itself,
+    // so successors move exactly as the preview promised instead of absorbing margin.
+    commit(tasks.map((item) => (item.id === task.id ? plan.task : item)), task.id);
+    setAdjustTaskId(null);
+    setModalTask(null);
+    toast.success(`Remaining work adjusted: ${displayHours(plan.preview.fixedHours)} h kept, ${displayHours(plan.preview.remainingHours)} h re-planned.`);
+  };
+
+  /** Restores the task to the state just before its most recent adjustment. */
+  const applyUndoAdjustment = (task: Task) => {
+    const restored = undoLastAdjustment(task);
+    if (!restored) return;
+    commit(tasks.map((item) => (item.id === task.id ? restored : item)), task.id);
+    setUndoConfirmTaskId(null);
+    setModalTask(restored);
+    toast("Last adjustment undone");
   };
 
   /** Applies one cell edit and returns the task list it committed, so callers can
@@ -1783,7 +1847,9 @@ export default function Dashboard() {
                                                 : displayTask.finish > snapshot.finishDate
                                                   ? workingDaysBetween(snapshot.finishDate, displayTask.finish, calendarId, system) - 1
                                                   : -(workingDaysBetween(displayTask.finish, snapshot.finishDate, calendarId, system) - 1);
-                                              return `${days >= 0 ? "+" : ""}${days} d`;
+                                              // Workload deviation in hours sits beside the date deviation.
+                                              const workDelta = snapshot.work === undefined ? null : (displayTask.work ?? 0) - snapshot.work;
+                                              return `${days >= 0 ? "+" : ""}${days} d${workDelta === null ? "" : ` · ${workDelta >= 0 ? "+" : ""}${displayHours(workDelta)} h`}`;
                                             })()
                                     : column.key === "resource"
                                   ? assignedResources(task.id).map((resource) => resource?.name).join(", ")
@@ -1793,9 +1859,12 @@ export default function Dashboard() {
                       const isName = column.key === "name";
                       const modeLock = fieldModeReadOnly(column.key, activeMode);
                       const milestone = isMilestone(task);
-                      const structuralLock = ["id", "wbs", "availability", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || ((summary || milestone) && column.key === "distribution");
+                      // An adjusted task's segments and dates belong together: its split,
+                      // dates and summed workload can only change through a new adjustment.
+                      const adjustLocked = hasAllocationSegments(task) && ["start", "finish", "duration", "work", "distribution"].includes(column.key);
+                      const structuralLock = ["id", "wbs", "availability", "totalFloat", "marginOriginal", "marginConsumed", "marginRemaining", "baselineStart", "baselineFinish", "variance"].includes(column.key) || (summary && ["start", "finish", "duration", "margin", "work"].includes(column.key)) || (milestone && column.key === "work") || adjustLocked || ((summary || milestone) && column.key === "distribution");
                       const canEdit = !structuralLock && !modeLock;
-                      const readOnlyReason = modeLock ?? (milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
+                      const readOnlyReason = modeLock ?? (adjustLocked ? (column.key === "work" ? "Total workload is fixed after an adjustment: the sum of the fixed and the re-planned hours." : "Fixed after an adjustment — use Adjust remaining work or Undo last adjustment.") : milestone && column.key === "work" ? "Milestones have no work." : summary ? "Summary rows roll up their children." : structuralLock ? "Calculated column — not editable." : undefined);
                       return (
                         <div
                           key={column.key}
@@ -1825,6 +1894,10 @@ export default function Dashboard() {
                             </button>
                           )}
                           {isName && !summary && <span className="task-spacer" />}
+                          {isName && !summary && (() => {
+                            const stale = fixedDaysOnNonWorkingDays(displayTask, system, calendarId);
+                            return stale.length ? <span className="fixed-day-warning" title={`Fixed hours stay on ${stale.join(", ")}, which are no longer working days. The hours are not moved.`}><TriangleAlert size={12} /></span> : null;
+                          })()}
                           {column.key === "distribution" && canEdit ? (
                             <select
                               className="cell-select"
@@ -2037,6 +2110,12 @@ export default function Dashboard() {
                     onDoubleClick={() => setModalTask(task)}
                   >
                     <span className="progress-fill" style={{ width: `${task.percent}%` }} />
+                    {(() => {
+                      const until = fixedUntil(task);
+                      if (!until || isMilestone(task)) return null;
+                      const width = dateOffset(addWorkingDays(until, 1, calendarId, system)) - dateOffset(task.start);
+                      return <span className="bar-fixed" style={{ left: 0, width: `${Math.max(0, width)}px` }} title={`Fixed until ${formatFullDate(until)}`} />;
+                    })()}
                     {!isMilestone(task) && (
                       <>
                         <span className="bar-grip left" onPointerDown={(event) => beginBarResize(event, task, "start")} />
@@ -2082,6 +2161,12 @@ export default function Dashboard() {
       {showMenu && (
         <div className="context-menu" style={{ left: showMenu.x, top: showMenu.y }} onClick={(event) => event.stopPropagation()}>
           <button onClick={() => { setModalTask(taskById.get(showMenu.id) ?? null); setShowMenu(null); }}>Task information <span>↵</span></button>
+          {(() => {
+            const task = taskById.get(showMenu.id);
+            return task && canAdjustTask(task, activeMode, todayLineDate, tasks) === null
+              ? <button onClick={() => { setAdjustError(null); setAdjustTaskId(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Adjust remaining work</button>
+              : null;
+          })()}
           <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button>
           <button
             onClick={() => {
@@ -2138,7 +2223,72 @@ export default function Dashboard() {
                 </label>
               ))}
             </div>
+            {(() => {
+              const live = taskById.get(modalTask.id) ?? modalTask;
+              const segments = allocationSegments(live, system, calendarId);
+              const log = live.adjustments ?? [];
+              if (!segments.length && !log.length) return null;
+              return (
+                <div className="adjust-detail">
+                  <div className="adjust-detail-head">
+                    <b>Workload</b>
+                    <span>{displayHours(live.work ?? 0)} h{hasAllocationSegments(live) ? " — read-only: the sum of the fixed and the re-planned hours" : ""}</span>
+                  </div>
+                  {segments.length > 0 && (
+                    <div className="adjust-segments">
+                      <div className="eyebrow">ALLOCATION SEGMENTS</div>
+                      <table>
+                        <thead><tr><th>Segment</th><th>From</th><th>To</th><th>Days</th><th>Hours</th><th>Distribution</th></tr></thead>
+                        <tbody>
+                          {segments.map((segment, index) => (
+                            <tr key={index} className={`segment-${segment.kind}`}>
+                              <td>{segment.kind === "fixed" ? "Fixed" : "Planned"}</td>
+                              <td>{segment.start}</td>
+                              <td>{segment.finish}</td>
+                              <td>{segment.days}</td>
+                              <td>{displayHours(segment.hours)} h</td>
+                              <td>{segment.distribution ? DISTRIBUTION_OPTIONS.find((option) => option.value === segment.distribution)?.label ?? "—" : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {log.length > 0 && (
+                    <div className="adjust-log">
+                      <div className="eyebrow">ADJUSTMENT LOG</div>
+                      <ul>
+                        {[...log].reverse().map((entry) => (
+                          <li key={entry.id}>
+                            <div className="adjust-log-line"><b>{entry.reason}</b><span>{entry.userName} · {new Date(entry.at).toLocaleString("en-GB")}</span></div>
+                            <div className="adjust-log-meta">Keep until {entry.keepUntil} · finish {entry.oldFinish} → {entry.newFinish} · workload {displayHours(entry.oldWork)} h → {displayHours(entry.newWork)} h · margin {entry.marginConsumed} d · pushed {entry.daysPushed} d</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="modal-actions">
+              {(() => {
+                const live = taskById.get(modalTask.id) ?? modalTask;
+                const blocked = canAdjustTask(live, activeMode, todayLineDate, tasks);
+                return (
+                  <div className="modal-actions-left">
+                    {blocked === null && (
+                      <button className="tool-button" onClick={() => { setAdjustError(null); setAdjustTaskId(live.id); }} title="Re-plan the remaining work from a chosen date"><RotateCcw size={14} /> Adjust remaining work</button>
+                    )}
+                    {(live.adjustments?.length ?? 0) > 0 && (undoConfirmTaskId === live.id
+                      ? <span className="undo-confirm" role="alert">
+                          Undo the last adjustment?
+                          <button className="tool-button danger" onClick={() => applyUndoAdjustment(live)}>Undo</button>
+                          <button className="tool-button" onClick={() => setUndoConfirmTaskId(null)}>Keep</button>
+                        </span>
+                      : <button className="tool-button" onClick={() => setUndoConfirmTaskId(live.id)}><Undo2 size={14} /> Undo last adjustment</button>)}
+                  </div>
+                );
+              })()}
               <button className="tool-button" onClick={() => setModalTask(null)}>Cancel</button>
               <button
                 className="tool-button primary"
@@ -2155,6 +2305,27 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {adjustTaskId && (() => {
+        const task = taskById.get(adjustTaskId);
+        if (!task) return null;
+        const context = adjustmentContext(task);
+        return (
+          <AdjustRemainingWorkDialog
+            task={task}
+            tasks={tasks}
+            system={system}
+            projectCalendarId={calendarId}
+            isAvailable={context.isAvailable}
+            availableHours={context.availableHours}
+            today={todayLineDate}
+            baselineWork={baselineWorkFor(task.id)}
+            onCancel={() => { setAdjustTaskId(null); setAdjustError(null); }}
+            onApply={(input) => applyAdjustment(task, input)}
+          />
+        );
+      })()}
+      {adjustError && <div className="adjust-floating-error" role="alert">{adjustError}</div>}
     </div>
   );
 }
