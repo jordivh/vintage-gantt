@@ -148,6 +148,33 @@ export interface UnavailableTask {
   work: number;
 }
 
+/**
+ * The hours one resource has on one task, from the daily distribution itself:
+ * `total` over the task's whole span, `inPeriod` only the part that falls inside
+ * the report's window (the period a screen shows). The two figures come from the
+ * same allocation, so neither is ever an estimate from overlapping calendar days,
+ * and the sum of `inPeriod` is the report's allocated total by construction.
+ */
+export interface ResourceTaskWork {
+  taskId: string;
+  projectId: string;
+  total: number;
+  inPeriod: number;
+}
+
+/**
+ * True when a task's own dates overlap a period, inclusive on both ends: a task
+ * that starts before it or finishes after it still counts, one that lies wholly
+ * outside it does not. Missing dates fall back to the other end, so a task with
+ * only a start is still placed.
+ */
+export function overlapsRange(start: string, finish: string, range: { start: string; end: string }): boolean {
+  const from = start || finish;
+  const to = finish || start;
+  if (!from || !to) return false;
+  return from <= range.end && to >= range.start;
+}
+
 export interface ResourceCapacityReport {
   resourceId: string;
   resourceName: string;
@@ -156,6 +183,8 @@ export interface ResourceCapacityReport {
   conflicts: CapacityConflict[];
   /** Tasks whose whole span falls on days this resource cannot work. */
   unavailableTasks: UnavailableTask[];
+  /** Per task: the whole-task hours and the part inside the report's window. */
+  assignedWork: ResourceTaskWork[];
   totalAllocated: number;
   totalAvailable: number;
   overloadedDays: number;
@@ -278,17 +307,29 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
 
   // resourceId → date → the tasks (of any project) that put hours on that day.
   const loadByResource = new Map<string, Map<string, CapacityContribution[]>>();
+  // resourceId → taskId → the hours this resource has on that task over its whole
+  // span. Kept separately from the day map because a window may hold none of a
+  // task's hours while the task still overlaps the period.
+  const workByResource = new Map<string, Map<string, ResourceTaskWork>>();
   for (const assignment of assignments) {
     const entry = taskIndex.get(assignment.taskId);
     if (!entry) continue;
     let days = loadByResource.get(assignment.resourceId);
     if (!days) { days = new Map(); loadByResource.set(assignment.resourceId, days); }
-    for (const allocationEntry of allocationFor(assignment.taskId, assignment.resourceId)) {
+    const allocation = allocationFor(assignment.taskId, assignment.resourceId);
+    let total = 0;
+    for (const allocationEntry of allocation) {
+      // The whole-task total counts every day of the task's span, the day map only
+      // the days the caller's window reports.
+      total += allocationEntry.hours;
       if (allocationEntry.hours <= 0) continue;
       const list = days.get(allocationEntry.date) ?? [];
       list.push({ projectId: entry.projectId, projectName: entry.projectName, taskId: assignment.taskId, taskName: entry.task.name, hours: allocationEntry.hours });
       days.set(allocationEntry.date, list);
     }
+    let work = workByResource.get(assignment.resourceId);
+    if (!work) { work = new Map(); workByResource.set(assignment.resourceId, work); }
+    work.set(entry.task.id, { taskId: entry.task.id, projectId: entry.projectId, total, inPeriod: 0 });
   }
 
   // The shown period, or the whole plan when no window was asked for. Availability
@@ -307,6 +348,17 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
         contributions,
       };
     });
+    // What each task contributes inside the window — a pure sum over the reported
+    // days, so these figures add up to the allocated total below to the minute.
+    const inPeriodByTask = new Map<string, number>();
+    for (const day of days) {
+      for (const contribution of day.contributions) {
+        inPeriodByTask.set(contribution.taskId, (inPeriodByTask.get(contribution.taskId) ?? 0) + contribution.hours);
+      }
+    }
+    const assignedWork = [...(workByResource.get(resource.id)?.values() ?? [])]
+      .map((entry) => ({ ...entry, inPeriod: inPeriodByTask.get(entry.taskId) ?? 0 }))
+      .sort((left, right) => left.taskId.localeCompare(right.taskId));
     return {
       resourceId: resource.id,
       resourceName: resource.name,
@@ -314,6 +366,7 @@ export function computeResourceLoads(input: CapacityInput): ResourceCapacityRepo
       days,
       conflicts: conflictsFromDays(days),
       unavailableTasks: unavailableByResource.get(resource.id) ?? [],
+      assignedWork,
       totalAllocated: sum(days.map((day) => day.allocated)),
       totalAvailable: sum(days.map((day) => day.available)),
       overloadedDays: days.filter((day) => isOverloaded(day.allocated, day.available)).length,

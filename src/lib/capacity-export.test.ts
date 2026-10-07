@@ -65,6 +65,7 @@ const person = (resourceId: string, resourceName: string): ResourceCapacityRepor
   days: [],
   conflicts: [],
   unavailableTasks: [],
+  assignedWork: [],
   totalAllocated: 0,
   totalAvailable: 0,
   overloadedDays: 0,

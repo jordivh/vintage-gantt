@@ -28,6 +28,7 @@ import {
   computeResourceLoads,
   dayOverloadWarning,
   isOverloaded,
+  overlapsRange,
   overloadWarning,
   reportAssignmentCount,
   reportUtilisation,
@@ -573,5 +574,144 @@ describe("case 10 — rows, week rows and the summary agree", () => {
     expect([monday.available, monday.allocated, isOverloaded(monday.allocated, monday.available)]).toEqual([8, 24, true]);
     expect(dayOverloadWarning("Full time", monday)).toContain("Mon 5 Oct 2026");
     expect(dayLabel("2026-10-05")).toBe("Mon 5 Oct 2026");
+  });
+});
+
+/*
+ * The Assignments list at the bottom of the screen: the tasks that overlap the
+ * shown period, each with the hours that fall inside it (which add up to the
+ * Allocated total above) and its whole-task hours. The overlap rule is the
+ * screen's, inclusive on both ends, applied on top of the resource, project and
+ * client filters — the project/client filter is enforced by the projects the
+ * engine is handed, so it cannot leak into these figures.
+ */
+describe("the Assignments list follows the selected period", () => {
+  const TASKS: PlannerTask[] = [
+    // Entirely December: never part of October or November.
+    { ...task({ id: "dec", start: "2026-12-07", duration: 5, work: 40 }), finish: "2026-12-11" },
+    // September into October: its 8 working days end on 7 October.
+    { ...task({ id: "sept", start: "2026-09-28", duration: 8, work: 32 }), finish: "2026-10-07" },
+    // October into November: 5 October days and 2 November days.
+    { ...task({ id: "straddle", start: "2026-10-26", duration: 7, work: 40 }), finish: "2026-11-03" },
+    // October work whose displayed finish is inside November (a margin tail).
+    { ...task({ id: "tail", start: "2026-10-26", duration: 5, work: 40 }), finish: "2026-11-02" },
+  ];
+
+  const OCTOBER = periodWindow("month", "2026-10-15");
+  const NOVEMBER = periodWindow("month", "2026-11-15");
+  const LOADED = ["dec", "sept", "straddle", "tail"];
+
+  const reportFor = (range: { start: string; end: string }) => load({
+    projects: [{ projectId: "proj-a", projectName: "P25031", tasks: TASKS }],
+    range,
+  });
+
+  /** The engine's own day-by-day hours for one task in one range. */
+  const allocatedDays = (taskId: string, range: { start: string; end: string }) =>
+    reportFor(range).days.map((entry) => sum(entry.contributions.filter((contribution) => contribution.taskId === taskId).map((contribution) => contribution.hours)));
+
+  // Exactly what the screen renders: the tasks overlapping the period, in the
+  // engine's own order, with their two figures.
+  const listed = (report: ResourceCapacityReport, range: { start: string; end: string }) =>
+    TASKS.filter((item) => overlapsRange(item.start, item.finish, range))
+      .map((item) => ({ taskId: item.id, work: report.assignedWork.find((entry) => entry.taskId === item.id)! }));
+
+  test("the overlap rule is inclusive on both ends", () => {
+    expect(overlapsRange("2026-10-31", "2026-10-31", OCTOBER)).toBe(true);
+    expect(overlapsRange("2026-10-01", "2026-10-01", OCTOBER)).toBe(true);
+    expect(overlapsRange("2026-09-30", "2026-09-30", OCTOBER)).toBe(false);
+    expect(overlapsRange("2026-11-01", "2026-11-01", OCTOBER)).toBe(false);
+    expect(overlapsRange("2026-09-28", "2026-12-11", OCTOBER)).toBe(true);
+    expect(overlapsRange("", "", OCTOBER)).toBe(false);
+    expect(overlapsRange("2026-10-05", "", OCTOBER)).toBe(true);
+  });
+
+  test("October never shows a task that only starts in December", () => {
+    const report = reportFor(OCTOBER);
+    const ids = listed(report, OCTOBER).map((entry) => entry.taskId);
+    expect(ids).toEqual(["sept", "straddle", "tail"]);
+    expect(ids).not.toContain("dec");
+    expect(report.assignedWork.find((entry) => entry.taskId === "dec")!.inPeriod).toBe(0);
+  });
+
+  test("a task running from September into October still appears in October", () => {
+    const report = reportFor(OCTOBER);
+    const september = listed(report, OCTOBER).find((entry) => entry.taskId === "sept")!;
+    // 32 h over 8 working days is 4 h a day: three September days, five in October.
+    expect(september.work.total).toBe(32);
+    expect(september.work.inPeriod).toBe(20);
+    expect(reportFor(NOVEMBER).assignedWork.find((entry) => entry.taskId === "sept")!.inPeriod).toBe(0);
+    expect(overlapsRange("2026-09-28", "2026-10-07", NOVEMBER)).toBe(false);
+  });
+
+  test("a task running from October into November appears in both, with that month's hours", () => {
+    const october = reportFor(OCTOBER).assignedWork.find((entry) => entry.taskId === "straddle")!;
+    const november = reportFor(NOVEMBER).assignedWork.find((entry) => entry.taskId === "straddle")!;
+    expect(november.total).toBe(40);
+    // The existing quarter-hour split of 40 h over 7 working days: 5 October
+    // weekdays, then Monday 2 and Tuesday 3 November.
+    expect(close(october.inPeriod, 28.75)).toBe(true);
+    expect(close(november.inPeriod, 11.25)).toBe(true);
+    expect(close(october.inPeriod + november.inPeriod, october.total)).toBe(true);
+    expect(overlapsRange("2026-10-26", "2026-11-03", NOVEMBER)).toBe(true);
+    // and neither month counts a day of the other: November is exactly the two
+    // November days, October exactly the five October ones
+    const novemberReport = reportFor(NOVEMBER);
+    expect(close(october.inPeriod, sum(allocatedDays("straddle", OCTOBER)))).toBe(true);
+    expect(close(november.inPeriod, sum(allocatedDays("straddle", NOVEMBER)))).toBe(true);
+    const august = reportFor(periodWindow("month", "2026-08-15")).assignedWork.find((entry) => entry.taskId === "straddle")!;
+    expect(august.inPeriod).toBe(0);
+    expect(overlapsRange("2026-10-26", "2026-11-03", periodWindow("month", "2026-08-15"))).toBe(false);
+    expect(close(novemberReport.totalAllocated, november.inPeriod)).toBe(true);
+  });
+
+  test("the week view applies the same overlap rule to the selected week", () => {
+    const week = periodWindow("week", "2026-10-28");
+    const report = reportFor(week);
+    expect([week.start, week.end]).toEqual(["2026-10-26", "2026-11-01"]);
+    expect(listed(report, week).map((entry) => entry.taskId)).toEqual(["straddle", "tail"]);
+    // A week earlier in October holds the September task and neither October one.
+    const earlier = periodWindow("week", "2026-10-07");
+    expect(listed(reportFor(earlier), earlier).map((entry) => entry.taskId)).toEqual(["sept"]);
+    // The last day of a week is inside it; the first day after it is not.
+    expect(overlapsRange("2026-11-01", "2026-11-01", week)).toBe(true);
+    expect(overlapsRange("2026-11-02", "2026-11-02", week)).toBe(false);
+  });
+
+  test("an overlapping task with no hours in the period stays visible at 0 h", () => {
+    const report = reportFor(NOVEMBER);
+    const ids = listed(report, NOVEMBER).map((entry) => entry.taskId);
+    expect(ids).toEqual(["straddle", "tail"]);
+    // Its whole task is October work that already finished on 30 October, but its
+    // displayed finish reaches into November, so it is listed — at zero.
+    const tail = listed(report, NOVEMBER).find((entry) => entry.taskId === "tail")!;
+    expect(tail.work.inPeriod).toBe(0);
+    expect(tail.work.total).toBe(40);
+    // and the same task is at full weight in its own month
+    expect(listed(reportFor(OCTOBER), OCTOBER).find((entry) => entry.taskId === "tail")!.work.inPeriod).toBe(40);
+  });
+
+  test("the listed hours add up to the Allocated total in the capacity table", () => {
+    const windows = [
+      { view: "month", date: "2026-10-15" },
+      { view: "month", date: "2026-11-15" },
+      { view: "week", date: "2026-10-28" },
+      { view: "week", date: "2026-10-07" },
+    ] as const;
+    for (const { view, date } of windows) {
+      const range = periodWindow(view, date);
+      const report = reportFor(range);
+      const entries = listed(report, range);
+      // every task that has hours inside the period is necessarily listed
+      for (const work of report.assignedWork) {
+        if (work.inPeriod > 0) expect(entries.some((entry) => entry.taskId === work.taskId)).toBe(true);
+      }
+      // the Assignments hours are the Allocated total…
+      expect(close(sum(entries.map((entry) => entry.work.inPeriod)), report.totalAllocated)).toBe(true);
+      // …and the capacity table above adds its own rows up to that same figure
+      expect(close(sum(rowsOf(report, view, date).map((row) => row.allocated)), report.totalAllocated)).toBe(true);
+      expect(close(sum(report.days.map((entry) => entry.allocated)), report.totalAllocated)).toBe(true);
+    }
+    expect(LOADED.length).toBe(4);
   });
 });

@@ -17,6 +17,7 @@ import {
   formatCapacityHours,
   isOverloaded,
   matchesResourceFilter,
+  overlapsRange,
   overloadWarning,
   reportAssignmentCount,
   reportUtilisation,
@@ -24,6 +25,7 @@ import {
   unavailableWarning,
   type CapacityPeriod,
   type ResourceCapacityReport,
+  type ResourceTaskWork,
 } from "@/lib/capacity-engine";
 import {
   PARTIAL_WEEK,
@@ -177,7 +179,14 @@ export default function Capacity() {
 
   const selected = visibleReports.find((report) => report.resourceId === selectedId) ?? visibleReports[0];
   const selectedPeriods = selected ? periodsByResource.get(selected.resourceId) ?? [] : [];
-  const selectedAssignments = selected ? assignmentsByResource.get(selected.resourceId) ?? [] : [];
+  // The Assignments list follows the same window as every figure above: only the
+  // tasks whose own dates overlap the shown period, with the resource, project and
+  // client filters still applied. A task that merely touches the period through
+  // its span stays visible — and honestly shows 0 h when none of its hours land
+  // inside it.
+  const selectedAssignments = selected
+    ? (assignmentsByResource.get(selected.resourceId) ?? []).filter((row) => overlapsRange(row.start, row.finish, periodRange))
+    : [];
   const activeFilters = [
     filterResource && resources.some((resource) => resource.id === filterResource) ? { label: `Resource: ${resources.find((resource) => resource.id === filterResource)?.name ?? ""}`, clear: () => setFilterResource("") } : null,
     filterProject && selectableProjects.some((project) => project.id === filterProject) ? { label: `Project: ${selectableProjects.find((project) => project.id === filterProject)?.name ?? ""}`, clear: () => setFilterProject("") } : null,
@@ -395,6 +404,7 @@ export default function Capacity() {
                     report={selected}
                     periods={selectedPeriods}
                     assignments={selectedAssignments}
+                    assignedWork={selected.assignedWork}
                     view={view}
                     periodLabelText={selectedPeriodLabel}
                     canOpenProject={canOpenProject}
@@ -411,10 +421,12 @@ export default function Capacity() {
   );
 }
 
-function ResourceDetail({ report, periods, assignments, view, periodLabelText, canOpenProject, onOpenProject, onOpenAssignment }: {
+function ResourceDetail({ report, periods, assignments, assignedWork, view, periodLabelText, canOpenProject, onOpenProject, onOpenAssignment }: {
   report: ResourceCapacityReport;
   periods: CapacityPeriod[];
   assignments: AssignmentRow[];
+  /** Per task: the hours inside the shown period and over the whole task. */
+  assignedWork: ResourceTaskWork[];
   view: CapacityView;
   periodLabelText: string;
   canOpenProject: (projectId: string) => boolean;
@@ -431,6 +443,7 @@ function ResourceDetail({ report, periods, assignments, view, periodLabelText, c
     });
   }, [report.conflicts]);
   const unavailable = useMemo(() => new Set(report.unavailableTasks.map((task) => task.taskId)), [report.unavailableTasks]);
+  const workByTask = useMemo(() => new Map(assignedWork.map((entry) => [entry.taskId, entry])), [assignedWork]);
   return (
     <div className="capacity-detail-body">
       <div className="capacity-detail-head">
@@ -474,34 +487,43 @@ function ResourceDetail({ report, periods, assignments, view, periodLabelText, c
 
       <div className="capacity-assignments">
         <b>Assignments</b>
-        <p className="muted">Every assignment in the current filter. The table above counts only the hours that fall inside the selected period.</p>
+        <p className="muted">Tasks overlapping the selected period. Hours shown in ‘Work in period’ count only allocations within that period.</p>
         {assignments.length === 0 ? (
-          <p className="muted">No assignments in the current filter — this person is shown with zero utilisation.</p>
+          <p className="muted">No tasks in the selected period.</p>
         ) : (
           <div className="capacity-table-wrap">
             <table className="capacity-table capacity-assignment-table">
-              <thead><tr><th>Task</th><th>Project</th><th>Start</th><th>Finish</th><th>Work</th><th>Distribution</th><th /></tr></thead>
+              <thead><tr><th>Task</th><th>Project</th><th>Start</th><th>Finish</th><th>Work in period</th><th>Total assigned work</th><th>Distribution</th><th /></tr></thead>
               <tbody>
-                {assignments.map((row) => (
-                  <tr key={`${row.projectId}-${row.taskId}`} className="capacity-assignment-row" onClick={() => onOpenAssignment(row)}>
-                    <td><b>{row.taskName}</b>{unavailable.has(row.taskId) && <span className="capacity-row-warning" title={unavailableWarning(report.resourceName, row.work)}><AlertTriangle size={12} /></span>}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="capacity-project-link"
-                        aria-label={`Open project ${row.projectName}`}
-                        title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "The project is archived"}
-                        disabled={!canOpenProject(row.projectId)}
-                        onClick={(event) => { event.stopPropagation(); onOpenProject(row.projectId); }}
-                      >{row.projectName}</button>
-                    </td>
-                    <td>{row.start}</td>
-                    <td>{row.finish}</td>
-                    <td>{formatCapacityHours(row.work)} h</td>
-                    <td>{distributionLabel(row.distribution)}</td>
-                    <td className="capacity-open-cell"><button type="button" title="Open this task in its project" onClick={(event) => { event.stopPropagation(); onOpenAssignment(row); }}><ExternalLink size={14} /></button></td>
-                  </tr>
-                ))}
+                {assignments.map((row) => {
+                  const work = workByTask.get(row.taskId);
+                  const inPeriod = work?.inPeriod ?? 0;
+                  const total = work?.total ?? 0;
+                  return (
+                    <tr key={`${row.projectId}-${row.taskId}`} className="capacity-assignment-row" onClick={() => onOpenAssignment(row)}>
+                      <td><b>{row.taskName}</b>{unavailable.has(row.taskId) && <span className="capacity-row-warning" title={unavailableWarning(report.resourceName, row.work)}><AlertTriangle size={12} /></span>}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="capacity-project-link"
+                          aria-label={`Open project ${row.projectName}`}
+                          title={canOpenProject(row.projectId) ? `Open project ${row.projectName}` : "The project is archived"}
+                          disabled={!canOpenProject(row.projectId)}
+                          onClick={(event) => { event.stopPropagation(); onOpenProject(row.projectId); }}
+                        >{row.projectName}</button>
+                      </td>
+                      <td>{row.start}</td>
+                      <td>{row.finish}</td>
+                      <td
+                        className={`capacity-work-cell${inPeriod > 0 ? "" : " zero"}`}
+                        title={`${formatCapacityHours(inPeriod)} h of ${report.resourceName}’s ${formatCapacityHours(total)} h on this task fall inside ${periodLabelText}.`}
+                      >{formatCapacityHours(inPeriod)} h</td>
+                      <td title={`${formatCapacityHours(total)} h assigned to ${report.resourceName} over the whole task, ${row.start} until ${row.finish}.`}>{formatCapacityHours(total)} h</td>
+                      <td>{distributionLabel(row.distribution)}</td>
+                      <td className="capacity-open-cell"><button type="button" title="Open this task in its project" onClick={(event) => { event.stopPropagation(); onOpenAssignment(row); }}><ExternalLink size={14} /></button></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

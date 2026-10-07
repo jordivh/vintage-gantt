@@ -810,4 +810,10 @@
 .capacity-row.idle td { color: #9b8a72; }
 .capacity-day-list { list-style: none; margin: 0 0 7px; padding: 0; display: grid; gap: 3px; color: #8a5a2a; font-size: 11.5px; }
 .capacity-day-list li { display: flex; align-items: center; gap: 6px; }
+
+/* The hours of one assignment: the part inside the shown period is the figure the
+   table above adds up, so it carries the weight, while an overlapping task with
+   nothing inside the period stays visible at a dimmed 0 h. */
+.capacity-work-cell { color: #4a3a29; font-weight: 700; }
+.capacity-work-cell.zero { color: #9b8a72; font-weight: 400; }
 .capacity-detail-period { margin: 4px 0 0; color: #8d795f; font-size: 11px; }
