@@ -1,94 +1,98 @@
 /**
- * Company users — the pure rules behind invitations and account management.
+ * Company users — the pure rules behind account management.
  *
- * A used, expired, revoked or unknown link must fail safely; a company must keep
- * one admin; only an admin may manage users; and an invitation is a single-use
- * value that is never stored in the clear.
+ * There is no invitation and no email: an admin creates an account directly with
+ * a temporary password. A company must keep one admin; only an admin may manage
+ * accounts; the password rule is stated once; and an address that is taken
+ * anywhere is refused without naming the company it belongs to.
  */
 import { describe, expect, test } from "bun:test";
 import {
   ADMIN_ONLY_MESSAGE,
   ALREADY_ADMIN_MESSAGE,
-  INVITATION_ERROR_MESSAGES,
-  INVITATION_TTL_DAYS,
-  INVITATION_TTL_MS,
+  CURRENT_PASSWORD_WRONG_MESSAGE,
+  EMAIL_TAKEN_MESSAGE,
+  INVALID_EMAIL_MESSAGE,
   LAST_ADMIN_MESSAGE,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_RULES_TEXT,
   SELF_REMOVE_MESSAGE,
-  invitationAcceptHref,
-  invitationDecision,
-  invitationErrorCode,
-  invitationErrorMessage,
-  invitationExpiry,
-  invitationState,
-  inviteDecision,
-  isUsableInvitation,
+  WEAK_PASSWORD_MESSAGE,
+  addUserDecision,
+  mustChangePassword,
+  normalizeAccountEmail,
+  passwordProblem,
   removeMemberDecision,
-  replaceableInvitations,
+  resetPasswordDecision,
   transferAdminDecision,
+  userCreatedMessage,
 } from "./company-users";
-import { generateInvitationToken, hashInvitationToken } from "./invitation-token";
 
-const NOW = Date.parse("2026-05-01T12:00:00.000Z");
-const future = (ms: number) => new Date(NOW + ms).toISOString();
-const past = (ms: number) => new Date(NOW - ms).toISOString();
-
-const pending = { status: "pending", expiresAt: future(60_000) };
-
-describe("company users — invitation states", () => {
-  test("an invitation lasts a week by default", () => {
-    expect(INVITATION_TTL_DAYS).toBe(7);
-    expect(Date.parse(invitationExpiry(NOW)) - NOW).toBe(INVITATION_TTL_MS);
+describe("company users — the password rule", () => {
+  test("a password must be at least ten characters", () => {
+    expect(PASSWORD_MIN_LENGTH).toBe(10);
+    expect(passwordProblem("x".repeat(9))).toBe(WEAK_PASSWORD_MESSAGE);
+    expect(passwordProblem("x".repeat(10))).toBeNull();
+    expect(WEAK_PASSWORD_MESSAGE).toContain("10");
   });
 
-  test("a pending invitation past its expiry reads as expired, not pending", () => {
-    expect(invitationState({ status: "pending", expiresAt: past(1000) }, NOW)).toBe("expired");
-    expect(invitationState(pending, NOW)).toBe("pending");
-    expect(invitationState({ status: "pending" }, NOW)).toBe("expired");
+  test("the rule is stated next to the field and mentions the length", () => {
+    expect(PASSWORD_RULES_TEXT).toContain("10");
   });
 
-  test("accepted and revoked are final, whatever the dates say", () => {
-    expect(invitationState({ status: "accepted", expiresAt: future(60_000) }, NOW)).toBe("accepted");
-    expect(invitationState({ status: "revoked", expiresAt: future(60_000) }, NOW)).toBe("revoked");
-  });
-
-  test("a record that is not an invitation is unknown, never usable", () => {
-    expect(invitationState(null, NOW)).toBeNull();
-    expect(invitationState({ status: "whatever" }, NOW)).toBeNull();
-    expect(isUsableInvitation(null, NOW)).toBe(false);
-    expect(isUsableInvitation(pending, NOW)).toBe(true);
+  test("an account is marked for a forced change only when the flag is true", () => {
+    expect(mustChangePassword({ mustChangePassword: true })).toBe(true);
+    expect(mustChangePassword({ mustChangePassword: false })).toBe(false);
+    expect(mustChangePassword({})).toBe(false);
+    expect(mustChangePassword(null)).toBe(false);
   });
 });
 
-describe("company users — acceptance decisions", () => {
-  test("only a live pending invitation may be accepted", () => {
-    expect(invitationDecision(pending, NOW).ok).toBe(true);
-    expect(invitationDecision({ status: "pending", expiresAt: past(1) }, NOW).code).toBe("expired");
-    expect(invitationDecision({ status: "accepted" }, NOW).code).toBe("used");
-    expect(invitationDecision({ status: "revoked" }, NOW).code).toBe("revoked");
-    expect(invitationDecision(null, NOW).code).toBe("invalid");
+describe("company users — creating an account", () => {
+  test("a regular user can never create one, even directly", () => {
+    const decision = addUserDecision({ actorRole: "user", email: "new@example.com", accountExists: false });
+    expect(decision.ok).toBe(false);
+    expect(decision.message).toBe(ADMIN_ONLY_MESSAGE);
   });
 
-  test("every refusal has a generic message that names nothing", () => {
-    for (const record of [null, { status: "accepted" }, { status: "revoked" }, { status: "pending", expiresAt: past(1) }]) {
-      const decision = invitationDecision(record, NOW);
-      expect(decision.ok).toBe(false);
-      const lowered = decision.message.toLowerCase();
-      for (const leak of ["alpha", "beta", "company name", "@", "id "]) expect(lowered.includes(leak)).toBe(false);
+  test("an admin needs a valid, free email address", () => {
+    expect(addUserDecision({ actorRole: "company_admin", email: "new@example.com", accountExists: false }).ok).toBe(true);
+    expect(addUserDecision({ actorRole: "company_admin", email: "not-an-address", accountExists: false }).message).toBe(
+      INVALID_EMAIL_MESSAGE,
+    );
+    expect(addUserDecision({ actorRole: "company_admin", email: "taken@example.com", accountExists: true }).message).toBe(
+      EMAIL_TAKEN_MESSAGE,
+    );
+  });
+
+  test("the taken-address message never reveals which company owns it", () => {
+    for (const leak of ["alpha", "company", "belongs", "other company"]) {
+      expect(EMAIL_TAKEN_MESSAGE.toLowerCase().includes(leak)).toBe(false);
     }
   });
 
-  test("a thrown invitation error maps back to its message", () => {
-    const thrown = { data: { code: "expired" } };
-    expect(invitationErrorCode(thrown)).toBe("expired");
-    expect(invitationErrorMessage(thrown)).toBe(INVITATION_ERROR_MESSAGES.expired);
-    expect(invitationErrorCode(new Error("boom"))).toBeNull();
-    expect(invitationErrorMessage(new Error("boom"))).toBe(INVITATION_ERROR_MESSAGES.fallback);
+  test("an address is stored in one shape", () => {
+    expect(normalizeAccountEmail("  Marta@Example.COM ")).toBe("marta@example.com");
   });
 
-  test("the acceptance link carries the token, encoded", () => {
-    expect(invitationAcceptHref("abc", "https://app.example")).toBe("https://app.example/auth/accept?token=abc");
-    expect(invitationAcceptHref("abc", "https://app.example/")).toBe("https://app.example/auth/accept?token=abc");
-    expect(invitationAcceptHref("a b")).toBe("/auth/accept?token=a%20b");
+  test("the confirmation names the address and tells the admin to share the password", () => {
+    const message = userCreatedMessage(" New@Example.com ");
+    expect(message.includes("new@example.com")).toBe(true);
+    expect(message.toLowerCase().includes("share")).toBe(true);
+    expect(message.toLowerCase().includes("change")).toBe(true);
+  });
+});
+
+describe("company users — resetting a password", () => {
+  test("an admin may reset only an account of their own company", () => {
+    expect(resetPasswordDecision({ actorRole: "company_admin", sameCompany: true }).ok).toBe(true);
+    expect(resetPasswordDecision({ actorRole: "company_admin", sameCompany: false }).ok).toBe(false);
+    expect(resetPasswordDecision({ actorRole: "user", sameCompany: true }).ok).toBe(false);
+    expect(resetPasswordDecision({ actorRole: "user", sameCompany: true }).message).toBe(ADMIN_ONLY_MESSAGE);
+  });
+
+  test("the wrong-current-password message leaks nothing", () => {
+    expect(CURRENT_PASSWORD_WRONG_MESSAGE.toLowerCase().includes("exist")).toBe(false);
   });
 });
 
@@ -102,12 +106,8 @@ describe("company users — membership decisions", () => {
     targetRemoved: false,
   };
 
-  test("a regular user can never manage users", () => {
-    for (const decision of [
-      removeMemberDecision({ ...base, actorRole: "user" }),
-      transferAdminDecision({ ...base, actorRole: "user" }),
-      inviteDecision({ actorRole: "user", email: "new@example.com", accountExists: false }),
-    ]) {
+  test("a regular user can never manage accounts", () => {
+    for (const decision of [removeMemberDecision({ ...base, actorRole: "user" }), transferAdminDecision({ ...base, actorRole: "user" })]) {
       expect(decision.ok).toBe(false);
       expect(decision.message).toBe(ADMIN_ONLY_MESSAGE);
     }
@@ -135,39 +135,5 @@ describe("company users — membership decisions", () => {
     expect(transferAdminDecision(base).ok).toBe(true);
     expect(transferAdminDecision({ ...base, targetUserId: "user-admin" }).message).toBe(ALREADY_ADMIN_MESSAGE);
     expect(transferAdminDecision({ ...base, targetRole: "company_admin" }).message).toBe(ALREADY_ADMIN_MESSAGE);
-  });
-
-  test("an invitation needs an address without an account", () => {
-    expect(inviteDecision({ actorRole: "company_admin", email: "new@example.com", accountExists: false }).ok).toBe(true);
-    expect(inviteDecision({ actorRole: "company_admin", email: "taken@example.com", accountExists: true }).ok).toBe(false);
-    expect(inviteDecision({ actorRole: "company_admin", email: "", accountExists: false }).ok).toBe(false);
-  });
-
-  test("a resend replaces exactly the pending invitations for that address", () => {
-    const rows = [
-      { email: "a@example.com", status: "pending" },
-      { email: "a@example.com", status: "revoked" },
-      { email: "b@example.com", status: "pending" },
-    ];
-    const replaced = replaceableInvitations(rows, "A@Example.com");
-    expect(replaced.length).toBe(1);
-    expect(replaced[0].status).toBe("pending");
-    expect(replaced[0].email).toBe("a@example.com");
-  });
-});
-
-describe("company users — invitation tokens", () => {
-  test("a token is long, and only its hash is stored", async () => {
-    const token = generateInvitationToken();
-    expect(token.length).toBe(64);
-    const hash = await hashInvitationToken(token);
-    expect(hash).toBe(await hashInvitationToken(token));
-    expect(hash).not.toBe(token);
-    expect(hash.length).toBe(64);
-  });
-
-  test("two invitations never share a token", () => {
-    const tokens = new Set(Array.from({ length: 50 }, () => generateInvitationToken()));
-    expect(tokens.size).toBe(50);
   });
 });

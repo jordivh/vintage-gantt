@@ -1,27 +1,32 @@
 /* --------------------------------------------------------------------------
- * Company users — the rules for invitations and for managing the accounts in a
- * company.
+ * Company users — the rules for the accounts in a company.
  *
  * Pure on purpose: the Convex backend makes its access decisions with these
  * functions and the screens render their messages from the same place, so a
  * rule can never drift between the two and every branch is unit tested.
  *
- * One company has many accounts. Exactly one kind of account — `company_admin`
- * — manages users and invitations; for projects, planning, resources, calendars
- * and capacity the two kinds are identical. A company always keeps at least one
- * company admin, an account that was removed never comes back on its own, and an
- * invitation is a single-use value that expires.
+ * There is no email in this product. A company admin creates an account directly
+ * with a temporary password and hands it to the person; the first sign-in forces
+ * a new password; and a forgotten password is reset by the admin, in the same
+ * way. One company has many accounts, exactly one kind of account —
+ * `company_admin` — manages them, an account always belongs to exactly one
+ * company, and an account that was removed never comes back on its own.
  * ------------------------------------------------------------------------ */
 
-import { normalizeEmail } from "./auth-routes";
-import { COMPANY_ADMIN, canManageMembers, normalizeCompanyRole, type CompanyRole } from "./company-scope";
+import { EMAIL_PATTERN, normalizeEmail } from "./auth-routes";
+import {
+  COMPANY_ADMIN,
+  canManageMembers,
+  normalizeCompanyRole,
+  type CompanyRole,
+} from "./company-scope";
 
-export { normalizeEmail };
+export { EMAIL_PATTERN, normalizeEmail };
 
 /* --------------------------------------------------------------- messages */
 
-/** Every failure an invitee may see, and nothing that names another company. */
-export const ADMIN_ONLY_MESSAGE = "Only a company admin can manage users and invitations.";
+/** Every failure an admin or account holder may see, and nothing that names another company. */
+export const ADMIN_ONLY_MESSAGE = "Only a company admin can manage user accounts.";
 export const REMOVED_ACCESS_MESSAGE = "Your access to this company has been removed. Ask your company admin for access.";
 export const NOT_MEMBER_MESSAGE = "That account is not part of this company.";
 export const ALREADY_REMOVED_MESSAGE = "That account has already been removed.";
@@ -29,190 +34,41 @@ export const LAST_ADMIN_MESSAGE = "A company always needs at least one company a
 export const SELF_REMOVE_MESSAGE = "You cannot remove your own account. Transfer company admin to another user first.";
 export const ALREADY_ADMIN_MESSAGE = "That account is already a company admin.";
 export const TARGET_REMOVED_MESSAGE = "That account has been removed from this company.";
-export const INVITE_INVALID_EMAIL_MESSAGE = "Enter a valid email address.";
-export const INVITE_ACCOUNT_EXISTS_MESSAGE = "An account already uses this email address.";
-export const INVITE_SENT_MESSAGE = "Invitation sent.";
-export const INVITATION_SENT_NOTICE = "Invitation created. We sent an email with the acceptance link.";
 
-/* ------------------------------------------------------------ invitations */
+/** One message for a taken address, wherever the account it belongs to lives. */
+export const EMAIL_TAKEN_MESSAGE = "An account already uses this email address.";
+export const INVALID_EMAIL_MESSAGE = "Enter a valid email address.";
+export const SAME_EMAIL_MESSAGE = "That is already your email address.";
+export const MISSING_NAME_MESSAGE = "Enter a name.";
 
-/**
- * What a stored invitation row can say. `expired` is also derived from the
- * expiry date, so a row is never wrong while a reader looks at it; it is written
- * when the fact is observed, so the record ends up telling the truth itself.
- */
-export const INVITATION_STATUSES = ["pending", "accepted", "revoked", "expired"] as const;
-export type InvitationStatus = (typeof INVITATION_STATUSES)[number];
+/** The admin is told what to do with the temporary password, never shown it back later. */
+export const USER_CREATED_NOTICE =
+  "Account created. Share the temporary password with the person in a secure way; they must change it at their first sign-in.";
+export const PASSWORD_RESET_NOTICE =
+  "The temporary password was set. The user is signed out everywhere and must change it at their next sign-in.";
 
-export const INVITATION_PENDING: InvitationStatus = "pending";
-export const INVITATION_ACCEPTED: InvitationStatus = "accepted";
-export const INVITATION_REVOKED: InvitationStatus = "revoked";
-export const INVITATION_EXPIRED: InvitationStatus = "expired";
+/** Shown to an account that must set a new password before it can go on. */
+export const MUST_CHANGE_PASSWORD_MESSAGE = "Set a new password before you continue.";
 
-/** Every state an invitation can be in, stored or derived. */
-export const INVITATION_STATES = ["pending", "accepted", "revoked", "expired"] as const;
-export type InvitationState = (typeof INVITATION_STATES)[number];
+/* ------------------------------------------------------- password policy */
 
-export const INVITATION_STATE_LABELS: Record<InvitationState, string> = {
-  pending: "Pending",
-  accepted: "Accepted",
-  revoked: "Revoked",
-  expired: "Expired",
-};
+/** The one password rule of the product, shown next to every password field. */
+export const PASSWORD_MIN_LENGTH = 10;
+export const PASSWORD_RULES_TEXT = `At least ${PASSWORD_MIN_LENGTH} characters.`;
+export const WEAK_PASSWORD_MESSAGE = `Use a password of at least ${PASSWORD_MIN_LENGTH} characters.`;
+export const PASSWORD_MISMATCH_MESSAGE = "The two passwords do not match.";
+export const PASSWORD_UNCHANGED_MESSAGE =
+  "The new password must be different from the temporary password.";
+export const CURRENT_PASSWORD_WRONG_MESSAGE = "Your current password is incorrect.";
 
-/** A link is valid for a week; a shorter life limits what a leaked link can do. */
-export const INVITATION_TTL_DAYS = 7;
-export const INVITATION_TTL_MS = INVITATION_TTL_DAYS * 24 * 60 * 60 * 1000;
-
-/** The screen an invitation link opens. */
-export const INVITATION_ACCEPT_PATH = "/auth/accept";
-
-export interface InvitationLike {
-  status?: unknown;
-  expiresAt?: unknown;
-  acceptedAt?: unknown;
-  revokedAt?: unknown;
+/** The message for a password that does not follow the rule, or null when it does. */
+export function passwordProblem(password: string): string | null {
+  return password.length >= PASSWORD_MIN_LENGTH ? null : WEAK_PASSWORD_MESSAGE;
 }
 
-export function isInvitationStatus(value: unknown): value is InvitationStatus {
-  return typeof value === "string" && (INVITATION_STATUSES as readonly string[]).includes(value);
-}
-
-/** The expiry an invitation created at `nowMs` gets. */
-export function invitationExpiry(nowMs: number, ttlMs: number = INVITATION_TTL_MS): string {
-  return new Date(nowMs + ttlMs).toISOString();
-}
-
-/**
- * The effective state of an invitation at `nowMs`. `expired` is derived: a
- * `pending` row whose expiry has passed can never be used. `null` means the
- * record is not an invitation at all (a forged or unknown token).
- */
-export function invitationState(record: InvitationLike | null | undefined, nowMs: number): InvitationState | null {
-  const status = record?.status;
-  if (!isInvitationStatus(status)) return null;
-  if (status === INVITATION_ACCEPTED) return "accepted";
-  if (status === INVITATION_REVOKED) return "revoked";
-  if (status === INVITATION_EXPIRED) return "expired";
-  const expiresAt = typeof record?.expiresAt === "string" ? record.expiresAt : "";
-  const expiry = Date.parse(expiresAt);
-  if (!expiresAt || Number.isNaN(expiry) || expiry <= nowMs) return "expired";
-  return "pending";
-}
-
-/** True only while the invitation can still be accepted. */
-export function isUsableInvitation(record: InvitationLike | null | undefined, nowMs: number): boolean {
-  return invitationState(record, nowMs) === "pending";
-}
-
-/** The generic sentence for each failed acceptance; none names a person or company. */
-export const INVITATION_ERROR_MESSAGES: Record<string, string> = {
-  invalid: "This invitation link is not valid. Ask your company admin for a new invitation.",
-  expired: "This invitation has expired. Ask your company admin for a new invitation.",
-  used: "This invitation has already been used. Sign in instead, or ask your company admin for a new invitation.",
-  revoked: "This invitation was revoked. Ask your company admin for a new invitation.",
-  taken: "An account already uses this email address. Sign in instead.",
-  missing_name: "Enter your name.",
-  weak_password: "Use a password of at least 8 characters.",
-  fallback: "We could not accept this invitation. Ask your company admin for a new invitation.",
-};
-
-export const INVITATION_ERROR_CODES = ["invalid", "expired", "used", "revoked", "taken", "missing_name", "weak_password"] as const;
-export type InvitationErrorCode = (typeof INVITATION_ERROR_CODES)[number];
-
-export interface InvitationDecision {
-  ok: boolean;
-  state: InvitationState | null;
-  code: InvitationErrorCode | null;
-  message: string;
-}
-
-/** Whether an invitation may be accepted, and the generic message when it may not. */
-export function invitationDecision(record: InvitationLike | null | undefined, nowMs: number): InvitationDecision {
-  const state = invitationState(record, nowMs);
-  if (state === "pending") return { ok: true, state, code: null, message: "" };
-  const code: InvitationErrorCode =
-    state === "accepted" ? "used" : state === "expired" ? "expired" : state === "revoked" ? "revoked" : "invalid";
-  return { ok: false, state, code, message: INVITATION_ERROR_MESSAGES[code] };
-}
-
-/** Reads the code an invitation failure threw (`new ConvexError({ code })`). */
-export function invitationErrorCode(error: unknown): InvitationErrorCode | null {
-  if (!error || typeof error !== "object" || !("data" in error)) return null;
-  const data = (error as { data?: unknown }).data;
-  if (!data || typeof data !== "object" || !("code" in data)) return null;
-  const code = (data as { code?: unknown }).code;
-  return typeof code === "string" && (INVITATION_ERROR_CODES as readonly string[]).includes(code)
-    ? (code as InvitationErrorCode)
-    : null;
-}
-
-/** The English message for a failed acceptance, with a safe fallback. */
-export function invitationErrorMessage(error: unknown): string {
-  const code = invitationErrorCode(error);
-  return code ? INVITATION_ERROR_MESSAGES[code] : INVITATION_ERROR_MESSAGES.fallback;
-}
-
-/** The acceptance link for an invitation token, on the app's own origin. */
-export function invitationAcceptHref(token: string, origin = ""): string {
-  const base = origin && origin !== "null" ? origin.replace(/\/+$/, "") : "";
-  return `${base}${INVITATION_ACCEPT_PATH}?token=${encodeURIComponent(token)}`;
-}
-
-/** The neutral sentence for a link that cannot be accepted, from its state. */
-export function invitationStateMessage(state: InvitationState | "invalid" | null | undefined): string {
-  if (state === "expired") return INVITATION_ERROR_MESSAGES.expired;
-  if (state === "revoked") return INVITATION_ERROR_MESSAGES.revoked;
-  // An accepted invitation is exactly an already-used link.
-  if (state === "accepted") return INVITATION_ERROR_MESSAGES.used;
-  return INVITATION_ERROR_MESSAGES.invalid;
-}
-
-/* -------------------------------------------- an invitation and a session */
-
-/**
- * The two things a visitor may do when an invitation link is opened while another
- * session is active. Nothing happens on its own: the notice says who is signed in
- * and for whom the invitation is, and the visitor chooses.
- */
-export const INVITATION_SIGN_OUT_AND_ACCEPT = "Sign out and accept invitation";
-export const INVITATION_CANCEL = "Cancel";
-
-export const INVITATION_SESSION_HEADING = "An account is already signed in";
-export const INVITATION_SAME_ADDRESS_HEADING = "This invitation is for the account you are signed in with";
-
-export interface InvitationSessionNotice {
-  /** The email of the account that is signed in now. */
-  currentEmail: string;
-  /** Its display name, when it has one. */
-  currentName?: string;
-  /** The address the invitation was sent to — the only address it can create. */
-  invitedEmail: string;
-  companyName: string;
-}
-
-/** The notice shown when somebody else is signed in: who, for whom, and the choice. */
-export function invitationSessionNotice(input: InvitationSessionNotice): string {
-  const signedIn = input.currentName ? `${input.currentEmail} (${input.currentName})` : input.currentEmail;
-  const company = input.companyName || "this company";
-  return `You are signed in as ${signedIn}. This invitation is for ${input.invitedEmail} to join ${company}. Choose "${INVITATION_SIGN_OUT_AND_ACCEPT}" to sign out first and create that account, or "${INVITATION_CANCEL}" to stay signed in. Nothing changes until you choose.`;
-}
-
-/** The same notice when the active session belongs to nobody in particular. */
-export function invitationAnonymousSessionNotice(companyName: string, invitedEmail: string): string {
-  return `This browser has a temporary session that is not linked to an email address. This invitation is for ${invitedEmail} to join ${companyName || "this company"}. Choose "${INVITATION_SIGN_OUT_AND_ACCEPT}" to clear it first and create that account, or "${INVITATION_CANCEL}" to stay as you are.`;
-}
-
-/**
- * What is said when the signed-in account already carries the invited address.
- * The invitation is settled as handled and no second account is ever created.
- */
-export function invitationHandledNotice(input: { email: string; companyName: string; alreadyMember: boolean }): string {
-  const company = input.companyName || "the company that invited you";
-  const base = `You are signed in as ${input.email}, the address this invitation was sent to, so it has been marked as accepted. No second account was created.`;
-  return input.alreadyMember
-    ? `You are already a member of ${company}. ${base}`
-    : `${base} If you cannot see ${company} yet, ask its company admin to add your account.`;
+/** True when the account still has to replace the password an admin set for it. */
+export function mustChangePassword(record: { mustChangePassword?: unknown } | null | undefined): boolean {
+  return record?.mustChangePassword === true;
 }
 
 /* --------------------------------------------------------- access decisions */
@@ -254,19 +110,41 @@ export function transferAdminDecision(context: MembershipContext): { ok: boolean
   return { ok: true };
 }
 
-/** An invitation target must be an email address without an account. */
-export function inviteDecision(input: { actorRole: unknown; email: string; accountExists: boolean }): { ok: boolean; message?: string } {
-  if (!canManageMembers(input.actorRole)) return { ok: false, message: ADMIN_ONLY_MESSAGE };
-  if (!input.email) return { ok: false, message: INVITE_INVALID_EMAIL_MESSAGE };
-  if (input.accountExists) return { ok: false, message: INVITE_ACCOUNT_EXISTS_MESSAGE };
+export interface AddUserRequest {
+  actorRole: unknown;
+  email: string;
+  /** True when any account anywhere already uses the address. */
+  accountExists: boolean;
+}
+
+/**
+ * Whether the actor may create an account. Admin-only; the address must be a
+ * valid email and must not be taken anywhere in the application. The refusal for
+ * a taken address is deliberately generic: it names no company.
+ */
+export function addUserDecision(request: AddUserRequest): { ok: boolean; message?: string } {
+  if (!canManageMembers(request.actorRole)) return { ok: false, message: ADMIN_ONLY_MESSAGE };
+  if (!EMAIL_PATTERN.test(normalizeEmail(request.email))) return { ok: false, message: INVALID_EMAIL_MESSAGE };
+  if (request.accountExists) return { ok: false, message: EMAIL_TAKEN_MESSAGE };
   return { ok: true };
 }
 
-/** A pending invitation a resend must replace, so only one link ever works. */
-export function replaceableInvitations<T extends { status?: unknown; email?: unknown }>(
-  rows: readonly T[],
-  email: string,
-): T[] {
-  const target = normalizeEmail(email);
-  return rows.filter((row) => normalizeEmail(String(row.email ?? "")) === target && row.status === INVITATION_PENDING);
+/** Admin-only: an admin may reset the password of an account in their own company. */
+export function resetPasswordDecision(input: { actorRole: unknown; sameCompany: boolean }): {
+  ok: boolean;
+  message?: string;
+} {
+  if (!canManageMembers(input.actorRole)) return { ok: false, message: ADMIN_ONLY_MESSAGE };
+  if (!input.sameCompany) return { ok: false, message: NOT_MEMBER_MESSAGE };
+  return { ok: true };
+}
+
+/** The address to store: normalised, and validated for the common shapes. */
+export function normalizeAccountEmail(value: string): string {
+  return normalizeEmail(value);
+}
+
+/** A readable line for the admin's confirmation, naming the address only. */
+export function userCreatedMessage(email: string): string {
+  return `Account created for ${normalizeEmail(email)}. ${USER_CREATED_NOTICE}`;
 }

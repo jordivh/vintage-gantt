@@ -1,10 +1,11 @@
 import { useAuth } from "@/hooks/use-auth";
+import { CHANGE_PASSWORD_PATH } from "@/lib/navigation";
 import { Loader2 } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { Navigate, useLocation } from "react-router";
 
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { isLoading, isAuthenticated } = useAuth();
+  const { isLoading, isAuthenticated, user } = useAuth();
   const location = useLocation();
 
   useEffect(() => {
@@ -35,6 +36,13 @@ export function RequireAuth({ children }: { children: ReactNode }) {
         replace
       />
     );
+  }
+
+  // An account created or reset by a company admin has a temporary password and
+  // may open nothing else until it sets its own. The flag comes from the server,
+  // so a session cannot skip this step.
+  if (user?.mustChangePassword && location.pathname !== CHANGE_PASSWORD_PATH) {
+    return <Navigate to={CHANGE_PASSWORD_PATH} replace />;
   }
 
   return children;

@@ -12,17 +12,23 @@ export const NAV_ITEMS: { key: NavKey; label: string; path: string }[] = [
   { key: "capacity", label: "Capacity", path: "/capacity" },
 ];
 
-/** The company users screen. It is the account area's admin-only entry. */
+/** The company users screen. It is the account menu's admin-only entry. */
 export const COMPANY_USERS_PATH = "/company/users";
 
-export type AccountActionKey = "company-users" | "sign-out";
+/** The signed-in account's own settings, and the forced password change. */
+export const MY_ACCOUNT_PATH = "/account";
+export const CHANGE_PASSWORD_PATH = "/account/password";
+
+export type AccountActionKey = "my-account" | "company-users" | "sign-out";
 
 /**
- * The entries the shared header's account area offers. Company users is the one
- * entry that depends on the account type — a regular user simply does not get
- * it. Sign out is always present, and nothing here affects planning rights:
- * every active user in a company sees and edits the same data.
+ * The entries the shared header's account menu offers. My account is for every
+ * signed-in account; Company users appears only for a company admin; Sign out is
+ * always present. Nothing here affects planning rights: every active user in a
+ * company sees and edits the same data.
  */
 export function accountActions(canManageMembers: boolean): AccountActionKey[] {
-  return canManageMembers ? ["company-users", "sign-out"] : ["sign-out"];
+  return canManageMembers
+    ? ["my-account", "company-users", "sign-out"]
+    : ["my-account", "sign-out"];
 }

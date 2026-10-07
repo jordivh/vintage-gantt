@@ -725,15 +725,17 @@
 .scope-notice { margin: 0 0 14px; padding: 9px 12px; border: 1px solid #d3bd97; border-left: 3px solid #b07b46; background: #f6ecd8; color: #6b5741; font-size: 12px; line-height: 1.5; }
 .scope-notice.error { border-color: #c98a76; border-left-color: #9a593f; background: #f7ded5; color: #8f2f22; }
 
-/* The Company users screen: the admin-only account and invitation management. */
+/* The Company users screen: the admin-only account management. */
 .company-manage-link { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 6px; padding: 7px 8px; border: 1px solid #c9b797; border-radius: 3px; background: #efe3cd; color: #5a4635; font-size: 11px; text-align: left; cursor: pointer; }
 .company-manage-link:hover { background: #e5d5b8; color: #4d3f30; }
 .company-users-card { margin-top: 16px; }
 .company-users-meta { display: flex; gap: 16px; color: #6b5741; font-size: 11px; }
 .company-users-meta b { color: #44382c; font-size: 14px; }
 .company-users-head { margin-bottom: 10px; }
-.company-users-invite { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-.company-users-invite input { flex: 1; min-width: 0; max-width: 380px; height: 34px; padding: 0 9px; border: 1px solid #c4b292; border-radius: 3px; background: #fff9eb; color: #4b3d2f; font-size: 13px; }
+.company-users-form { display: grid; gap: 10px; margin-top: 12px; max-width: 460px; }
+.company-users-field { display: flex; flex-direction: column; gap: 4px; color: #6b5741; font-size: 11px; }
+.company-users-field input { height: 34px; padding: 0 9px; border: 1px solid #c4b292; border-radius: 3px; background: #fff9eb; color: #4b3d2f; font-size: 13px; }
+.company-users-rule { color: #9a8464; font-size: 11px; line-height: 1.5; }
 .company-users-table { margin-top: 10px; }
 .company-users-table td { vertical-align: middle; }
 .company-users-email { color: #6b5741; }

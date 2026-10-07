@@ -17,8 +17,8 @@ export const roleValidator = v.union(
 );
 export type Role = Infer<typeof roleValidator>;
 
-// The company account types: exactly two, and they differ only for user and
-// invitation management (see src/lib/company-scope.ts).
+// The company account types: exactly two, and they differ only for user-account
+// management (see src/lib/company-scope.ts).
 export const companyRoleValidator = v.union(
   v.literal(COMPANY_ROLES[0]),
   v.literal(COMPANY_ROLES[1]),
@@ -60,6 +60,11 @@ const schema = defineSchema(
       // The account keeps no access from then on, but nothing it created is
       // deleted. Optional so existing accounts are simply active.
       removedAt: v.optional(v.string()),
+      // True while the account still has the temporary password a company admin
+      // set for it (on creation or on a reset). Such an account may sign in but
+      // can do nothing else until it sets a password of its own. Absent means
+      // "no change needed", so existing accounts are unaffected.
+      mustChangePassword: v.optional(v.boolean()),
     }).index("email", ["email"]) // index for the email. do not remove or modify
       .index("by_company", ["companyId"]), // index for the company. do not remove
 
@@ -71,43 +76,6 @@ const schema = defineSchema(
       createdAt: v.string(),
       createdByUserId: v.optional(v.id("users")),
     }).index("by_name", ["name"]),
-
-    // A single-use invitation to join a company. Only the SHA-256 hash of the
-    // link's value is stored, so a database row can never be replayed as a
-    // working link. `expired` is derived from `expiresAt`; the stored status is
-    // one of pending / accepted / revoked.
-    invitations: defineTable({
-      companyId: v.id("companies"),
-      email: v.string(),
-      tokenHash: v.string(),
-      // `expired` is also derived from `expiresAt` when the row is read, so a
-      // link can never be accepted because a status write was missed.
-      status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked"), v.literal("expired")),
-      invitedByUserId: v.id("users"),
-      createdAt: v.string(),
-      expiresAt: v.string(),
-      acceptedAt: v.optional(v.string()),
-      acceptedByUserId: v.optional(v.id("users")),
-      revokedAt: v.optional(v.string()),
-    })
-      .index("by_company", ["companyId"])
-      .index("by_token", ["tokenHash"])
-      .index("by_company_email", ["companyId", "email"]),
-
-    // A single-use password-reset link. Only the SHA-256 hash of the link's
-    // value is stored; `usedAt` is set the moment it is spent, and `expiresAt`
-    // bounds how long it lives. A new request replaces every earlier row for the
-    // account, so an address has at most one working link.
-    passwordResets: defineTable({
-      userId: v.id("users"),
-      email: v.string(),
-      tokenHash: v.string(),
-      createdAt: v.string(),
-      expiresAt: v.string(),
-      usedAt: v.optional(v.string()),
-    })
-      .index("by_token", ["tokenHash"])
-      .index("by_user", ["userId"]),
 
     projects: defineTable({
       ownerId: v.id("users"), companyId, id: v.string(), name: v.string(), status: v.string(), startDate: v.string(),

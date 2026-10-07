@@ -27,6 +27,8 @@ import { companyTable, deleteCompanyRows, requireCompany, rowsByOwner, viewerSco
 const readableScope = async (ctx: QueryCtx | MutationCtx) => {
   const scope = await viewerScope(ctx);
   if (!scope) return null;
+  // An account that still has a temporary password reads no planning data.
+  if (scope.mustChangePassword) return null;
   if (!scope.companyId) return { userId: scope.userId, companyId: null, role: scope.role };
   const company = await ctx.db.get(scope.companyId);
   if (!company || company.status !== "active") return null;

@@ -73,7 +73,7 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
             </Link>
           </span>
           <span>
-            <Link to={authHref(AUTH_PATHS.forgot)}>Forgot your password?</Link>
+            Forgot your password? Ask your company admin to reset it.
           </span>
         </>
       }

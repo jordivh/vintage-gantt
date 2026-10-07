@@ -72,10 +72,9 @@ describe("auth links", () => {
   });
 
   test("another screen carries the normalised address and the destination", () => {
-    expect(authHref(AUTH_PATHS.reset, " Marta@Example.com ", { sent: "1" })).toBe(
-      "/auth/reset?email=marta%40example.com&sent=1",
+    expect(authHref(AUTH_PATHS.register, " Marta@Example.com ", { returnTo: "/capacity" })).toBe(
+      "/auth/register?email=marta%40example.com&returnTo=%2Fcapacity",
     );
-    expect(authHref(AUTH_PATHS.forgot)).toBe("/auth/forgot");
     expect(authHref(AUTH_PATHS.register, undefined, { returnTo: "/capacity" })).toBe(
       "/auth/register?returnTo=%2Fcapacity",
     );

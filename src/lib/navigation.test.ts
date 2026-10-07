@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { COMPANY_USERS_PATH, NAV_ITEMS, accountActions } from "./navigation";
+import { COMPANY_USERS_PATH, MY_ACCOUNT_PATH, NAV_ITEMS, accountActions } from "./navigation";
 
 /** Every screen that shows the planner chrome. Margin report shares it too, so
  *  it is checked alongside the five primary screens. */
@@ -64,19 +64,21 @@ describe("main navigation", () => {
 });
 
 describe("the shared header's account area", () => {
-  test("Company users is offered to a company admin only", () => {
-    expect(accountActions(true)).toEqual(["company-users", "sign-out"]);
-    expect(accountActions(false)).toEqual(["sign-out"]);
+  test("My account is offered to everyone, Company users to a company admin only", () => {
+    expect(accountActions(true)).toEqual(["my-account", "company-users", "sign-out"]);
+    expect(accountActions(false)).toEqual(["my-account", "sign-out"]);
     expect(COMPANY_USERS_PATH).toBe("/company/users");
+    expect(MY_ACCOUNT_PATH).toBe("/account");
   });
 
-  test("the bar shows the company context, the user's name, Company users and Sign out", () => {
+  test("the bar shows the company context, the user menu with My account, Company users and Sign out", () => {
     const bar = source("src/components/AppBar.tsx");
     expect(bar).toContain("accountActions(canManageMembers)");
     expect(bar).toContain("company-context");
     expect(bar).toContain("appbar-user-name");
+    expect(bar).toContain("My account");
     expect(bar).toContain("Company users");
-    expect(bar).toContain('title="Sign out"');
+    expect(bar).toContain("Sign out");
     // The company is context, never a control: no selector in the header.
     expect(bar).not.toContain("<select");
   });
@@ -90,9 +92,11 @@ describe("the shared header's account area", () => {
     }
   });
 
-  test("the company users route is registered behind the auth guard", () => {
+  test("the account routes are registered behind the auth guard", () => {
     const router = source("src/main.tsx");
     expect(router).toContain('path="/company/users"');
+    expect(router).toContain('path="/account"');
+    expect(router).toContain('path="/account/password"');
     expect(router).toContain("<RequireAuth>");
   });
 });

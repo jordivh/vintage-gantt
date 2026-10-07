@@ -14,10 +14,7 @@ import schema from "../convex/schema";
 const modules = {
   "./planner.ts": () => import("../convex/planner"),
   "./companies.ts": () => import("../convex/companies"),
-  "./passwordRecovery.ts": () => import("../convex/passwordRecovery"),
   "./auth.ts": () => import("../convex/auth"),
-  "./auth/emailOtp.ts": () => import("../convex/auth/emailOtp"),
-  "./auth/passwordReset.ts": () => import("../convex/auth/passwordReset"),
   "./_generated/api.ts": () => import("../convex/_generated/api"),
   "./_generated/server.ts": () => import("../convex/_generated/server"),
 };

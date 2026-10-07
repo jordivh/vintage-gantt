@@ -22,8 +22,6 @@ export const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 export const AUTH_PATHS = {
   signIn: "/auth",
   register: "/auth/register",
-  forgot: "/auth/forgot",
-  reset: "/auth/reset",
 } as const;
 
 /** Where a signed-in visitor lands when the URL asked for nothing specific. */
@@ -69,8 +67,8 @@ export function authHref(path: string, email?: string, extra?: Record<string, st
  */
 export const SIGN_IN_ERROR = "The email address or password is incorrect.";
 
-// The password-reset messages live with the reset rules in `./password-reset`
-// (RESET_REQUEST_NOTICE and RESET_LINK_ERROR), so the policy stays in one place.
+// There is no emailed password reset: a forgotten password is reset by the
+// company admin (see ./company-users.ts and the Company users screen).
 
 /* --------------------------------------------------- registration failures */
 

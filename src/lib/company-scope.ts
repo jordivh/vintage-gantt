@@ -11,8 +11,8 @@
 
 /**
  * The company has exactly two account types. They differ in one place only:
- * managing users and invitations. Projects, planning, resources, calendars and
- * capacity behave identically for both.
+ * managing user accounts. Projects, planning, resources, calendars and capacity
+ * behave identically for both.
  */
 export const COMPANY_ROLES = ["company_admin", "user"] as const;
 export type CompanyRole = (typeof COMPANY_ROLES)[number];
@@ -26,7 +26,7 @@ export const COMPANY_ROLE_LABELS: Record<CompanyRole, string> = {
 };
 
 export const COMPANY_ROLE_DESCRIPTIONS: Record<CompanyRole, string> = {
-  company_admin: "Manages users and invitations.",
+  company_admin: "Manages the user accounts of the company.",
   user: "Same rights for projects, planning, resources, calendars and capacity.",
 };
 
@@ -57,7 +57,7 @@ export function normalizeCompanyRole(value: unknown): CompanyRole {
   return isCompanyRole(value) ? value : COMPANY_USER;
 }
 
-/** Only user and invitation management is admin-only. */
+/** Only user-account management is admin-only. */
 export function canManageMembers(role: unknown): boolean {
   return normalizeCompanyRole(role) === COMPANY_ADMIN;
 }

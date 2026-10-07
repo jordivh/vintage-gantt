@@ -1,8 +1,22 @@
 import { useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router";
-import { Building2, LogOut, Search, Users } from "lucide-react";
+import { Building2, LogOut, Search, UserRound, Users } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
-import { COMPANY_USERS_PATH, NAV_ITEMS, accountActions, type NavKey } from "@/lib/navigation";
+import {
+  COMPANY_USERS_PATH,
+  MY_ACCOUNT_PATH,
+  NAV_ITEMS,
+  accountActions,
+  type NavKey,
+} from "@/lib/navigation";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useCalendarStore } from "@/lib/calendar-store";
 import { AUTH_PATHS } from "@/lib/auth-routes";
 
@@ -26,10 +40,10 @@ type AppBarProps = {
  *
  * Left to right: the brand and breadcrumb, the five primary sections, the global
  * search, and the account area. The account area shows the company this account
- * belongs to as read-only context — there is no company selector anywhere — the
- * signed-in user's name, the Company users entry, and Sign out. Company users is
- * rendered only for a company admin; everyone in the company sees and edits the
- * same planning data, so nothing else in the header depends on the account type.
+ * belongs to as read-only context — there is no company selector anywhere — and
+ * a user menu with My account, Company users (a company admin only) and Sign out.
+ * Everyone in the company sees and edits the same planning data, so nothing else
+ * in the header depends on the account type.
  */
 export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearchKeyDown }: AppBarProps) {
   const navigate = useNavigate();
@@ -47,6 +61,7 @@ export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearch
   const value = controlled ? searchValue : localSearch;
   const activeLabel = label ?? NAV_ITEMS.find((item) => item.key === activeKey)?.label ?? "";
   const companyName = company?.company.name ?? "";
+  const displayName = user?.name ?? "Account";
 
   const handleSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     onSearchKeyDown?.(event);
@@ -104,31 +119,33 @@ export function AppBar({ activeKey, label, searchValue, onSearchChange, onSearch
           </span>
         )}
 
-        {account.includes("company-users") && (
-          <button
-            type="button"
-            className="appbar-action"
-            title="Company users"
-            aria-label="Company users"
-            onClick={() => navigate(COMPANY_USERS_PATH)}
-          >
-            <Users size={15} />
-            <span className="appbar-action-label">Company users</span>
-          </button>
-        )}
-
-        <span className="appbar-user" title={user?.name ?? "Account"}>
-          <span className="avatar" aria-hidden="true">{user?.name?.slice(0, 1) ?? "M"}</span>
-          <span className="appbar-user-name">{user?.name ?? "Account"}</span>
-        </span>
-
-        <button
-          type="button"
-          className="icon-button"
-          title="Sign out"
-          aria-label="Sign out"
-          onClick={() => void signOutAndLeave()}
-        ><LogOut size={17} /></button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="appbar-user" title={displayName}>
+              <span className="avatar" aria-hidden="true">{displayName.slice(0, 1) || "M"}</span>
+              <span className="appbar-user-name">{displayName}</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="flex flex-col gap-0.5">
+              <span>{displayName}</span>
+              {user?.email ? <span className="text-xs font-normal text-muted-foreground">{user.email}</span> : null}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => navigate(MY_ACCOUNT_PATH)}>
+              <UserRound size={15} /> My account
+            </DropdownMenuItem>
+            {account.includes("company-users") && (
+              <DropdownMenuItem onSelect={() => navigate(COMPANY_USERS_PATH)}>
+                <Users size={15} /> Company users
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void signOutAndLeave()}>
+              <LogOut size={15} /> Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   );

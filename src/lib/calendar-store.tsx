@@ -29,12 +29,12 @@ import {
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
 import { withoutSnapshotLog } from "./remaining-work";
-import { REMOVED_ACCESS_MESSAGE, invitationAcceptHref } from "./company-users";
+import { REMOVED_ACCESS_MESSAGE } from "./company-users";
 import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useAction, useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 
 export type ProjectStatus = "active" | "archived" | "template";
@@ -89,16 +89,6 @@ export interface BaselineTask { id: string; baselineId: string; taskId: string; 
 export interface CompanySummary { id: string; name: string; status: string; createdAt: string; }
 export interface CompanyMember { userId: string; name: string; email: string; role: CompanyRole; isSelf: boolean; }
 export interface CompanyInfo { company: CompanySummary; role: CompanyRole; canManageMembers: boolean; members: CompanyMember[]; }
-
-/** One pending invitation, as the company users screen shows it. */
-export interface PendingInvitation {
-  id: string;
-  email: string;
-  state: string;
-  stateLabel: string;
-  createdAt: string;
-  expiresAt: string;
-}
 
 export const CALENDAR_TYPE_LABELS: Record<CalendarType, string> = {
   base: "Base",
@@ -291,7 +281,7 @@ interface CalendarStoreValue {
    * never treated as proof of access.
    */
   company: CompanyInfo | null;
-  /** "company_admin" or "user" — they differ only for user/invitation management. */
+  /** "company_admin" or "user" — they differ only for user-account management. */
   companyRole: CompanyRole;
   /** True only for company admins. */
   canManageMembers: boolean;
@@ -299,18 +289,26 @@ interface CalendarStoreValue {
   setCompanyMemberRole: (userId: string, role: CompanyRole) => Promise<{ ok: boolean; message?: string }>;
   /** True when this account's access to its company was removed (it is signed out). */
   accessRemoved: boolean;
-  /** The company's pending invitations (admin only; empty otherwise). */
-  pendingInvitations: PendingInvitation[];
-  /** Admin-only: invites an email address and sends the acceptance email. */
-  inviteCompanyMember: (email: string) => Promise<{ ok: boolean; message?: string }>;
-  /** Admin-only: replaces a pending invitation with a fresh link and emails it. */
-  resendCompanyInvitation: (email: string) => Promise<{ ok: boolean; message?: string }>;
-  /** Admin-only: revokes a pending invitation, so its link can never be used. */
-  revokeCompanyInvitation: (invitationId: string) => Promise<{ ok: boolean; message?: string }>;
+  /**
+   * True while the signed-in account still has the temporary password an admin
+   * set for it. The shell sends it straight to "Change password" and blocks every
+   * other screen until a new password is set.
+   */
+  mustChangePassword: boolean;
+  /** Admin-only: creates an account for this company with a temporary password. */
+  addCompanyUser: (input: { name: string; email: string; password: string }) => Promise<{ ok: boolean; message?: string }>;
+  /** Admin-only: sets a new temporary password; the user's sessions are dropped. */
+  resetCompanyUserPassword: (userId: string, password: string) => Promise<{ ok: boolean; message?: string }>;
   /** Admin-only: removes a user's access; nothing the user created is deleted. */
   removeCompanyMember: (userId: string) => Promise<{ ok: boolean; message?: string }>;
   /** Admin-only: hands company admin to another active user and steps down. */
   transferCompanyAdmin: (userId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Changes the signed-in account's name. */
+  changeOwnName: (name: string) => Promise<{ ok: boolean; message?: string }>;
+  /** Changes the signed-in account's email; requires the current password. */
+  changeOwnEmail: (input: { currentPassword: string; email: string }) => Promise<{ ok: boolean; message?: string }>;
+  /** Changes the signed-in account's password; requires the current one. */
+  changeOwnPassword: (input: { currentPassword: string; newPassword: string }) => Promise<{ ok: boolean; message?: string }>;
   /**
    * Switches a version between Planning and Monitoring. Monitoring requires a
    * baseline on that version, and a version can never go back to Planning —
@@ -409,12 +407,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const replaceRemoteState = useMutation(api.planner.replaceState);
   const ensureCompanyRemote = useMutation(api.companies.ensureCompany);
   const setCompanyMemberRoleRemote = useMutation(api.companies.setMemberRole);
-  const inviteMemberRemote = useMutation(api.companies.inviteMember);
-  const resendInvitationRemote = useMutation(api.companies.resendInvitation);
-  const revokeInvitationRemote = useMutation(api.companies.revokeInvitation);
+  const addCompanyUserRemote = useMutation(api.companies.addCompanyUser);
+  const resetUserPasswordRemote = useMutation(api.companies.resetUserPassword);
   const removeMemberRemote = useMutation(api.companies.removeMember);
   const transferAdminRemote = useMutation(api.companies.transferAdmin);
-  const sendInvitationEmailRemote = useAction(api.companies.sendInvitationEmail);
+  const changeOwnNameRemote = useMutation(api.companies.changeOwnName);
+  const changeOwnEmailRemote = useMutation(api.companies.changeOwnEmail);
+  const changeOwnPasswordRemote = useMutation(api.companies.changeOwnPassword);
   const companyInfo = useQuery(api.companies.current, isAuthenticated ? {} : "skip");
   const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
   const companyRole: CompanyRole = company?.role ?? "user";
@@ -428,11 +427,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     companyActive: company ? company.company.status === "active" : true,
   });
   const accessRemoved = access === "denied";
-  const pendingInvitationRows = useQuery(
-    api.companies.pendingInvitations,
-    isAuthenticated && (company?.canManageMembers ?? false) ? {} : "skip",
-  );
-  const pendingInvitations = (pendingInvitationRows as PendingInvitation[] | null | undefined) ?? [];
+  // An account with a temporary password reads no planning data at all until it
+  // has set its own. The server enforces the same rule; this keeps the shell from
+  // asking for anything it may not have.
+  const mustChangePassword = accessInfo?.mustChangePassword === true;
   const { signOut } = useAuthActions();
   const removalSignOutRef = useRef(false);
   const hydratedRef = useRef(false);
@@ -488,7 +486,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (!isAuthenticated || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
+    if (!isAuthenticated || accessInfo === undefined || mustChangePassword || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
     if (remoteState === null) {
       // The signed-in company has no workspace yet, so it gets its own: an
       // empty one plus the built-in starter project. Nothing is inherited from
@@ -548,7 +546,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       baselines: state.baselines ?? [],
       baselineTasks: state.baselineTasks ?? [],
     }));
-  }, [isAuthenticated, remoteState, initializeWorkspace, buildWorkspacePayload]);
+  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, initializeWorkspace, buildWorkspacePayload]);
 
   /**
    * Company-based access. The server creates exactly one company for the
@@ -1273,45 +1271,52 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     void signOut();
   }, [access, resetWorkspace, signOut]);
 
-  const invitationAction = async (run: () => Promise<{ token: string; email: string }>, done: (email: string) => string) => {
+  /** Runs one account action, turning a refusal into the message it carries. */
+  const accountAction = async (run: () => Promise<unknown>): Promise<{ ok: boolean; message?: string }> => {
     try {
-      const result = await run();
-      const link = invitationAcceptHref(result.token, typeof window === "undefined" ? "" : window.location.origin);
-      try {
-        await sendInvitationEmailRemote({ token: result.token, link });
-      } catch (error) {
-        // Never the error object, and never the link in the message: a mail
-        // failure can echo the message body, which carries the single-use value.
-        console.error("[vintage-gantt] the invitation email could not be sent");
-        return { ok: true, message: `Invitation created for ${result.email}, but the email could not be sent. Use Resend to try again.` };
-      }
-      return { ok: true, message: done(result.email) };
+      await run();
+      return { ok: true };
     } catch (error: unknown) {
+      // Never the error object on success paths; a failure only ever carries the
+      // plain message the server chose, which names no password or credential.
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   };
 
-  const inviteCompanyMember = useCallback<CalendarStoreValue["inviteCompanyMember"]>(
-    (email) => invitationAction(() => inviteMemberRemote({ email: email.trim() }), (address) => `Invitation sent to ${address}.`),
-    [inviteMemberRemote, sendInvitationEmailRemote],
+  const addCompanyUser = useCallback<CalendarStoreValue["addCompanyUser"]>(
+    (input) => accountAction(() => addCompanyUserRemote({
+      name: input.name.trim(),
+      email: input.email.trim(),
+      password: input.password,
+    })),
+    [addCompanyUserRemote],
   );
 
-  const resendCompanyInvitation = useCallback<CalendarStoreValue["resendCompanyInvitation"]>(
-    (email) => invitationAction(
-      () => resendInvitationRemote({ email: email.trim() }),
-      (address) => `New invitation sent to ${address}. The previous link no longer works.`,
-    ),
-    [resendInvitationRemote, sendInvitationEmailRemote],
+  const resetCompanyUserPassword = useCallback<CalendarStoreValue["resetCompanyUserPassword"]>(
+    (userId, password) => accountAction(() => resetUserPasswordRemote({ userId: userId as Id<"users">, password })),
+    [resetUserPasswordRemote],
   );
 
-  const revokeCompanyInvitation = useCallback<CalendarStoreValue["revokeCompanyInvitation"]>(async (invitationId) => {
-    try {
-      await revokeInvitationRemote({ invitationId: invitationId as Id<"invitations"> });
-      return { ok: true };
-    } catch (error: unknown) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
-    }
-  }, [revokeInvitationRemote]);
+  const changeOwnName = useCallback<CalendarStoreValue["changeOwnName"]>(
+    (name) => accountAction(() => changeOwnNameRemote({ name: name.trim() })),
+    [changeOwnNameRemote],
+  );
+
+  const changeOwnEmail = useCallback<CalendarStoreValue["changeOwnEmail"]>(
+    (input) => accountAction(() => changeOwnEmailRemote({
+      currentPassword: input.currentPassword,
+      email: input.email.trim(),
+    })),
+    [changeOwnEmailRemote],
+  );
+
+  const changeOwnPassword = useCallback<CalendarStoreValue["changeOwnPassword"]>(
+    (input) => accountAction(() => changeOwnPasswordRemote({
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword,
+    })),
+    [changeOwnPasswordRemote],
+  );
 
   const removeCompanyMember = useCallback<CalendarStoreValue["removeCompanyMember"]>(async (userId) => {
     try {
@@ -1401,12 +1406,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       canManageMembers: roleCanManageMembers(companyRole),
       setCompanyMemberRole,
       accessRemoved,
-      pendingInvitations,
-      inviteCompanyMember,
-      resendCompanyInvitation,
-      revokeCompanyInvitation,
+      mustChangePassword,
+      addCompanyUser,
+      resetCompanyUserPassword,
       removeCompanyMember,
       transferCompanyAdmin,
+      changeOwnName,
+      changeOwnEmail,
+      changeOwnPassword,
     }),
     [
       system, projects, activeProject, activeProjectId, setActiveProject, tasks, projectTasks, setTasks, setProjectCalendar, createProject, createProjectFromTemplate, saveAsTemplate, setTemplateHidden, deleteTemplate, renameProject, duplicateProject, archiveProject, restoreProject, deleteProject, deleteTasks, calendarsUsingProjects,
@@ -1414,8 +1421,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       createCalendar, duplicateCalendar, renameCalendar, deleteCalendar, resources, assignments,
       updateResource, updateResourceSchedule, createResource, deleteResource, setTaskAssignments, addResourceLeave, removeResourceLeave, resourceLeave,
       planVersions, baselines, baselineTasks, createBaseline, deleteBaseline, activeVersionId, setActiveVersion, createPlanVersion, replanProject, deletePlanVersion, setPlanMode, setProjectClient, openTask, focusTask, clearFocusTask,
-      company, companyRole, setCompanyMemberRole, accessRemoved, pendingInvitations,
-      inviteCompanyMember, resendCompanyInvitation, revokeCompanyInvitation, removeCompanyMember, transferCompanyAdmin,
+      company, companyRole, setCompanyMemberRole, accessRemoved, mustChangePassword,
+      addCompanyUser, resetCompanyUserPassword, removeCompanyMember, transferCompanyAdmin,
+      changeOwnName, changeOwnEmail, changeOwnPassword,
     ],
   );
 

@@ -17,8 +17,8 @@ type AuthShellProps = {
    * Keep the screen visible for a visitor who already has a session.
    *
    * Off for every sign-in surface, where a session means the visitor is done and
-   * belongs in their environment. On for an invitation link: that link is its own
-   * instruction, and an active session must be shown and handled, never skipped.
+   * belongs in their environment. On for a screen that is its own instruction and
+   * must be shown to a signed-in visitor rather than skipped.
    */
   allowAuthenticated?: boolean;
 };

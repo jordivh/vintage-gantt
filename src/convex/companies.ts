@@ -1,7 +1,5 @@
-import { createAccount, getAuthUserId, invalidateSessions } from "@convex-dev/auth/server";
-import { internal } from "./_generated/api";
-import { sendTransactionalEmail } from "./email";
-import { action, internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { createAccount, getAuthSessionId, getAuthUserId, invalidateSessions, modifyAccountCredentials, retrieveAccount } from "@convex-dev/auth/server";
+import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import type { GenericActionCtx } from "convex/server";
 import type { DataModel, Doc, Id } from "./_generated/dataModel";
@@ -27,30 +25,23 @@ import {
   type WorkspaceSnapshot,
 } from "../lib/company-scope";
 import type { RegistrationErrorCode } from "../lib/auth-routes";
-import { generateInvitationToken, hashInvitationToken } from "../lib/invitation-token";
 import {
   ADMIN_ONLY_MESSAGE,
-  INVITATION_ACCEPTED,
-  INVITATION_PENDING,
-  INVITATION_REVOKED,
-  INVITATION_STATE_LABELS,
-  INVITE_INVALID_EMAIL_MESSAGE,
+  CURRENT_PASSWORD_WRONG_MESSAGE,
+  EMAIL_TAKEN_MESSAGE,
+  MISSING_NAME_MESSAGE,
+  MUST_CHANGE_PASSWORD_MESSAGE,
   NOT_MEMBER_MESSAGE,
+  PASSWORD_UNCHANGED_MESSAGE,
   REMOVED_ACCESS_MESSAGE,
-  invitationAcceptHref,
-  invitationDecision,
-  invitationExpiry,
-  invitationState,
-  invitationStateMessage,
-  inviteDecision,
+  SAME_EMAIL_MESSAGE,
+  addUserDecision,
   normalizeEmail,
+  passwordProblem,
   removeMemberDecision,
-  replaceableInvitations,
+  resetPasswordDecision,
   transferAdminDecision,
-  type InvitationErrorCode,
-  type InvitationState,
 } from "../lib/company-users";
-import { invitationEmail } from "../lib/invitation-email";
 import { companyRoleValidator } from "./schema";
 
 /**
@@ -72,6 +63,8 @@ export interface ViewerScope {
   /** null for an account that still has to be migrated; reads then fall back to its own rows. */
   companyId: Id<"companies"> | null;
   role: CompanyRole;
+  /** True while the account still has to replace the password an admin set for it. */
+  mustChangePassword: boolean;
 }
 
 const currentAccount = async (ctx: QueryCtx | MutationCtx): Promise<Doc<"users"> | null> => {
@@ -90,7 +83,12 @@ export const viewerScope = async (ctx: QueryCtx | MutationCtx): Promise<ViewerSc
   // A removed account has no access at all, to any company. Nothing it created
   // is deleted — only its access is gone.
   if (user.removedAt) return null;
-  return { userId: user._id, companyId: user.companyId ?? null, role: normalizeCompanyRole(user.companyRole) };
+  return {
+    userId: user._id,
+    companyId: user.companyId ?? null,
+    role: normalizeCompanyRole(user.companyRole),
+    mustChangePassword: user.mustChangePassword === true,
+  };
 };
 
 const activeCompany = async (ctx: QueryCtx | MutationCtx, companyId: Id<"companies">) => {
@@ -102,6 +100,8 @@ const activeCompany = async (ctx: QueryCtx | MutationCtx, companyId: Id<"compani
 export const readableCompanyId = async (ctx: QueryCtx | MutationCtx): Promise<Id<"companies"> | null> => {
   const scope = await viewerScope(ctx);
   if (!scope?.companyId) return null;
+  // An account that still has to set its own password reads nothing yet.
+  if (scope.mustChangePassword) return null;
   const company = await activeCompany(ctx, scope.companyId);
   return company ? company._id : null;
 };
@@ -445,7 +445,7 @@ export const migrateWorkspaces = internalMutation({
   },
 });
 
-/* ------------------------------------------------- user / invitation management */
+/* ----------------------------------------------------- user account management */
 
 /**
  * The identity a write must have. Mutations may create the company, so a new
@@ -459,6 +459,9 @@ export const requireCompany = async (
   // A removed account must never be given a fresh company: it is cut off until a
   // company admin adds it back.
   if (user.removedAt) throw new Error(REMOVED_ACCESS_MESSAGE);
+  // The one gate every write in the planner goes through: an account that still
+  // has the temporary password an admin set for it may do nothing else first.
+  if (user.mustChangePassword) throw new Error(MUST_CHANGE_PASSWORD_MESSAGE);
   if (user.companyId) {
     const company = await activeCompany(ctx, user.companyId);
     if (!company) throw new Error("This company is not active. Ask your company admin for access.");
@@ -603,11 +606,15 @@ export const access = query({
   handler: async (ctx) => {
     const user = await currentAccount(ctx);
     if (!user) return null;
-    return { removed: Boolean(user.removedAt) };
+    return {
+      removed: Boolean(user.removedAt),
+      // The shell sends the account to "Change password" while this is true.
+      mustChangePassword: user.mustChangePassword === true,
+    };
   },
 });
 
-/* --------------------------------------------- company users & invitations */
+/* ---------------------------------------------------- company user accounts */
 
 /** Every member of a company whose access has not been removed. */
 const activeMembers = async (ctx: QueryCtx | MutationCtx, companyId: Id<"companies">) =>
@@ -621,7 +628,7 @@ const activeMembers = async (ctx: QueryCtx | MutationCtx, companyId: Id<"compani
 const adminCountOf = (members: Doc<"users">[]) =>
   members.filter((member) => normalizeCompanyRole(member.companyRole) === COMPANY_ADMIN).length;
 
-/** Only a company admin manages users and invitations; every rule below is enforced here. */
+/** Only a company admin manages user accounts; every rule below is enforced here. */
 const requireCompanyAdmin = async (ctx: MutationCtx) => {
   const viewer = await requireCompany(ctx);
   if (!canManageMembers(viewer.role)) throw new Error(ADMIN_ONLY_MESSAGE);
@@ -641,164 +648,77 @@ const membershipContext = (
   targetRemoved: Boolean(target.removedAt),
 });
 
-/** The single-use code an invitation failure carries (never server text). */
-const invitationError = (code: InvitationErrorCode) => new ConvexError({ code });
-
-/**
- * The invitation a link's value names, or null. Only the hash is ever compared:
- * the raw value exists in the email and nowhere on the server. The token is
- * bound to one address and one company, so it can never authenticate an account.
- */
-const invitationByToken = async (ctx: QueryCtx | MutationCtx, rawToken: string) => {
-  const token = rawToken.trim();
-  if (!token) return null;
-  const tokenHash = await hashInvitationToken(token);
-  return await ctx.db.query("invitations").withIndex("by_token", (q) => q.eq("tokenHash", tokenHash)).unique();
-};
-
-/**
- * Creates an invitation for the signed-in admin's company. Any earlier pending
- * invitation for the same address is revoked first, so an address has at most
- * one working link — which is also what makes a resend safe. Only the hash of
- * the value is stored; the raw value is returned once, for the link.
- */
-const createCompanyInvitation = async (
-  ctx: MutationCtx,
-  viewer: { userId: Id<"users">; companyId: Id<"companies">; role: CompanyRole },
-  rawEmail: string,
-) => {
-  const email = normalizeEmail(rawEmail);
-  if (!EMAIL_PATTERN.test(email)) throw new Error(INVITE_INVALID_EMAIL_MESSAGE);
-  const credential = await ctx.db
+/** The credential row behind an address, through Convex Auth's own index. */
+const findPasswordAccount = async (ctx: QueryCtx | MutationCtx, email: string) =>
+  ctx.db
     .query("authAccounts")
-    .withIndex("providerAndAccountId", (q) => q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email))
+    .withIndex("providerAndAccountId", (q) =>
+      q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", normalizeEmail(email)),
+    )
     .unique();
-  const accountExists = Boolean(credential) || (await findAccountByEmail(ctx, email)) !== null;
-  const decision = inviteDecision({ actorRole: viewer.role, email, accountExists });
-  if (!decision.ok) throw new Error(decision.message ?? ADMIN_ONLY_MESSAGE);
 
-  const nowIso = new Date().toISOString();
-  const existing = await ctx.db
-    .query("invitations")
-    .withIndex("by_company_email", (q) => q.eq("companyId", viewer.companyId as never).eq("email", email))
-    .collect();
-  for (const row of replaceableInvitations(existing, email)) {
-    await ctx.db.patch(row._id, { status: INVITATION_REVOKED, revokedAt: nowIso });
+/**
+ * Verifies a password against the stored credential, server-side.
+ *
+ * Convex Auth's own `retrieveAccount` compares the Scrypt hash and records the
+ * failed attempt for rate limiting, exactly as a sign-in does. It returns the
+ * account when it matches and throws when it does not, so the caller only ever
+ * learns a boolean; the submitted password is never logged or stored.
+ */
+const verifyCurrentPassword = async (ctx: MutationCtx, email: string, password: string): Promise<boolean> => {
+  try {
+    await retrieveAccount(ctx as unknown as GenericActionCtx<DataModel>, {
+      provider: PASSWORD_PROVIDER_ID,
+      account: { id: normalizeEmail(email), secret: password },
+    });
+    return true;
+  } catch {
+    return false;
   }
-
-  const token = generateInvitationToken();
-  const tokenHash = await hashInvitationToken(token);
-  const expiresAt = invitationExpiry(Date.now());
-  const invitationId = await ctx.db.insert("invitations", {
-    companyId: viewer.companyId,
-    email,
-    tokenHash,
-    status: INVITATION_PENDING,
-    invitedByUserId: viewer.userId,
-    createdAt: nowIso,
-    expiresAt,
-  });
-  return { invitationId: invitationId as string, email, token, expiresAt };
 };
 
-/** Admin-only: invite an email address to the admin's company. */
-export const inviteMember = mutation({
-  args: { email: v.string() },
-  handler: async (ctx, args) => {
-    const viewer = await requireCompanyAdmin(ctx);
-    return await createCompanyInvitation(ctx, viewer, args.email);
-  },
-});
-
-/** Admin-only: replace a pending invitation with a fresh link. */
-export const resendInvitation = mutation({
-  args: { email: v.string() },
-  handler: async (ctx, args) => {
-    const viewer = await requireCompanyAdmin(ctx);
-    return await createCompanyInvitation(ctx, viewer, args.email);
-  },
-});
-
-/** Admin-only: a revoked link can never be accepted again. */
-export const revokeInvitation = mutation({
-  args: { invitationId: v.id("invitations") },
-  handler: async (ctx, args) => {
-    const viewer = await requireCompanyAdmin(ctx);
-    const invitation = await ctx.db.get(args.invitationId);
-    if (!invitation || (invitation.companyId as string) !== (viewer.companyId as string)) {
-      throw new Error(NOT_MEMBER_MESSAGE);
-    }
-    if (invitation.status === INVITATION_PENDING) {
-      await ctx.db.patch(invitation._id, { status: INVITATION_REVOKED, revokedAt: new Date().toISOString() });
-    }
-    return { ok: true };
-  },
-});
-
-/** Every state a link can be in that is not a working invitation. */
-export type InvitationPreviewFailedState = Exclude<InvitationState, "pending"> | "invalid";
+/** The current session, so a change keeps this device signed in and drops the rest. */
+const currentSession = async (ctx: MutationCtx): Promise<Id<"authSessions">[]> => {
+  const sessionId = await getAuthSessionId(ctx as never);
+  return sessionId ? [sessionId] : [];
+};
 
 /**
- * What an invitation link reports about itself. Only a live link names anything —
- * the invited address and the inviting company — so the accept screen can say who
- * is signed in and for whom the invitation is. Every other state is one neutral
- * sentence and nothing else.
- */
-export type InvitationPreview =
-  | { state: "pending"; email: string; companyName: string; message: string }
-  | { state: InvitationPreviewFailedState; email: null; companyName: null; message: string };
-
-/**
- * What an invitation link says about itself, before anything happens.
+ * Admin-only: creates an account for the caller's company, with no email.
  *
- * Public and session-free on purpose: it never signs anybody in and never reads
- * or writes an account. A live link reports the address it was sent to and the
- * inviting company, so the accept screen can name both; an unknown, expired,
- * revoked or already-used link reports only its state, so a stale link can never
- * be used to discover a company or an address.
+ * The admin types a name, the person's email address and a temporary password;
+ * the account is active at once, belongs to the admin's company and is a regular
+ * user. It is marked "must change password", so the first sign-in can only set a
+ * new one. The address must be free across the whole application, and the
+ * refusal names no company.
  */
-export const invitationPreview = query({
-  args: { token: v.string() },
-  handler: async (ctx, args): Promise<InvitationPreview> => {
-    const invitation = await invitationByToken(ctx, args.token);
-    const state = invitationState(invitation, Date.now());
-    if (invitation && state === "pending") {
-      const company = await ctx.db.get(invitation.companyId);
-      return { state: "pending", email: invitation.email, companyName: company?.name ?? "", message: "" };
-    }
-    // Nothing but the state: a stale link never names a company or an address.
-    const failed: InvitationPreviewFailedState =
-      state === "pending" || state === null ? "invalid" : state;
-    return { state: failed, email: null, companyName: null, message: invitationStateMessage(failed) };
-  },
-});
+export const addCompanyUser = mutation({
+  args: { name: v.string(), email: v.string(), password: v.string() },
+  handler: async (ctx, args) => {
+    const viewer = await requireCompanyAdmin(ctx);
+    const name = args.name.trim();
+    if (!name) throw new Error(MISSING_NAME_MESSAGE);
+    const problem = passwordProblem(args.password);
+    if (problem) throw new Error(problem);
 
-/** Pending invitations of the caller's company. Admin-only; nothing for regular users. */
-export const pendingInvitations = query({
-  args: {},
-  handler: async (ctx) => {
-    const user = await currentAccount(ctx);
-    if (!user || user.removedAt || !user.companyId) return null;
-    if (!canManageMembers(user.companyRole)) return null;
-    const now = Date.now();
-    const rows = await ctx.db
-      .query("invitations")
-      .withIndex("by_company", (q) => q.eq("companyId", user.companyId as never))
-      .collect();
-    return rows
-      .map((row) => {
-        const state = invitationState(row, now) as InvitationState;
-        return {
-          id: row._id as string,
-          email: row.email,
-          state,
-          stateLabel: INVITATION_STATE_LABELS[state],
-          createdAt: row.createdAt,
-          expiresAt: row.expiresAt,
-        };
-      })
-      .filter((row) => row.state === "pending")
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const email = normalizeEmail(args.email);
+    const credential = await findPasswordAccount(ctx, email);
+    const accountExists = Boolean(credential) || (await findAccountByEmail(ctx, email)) !== null;
+    const decision = addUserDecision({ actorRole: viewer.role, email, accountExists });
+    if (!decision.ok) throw new Error(decision.message ?? ADMIN_ONLY_MESSAGE);
+
+    const created = await createAccount<DataModel>(ctx as unknown as GenericActionCtx<DataModel>, {
+      provider: PASSWORD_PROVIDER_ID,
+      account: { id: email, secret: args.password },
+      profile: { email, name },
+    });
+    const userId = created.user._id as Id<"users">;
+    await ctx.db.patch(userId, {
+      companyId: viewer.companyId,
+      companyRole: COMPANY_USER,
+      mustChangePassword: true,
+    });
+    return { ok: true, userId: userId as string, email };
   },
 });
 
@@ -845,144 +765,126 @@ export const transferAdmin = mutation({
   },
 });
 
-/** What an invitation email needs, and only for the admin of that invitation's company. */
-export const invitationForDelivery = internalQuery({
-  args: { tokenHash: v.string(), viewerId: v.optional(v.id("users")) },
-  handler: async (ctx, args) => {
-    const invitation = await ctx.db
-      .query("invitations")
-      .withIndex("by_token", (q) => q.eq("tokenHash", args.tokenHash))
-      .unique();
-    if (!invitation || invitationState(invitation, Date.now()) !== "pending") return null;
-    if (!args.viewerId) return null;
-    const viewer = await ctx.db.get(args.viewerId);
-    if (!viewer || viewer.removedAt || !viewer.companyId || (viewer.companyId as string) !== (invitation.companyId as string)) return null;
-    if (!canManageMembers(viewer.companyRole)) return null;
-    const company = await ctx.db.get(invitation.companyId);
-    return {
-      email: invitation.email,
-      companyName: company?.name ?? "",
-      inviterName: viewer.name ?? "",
-      expiresAt: invitation.expiresAt,
-    };
-  },
-});
-
 /**
- * Sends (or resends) the email for an invitation. An action because sending mail
- * is network I/O. It only ever mails the address stored on a pending invitation
- * of the caller's own company, and refuses when the link is no longer valid.
+ * Admin-only: sets a new temporary password for an account of the admin's own
+ * company. The account is marked "must change password" and every one of its
+ * sessions is invalidated, so nobody can keep using the old password or an open
+ * session. Nothing else about the account changes. There is no email: the admin
+ * tells the person the temporary password directly.
  */
-export const sendInvitationEmail = action({
-  args: { token: v.string(), link: v.optional(v.string()) },
-  handler: async (ctx, args): Promise<{ ok: boolean; email: string; provider: string }> => {
-    const viewerId = await getAuthUserId(ctx);
-    if (!viewerId) throw new Error(ADMIN_ONLY_MESSAGE);
-    const tokenHash = await hashInvitationToken(args.token);
-    const target: { email: string; companyName: string; inviterName: string; expiresAt: string } | null =
-      await ctx.runQuery(internal.companies.invitationForDelivery, {
-        tokenHash,
-        viewerId: viewerId as Id<"users">,
-      });
-    if (!target) throw new Error("This invitation is no longer valid.");
-    const link = args.link && args.link.startsWith("http") ? args.link : invitationAcceptHref(args.token);
-    // The recipient is always the address stored on the invitation, never one
-    // supplied by the caller, and the link is never returned or logged.
-    //
-    // The purpose-built invitation message: names the company and the inviter,
-    // one call-to-action button with the link as a normal href, and the expiry
-    // and single-use rule stated in English. Never a sign-in or code template.
-    const message = invitationEmail({
-      link,
-      companyName: target.companyName,
-      inviterName: target.inviterName,
-      expiresAt: target.expiresAt,
-    });
-    const sent = await sendTransactionalEmail({
-      to: target.email,
-      subject: message.subject,
-      html: message.html,
-    });
-    return { ok: true, email: target.email, provider: sent.provider };
-  },
-});
-
-/**
- * Accepts an invitation: the invited person sets a name and a password and
- * becomes a regular user of the inviting company. A used, expired, revoked or
- * unknown link fails with one generic code and never creates an account. The
- * account and the company link are written in this one transaction, so an
- * acceptance either completes or changes nothing. The link is the only proof
- * accepted here, and it is bound to the invited address and one company.
- */
-export const acceptInvitation = mutation({
-  args: { token: v.string(), name: v.string(), password: v.string() },
+export const resetUserPassword = mutation({
+  args: { userId: v.id("users"), password: v.string() },
   handler: async (ctx, args) => {
-    const invitation = await invitationByToken(ctx, args.token);
-    const decision = invitationDecision(invitation, Date.now());
-    if (!decision.ok || !invitation) throw invitationError(decision.code ?? "invalid");
+    const viewer = await requireCompanyAdmin(ctx);
+    const target = await ctx.db.get(args.userId);
+    const sameCompany = Boolean(target && target.companyId && (target.companyId as string) === (viewer.companyId as string));
+    const decision = resetPasswordDecision({ actorRole: viewer.role, sameCompany });
+    if (!decision.ok || !target) throw new Error(decision.message ?? NOT_MEMBER_MESSAGE);
 
-    const name = args.name.trim();
-    if (!name) throw invitationError("missing_name");
-    if (args.password.length < 8) throw invitationError("weak_password");
+    const problem = passwordProblem(args.password);
+    if (problem) throw new Error(problem);
 
-    const email = normalizeEmail(invitation.email);
-    // If the address gained an account since the invitation was sent, refuse and
-    // write nothing: a thrown error rolls this transaction back, so the existing
-    // account is left exactly as it is and the link stays refused for as long as
-    // that account exists. It never signs anybody in.
-    const credential = await ctx.db
-      .query("authAccounts")
-      .withIndex("providerAndAccountId", (q) => q.eq("provider", PASSWORD_PROVIDER_ID).eq("providerAccountId", email))
-      .unique();
-    if (credential || (await findAccountByEmail(ctx, email))) throw invitationError("taken");
+    const email = normalizeEmail(target.email ?? "");
+    if (!email) throw new Error(NOT_MEMBER_MESSAGE);
+    const account = await findPasswordAccount(ctx, email);
+    if (!account) throw new Error("This account has no password to reset.");
 
-    const created = await createAccount<DataModel>(ctx as unknown as GenericActionCtx<DataModel>, {
+    await modifyAccountCredentials(ctx as unknown as GenericActionCtx<DataModel>, {
       provider: PASSWORD_PROVIDER_ID,
       account: { id: email, secret: args.password },
-      profile: { email, name },
     });
-    const userId = created.user._id as Id<"users">;
-    await ctx.db.patch(userId, { companyId: invitation.companyId, companyRole: COMPANY_USER });
-    await ctx.db.patch(invitation._id, {
-      status: INVITATION_ACCEPTED,
-      acceptedAt: new Date().toISOString(),
-      acceptedByUserId: userId,
-    });
-    return { ok: true, email };
+    await ctx.db.patch(target._id, { mustChangePassword: true });
+    await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: target._id });
+    return { ok: true, userId: target._id as string };
+  },
+});
+
+/* ------------------------------------------------ an account's own settings */
+
+/** The account that may change its own settings: signed in and not removed. */
+const requireAccount = async (ctx: MutationCtx) => {
+  const user = await currentAccount(ctx);
+  if (!user) throw new Error("You must be signed in to change your account.");
+  if (user.removedAt) throw new Error(REMOVED_ACCESS_MESSAGE);
+  return user;
+};
+
+/** Changes the signed-in account's display name. */
+export const changeOwnName = mutation({
+  args: { name: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireAccount(ctx);
+    const name = args.name.trim();
+    if (!name) throw new Error(MISSING_NAME_MESSAGE);
+    await ctx.db.patch(user._id, { name });
+    return { ok: true, name };
   },
 });
 
 /**
- * Settles an invitation that is opened while the account already signed in
- * carries the invited address.
- *
- * The link is bound to one address and one company, so this only ever marks the
- * invitation as accepted for that same address — it never creates a second
- * account, and it refuses when the signed-in address is anybody else. The screen
- * never calls it for a different address; it shows the session notice instead.
+ * Changes the signed-in account's email address. The current password is
+ * required, the new address must be valid and free across the whole app, and no
+ * confirmation email is sent. The caller stays signed in here; its other
+ * sessions are dropped, because the address they signed in with is gone.
  */
-export const handleInvitationForCurrentAccount = mutation({
-  args: { token: v.string() },
+export const changeOwnEmail = mutation({
+  args: { currentPassword: v.string(), email: v.string() },
   handler: async (ctx, args) => {
-    const user = await currentAccount(ctx);
-    if (!user || user.removedAt) throw invitationError("invalid");
+    const user = await requireAccount(ctx);
+    if (user.mustChangePassword) throw new Error(MUST_CHANGE_PASSWORD_MESSAGE);
 
-    const invitation = await invitationByToken(ctx, args.token);
-    const decision = invitationDecision(invitation, Date.now());
-    if (!decision.ok || !invitation) throw invitationError(decision.code ?? "invalid");
+    const currentEmail = normalizeEmail(user.email ?? "");
+    if (!currentEmail) throw new Error(CURRENT_PASSWORD_WRONG_MESSAGE);
+    if (!(await verifyCurrentPassword(ctx, currentEmail, args.currentPassword))) {
+      throw new Error(CURRENT_PASSWORD_WRONG_MESSAGE);
+    }
 
+    const nextEmail = normalizeEmail(args.email);
+    if (!EMAIL_PATTERN.test(nextEmail)) throw new Error("Enter a valid email address.");
+    if (nextEmail === currentEmail) throw new Error(SAME_EMAIL_MESSAGE);
+    const clash = await findPasswordAccount(ctx, nextEmail);
+    if (clash || (await findAccountByEmail(ctx, nextEmail))) throw new Error(EMAIL_TAKEN_MESSAGE);
+
+    const account = await findPasswordAccount(ctx, currentEmail);
+    if (!account) throw new Error(CURRENT_PASSWORD_WRONG_MESSAGE);
+
+    // The credential keeps its hash; only the address it is filed under moves.
+    await ctx.db.patch(account._id, { providerAccountId: nextEmail });
+    await ctx.db.patch(user._id, { email: nextEmail });
+
+    const keep = await currentSession(ctx);
+    await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: user._id, except: keep });
+    return { ok: true, email: nextEmail };
+  },
+});
+
+/**
+ * Changes the signed-in account's password. The current password is required,
+ * and the new one must follow the password rule and differ from the current one
+ * — which is also what clears the "must change password" mark of an account an
+ * admin created or reset. The caller stays signed in here; other sessions drop.
+ */
+export const changeOwnPassword = mutation({
+  args: { currentPassword: v.string(), newPassword: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireAccount(ctx);
     const email = normalizeEmail(user.email ?? "");
-    // Only the address the link was sent to may settle it. An anonymous session
-    // has no address and can never match.
-    if (!email || email !== normalizeEmail(invitation.email)) throw invitationError("invalid");
+    if (!email) throw new Error(CURRENT_PASSWORD_WRONG_MESSAGE);
+    if (!(await verifyCurrentPassword(ctx, email, args.currentPassword))) {
+      throw new Error(CURRENT_PASSWORD_WRONG_MESSAGE);
+    }
+    const problem = passwordProblem(args.newPassword);
+    if (problem) throw new Error(problem);
+    if (args.newPassword === args.currentPassword) throw new Error(PASSWORD_UNCHANGED_MESSAGE);
 
-    await ctx.db.patch(invitation._id, {
-      status: INVITATION_ACCEPTED,
-      acceptedAt: new Date().toISOString(),
-      acceptedByUserId: user._id,
+    await modifyAccountCredentials(ctx as unknown as GenericActionCtx<DataModel>, {
+      provider: PASSWORD_PROVIDER_ID,
+      account: { id: email, secret: args.newPassword },
     });
-    const alreadyMember = (user.companyId as string | undefined) === (invitation.companyId as string);
-    return { ok: true, email, alreadyMember };
+    await ctx.db.patch(user._id, { mustChangePassword: false });
+
+    const keep = await currentSession(ctx);
+    await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: user._id, except: keep });
+    return { ok: true };
   },
 });

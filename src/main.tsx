@@ -16,9 +16,6 @@ import "./types/global.d.ts";
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const RegisterCompany = lazy(() => import("./pages/RegisterCompany.tsx"));
-const ForgotPassword = lazy(() => import("./pages/ForgotPassword.tsx"));
-const ResetPassword = lazy(() => import("./pages/ResetPassword.tsx"));
-const AcceptInvitation = lazy(() => import("./pages/AcceptInvitation.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const Calendars = lazy(() => import("./pages/Calendars.tsx"));
 const Resources = lazy(() => import("./pages/Resources.tsx"));
@@ -26,6 +23,8 @@ const Projects = lazy(() => import("./pages/Projects.tsx"));
 const MarginReport = lazy(() => import("./pages/MarginReport.tsx"));
 const Capacity = lazy(() => import("./pages/Capacity.tsx"));
 const CompanyUsers = lazy(() => import("./pages/CompanyUsers.tsx"));
+const MyAccount = lazy(() => import("./pages/MyAccount.tsx"));
+const ChangePassword = lazy(() => import("./pages/ChangePassword.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -82,9 +81,6 @@ createRoot(document.getElementById("root")!).render(
                   element={<AuthPage redirectAfterAuth="/dashboard" />}
                 />
                 <Route path="/auth/register" element={<RegisterCompany />} />
-                <Route path="/auth/forgot" element={<ForgotPassword />} />
-                <Route path="/auth/reset" element={<ResetPassword />} />
-                <Route path="/auth/accept" element={<AcceptInvitation />} />
                 <Route
                   path="/dashboard"
                   element={
@@ -138,6 +134,22 @@ createRoot(document.getElementById("root")!).render(
                   element={
                     <RequireAuth>
                       <CompanyUsers />
+                    </RequireAuth>
+                  }
+                />
+                <Route
+                  path="/account"
+                  element={
+                    <RequireAuth>
+                      <MyAccount />
+                    </RequireAuth>
+                  }
+                />
+                <Route
+                  path="/account/password"
+                  element={
+                    <RequireAuth>
+                      <ChangePassword />
                     </RequireAuth>
                   }
                 />
