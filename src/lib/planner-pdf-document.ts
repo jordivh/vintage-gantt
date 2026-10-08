@@ -507,17 +507,57 @@ export async function renderPlannerPdf(model: PlannerPdfModel, options: PlannerP
   return await doc.save();
 }
 
-/** Renders the plan and hands the file to the browser. */
-export async function downloadPlannerPdf(model: PlannerPdfModel, options: PlannerPdfOptions = {}): Promise<void> {
+/* ------------------------------------------------------------- the file */
+
+/**
+ * One rendered export: the real bytes, the blob the browser downloads and the
+ * object URL that points at them. The URL is what "Download PDF" reuses, so the
+ * name and the file can never drift apart, and it is released as soon as the
+ * message is gone — the temporary file never piles up in memory.
+ */
+export interface PlannerPdfFile {
+  fileName: string;
+  bytes: Uint8Array;
+  blob: Blob;
+  url: string;
+}
+
+/**
+ * Renders the plan into a real PDF file. Nothing is announced to the user here:
+ * the caller only reports success once this promise resolves, so "Export ready"
+ * always means a file that exists. A failure rejects, with a message the page can
+ * show as it is.
+ */
+export async function createPlannerPdfFile(model: PlannerPdfModel, options: PlannerPdfOptions = {}): Promise<PlannerPdfFile> {
   const bytes = await renderPlannerPdf(model, options);
   const blob = new Blob([new Uint8Array(bytes)], { type: "application/pdf" });
-  const url = URL.createObjectURL(blob);
+  try {
+    return { fileName: model.fileName, bytes, blob, url: URL.createObjectURL(blob) };
+  } catch {
+    // Without an object URL there is nothing to hand to the browser; the page
+    // shows this instead of a false "Export ready".
+    throw new Error("The PDF was created but this browser cannot hand it over for download.");
+  }
+}
+
+/**
+ * Hands an existing file to the browser with one direct anchor click — no
+ * pop-up, and no delay between the user's click and the download. The object URL
+ * stays valid until `releasePlannerPdfFile`, so the same file can be downloaded
+ * again from the "Download PDF" button.
+ */
+export function startPdfDownload(file: PlannerPdfFile): void {
   const link = document.createElement("a");
-  link.href = url;
-  link.download = model.fileName;
+  link.href = file.url;
+  link.download = file.fileName;
   link.rel = "noopener";
+  link.style.display = "none";
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** Releases the temporary file: the object URL is revoked and the blob freed. */
+export function releasePlannerPdfFile(file: PlannerPdfFile): void {
+  URL.revokeObjectURL(file.url);
 }

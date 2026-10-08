@@ -52,6 +52,8 @@ import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engin
 import { groupUnresolvedWeeks, OCCUPANCY_TARGET, OPTIMIZE_DEFAULTS, type OptimizationPlan, type OptimizeProgress } from "@/lib/resource-optimizer";
 import { runOptimizeJob, type OptimizeJobMessage } from "@/lib/optimize-job";
 import { fixedMilestoneChoices, loadFixedMilestones, saveFixedMilestones } from "@/lib/optimize-milestones";
+import { buildPlannerPdfModel } from "@/lib/planner-pdf";
+import { createPlannerPdfFile, releasePlannerPdfFile, startPdfDownload, type PlannerPdfFile } from "@/lib/planner-pdf-document";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -322,6 +324,10 @@ export default function Dashboard() {
   // worker that can be dropped to cancel it. Cancel changes nothing.
   const [optimizeRun, setOptimizeRun] = useState<OptimizeProgress | null>(null);
   const optimizeWorker = useRef<Worker | null>(null);
+  // PDF export: the rendered file of the last export. It is handed to the browser
+  // immediately, and kept only so the "Download PDF" button of the message can
+  // download the very same file. Released when the message is gone.
+  const exportFile = useRef<PlannerPdfFile | null>(null);
   // The settings dialog comes before the run, so the fixed milestones are chosen
   // first. `null` means closed; a list of ids means open with that selection, and
   // the selection is only remembered when the optimization is actually run —
@@ -1284,6 +1290,66 @@ export default function Dashboard() {
     setVersionDialog(false);
     toast.success("New version created in Planning mode");
   };
+  /** Drops the last export's temporary file: the object URL is revoked. */
+  const releaseExportFile = () => {
+    if (exportFile.current) releasePlannerPdfFile(exportFile.current);
+    exportFile.current = null;
+  };
+  // Leaving the planner, or a fresh export, releases the temporary file.
+  useEffect(() => () => {
+    if (exportFile.current) releasePlannerPdfFile(exportFile.current);
+    exportFile.current = null;
+  }, []);
+  /**
+   * Export the open project's active version as a PDF.
+   *
+   * The file is built first and the download starts straight away, within the
+   * same click: the PDF really exists before anything is announced, so "Export
+   * ready" can only appear for a file whose download has started. The message
+   * also offers "Download PDF", so a browser that blocks the automatic download
+   * still lets the user fetch the very same file. A failure is an error message,
+   * never a false "ready".
+   */
+  const runExport = async () => {
+    setOverflowOpen(false);
+    // A previous export is dropped before the next one: nothing accumulates.
+    releaseExportFile();
+    try {
+      const exportDate = todayLineDate;
+      const model = buildPlannerPdfModel({
+        projectName: activeProject.name,
+        client: activeProject.client,
+        versionName: activePlanVersion?.name ?? "Plan version",
+        mode: activeMode,
+        baselineName: activeBaseline?.name ?? null,
+        exportDate,
+        today: exportDate,
+        // Exactly what the grid shows: the active version's calculated tasks.
+        tasks: calculatedTasks,
+        assignments,
+        resources: resources.map((resource) => ({ id: resource.id, name: resource.name })),
+        baselineTasks: baselineTasks.filter((snapshot) => snapshot.baselineId === activeBaselineId),
+        system,
+        projectCalendarId: calendarId,
+      });
+      const file = await createPlannerPdfFile(model);
+      exportFile.current = file;
+      startPdfDownload(file);
+      toast.success("Export ready", {
+        description: file.fileName,
+        duration: 20_000,
+        action: {
+          label: "Download PDF",
+          onClick: () => { if (exportFile.current) startPdfDownload(exportFile.current); },
+        },
+        onDismiss: releaseExportFile,
+        onAutoClose: releaseExportFile,
+      });
+    } catch (error) {
+      exportFile.current = null;
+      toast.error(`Export failed: ${error instanceof Error ? error.message : "the PDF could not be created."}`);
+    }
+  };
   /**
    * Resource optimization: the settings dialog first, then a preview.
    *
@@ -1613,7 +1679,7 @@ export default function Dashboard() {
           <div className="toolbar-popover-wrap"><button className="icon-button" title="More actions" aria-label="More actions" onClick={() => { setOverflowOpen((open) => !open); setViewOpen(false); }}><MoreHorizontal size={18} /></button>{overflowOpen && <div className="toolbar-popover overflow-popover" onClick={(event) => event.stopPropagation()}>
             <div className="responsive-task-actions"><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={14} /> <span>Indent</span></button><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={14} /> <span>Outdent</span></button><button disabled={!selected.length} onClick={deleteSelected}><Trash2 size={14} /> Delete</button><button disabled={!history.length} onClick={undo}><Undo2 size={14} /> Undo</button><button disabled={!future.length} onClick={redo}><Redo2 size={14} /> Redo</button><div className="menu-rule" /></div>
             <button onClick={openRecalculate}><RefreshCw size={14} /> Recalculate</button>
-            <button onClick={() => toast("Export ready")}><Download size={14} /> Export</button>
+            <button onClick={() => void runExport()}><Download size={14} /> Export</button>
             <button onClick={openMarginReport}><Columns3 size={14} /> Margin report</button>
             <button onClick={() => toast("You are viewing your team dashboard")}><UserRound size={14} /> My dashboard</button>
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>

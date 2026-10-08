@@ -40,13 +40,20 @@ export function pageGeometry(paper: PdfPaper = DEFAULT_PAPER, orientation: PdfOr
     : { widthMm: size.heightMm, heightMm: size.widthMm };
 }
 
-/** `<ProjectName>_<VersionName>_<exportdate>.pdf`, with unsafe characters neutralised. */
-export function plannerPdfFileName(projectName: string, versionName: string, exportDate: string): string {
+/**
+ * The name of the downloaded file: `<Project code> - <Project name> - <date>.pdf`,
+ * with unsafe characters neutralised — e.g. `P26032 - Jackon Insulation - 2026-10-08.pdf`.
+ * A project without a code simply leaves that part out. The same name is printed in
+ * the footer of every page, so the file the user receives and the file the document
+ * names are always the same string.
+ */
+export function plannerPdfFileName(projectCode: string, projectName: string, exportDate: string): string {
   const clean = (value: string, fallback: string) => {
     const trimmed = (value ?? "").replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
     return (trimmed || fallback).slice(0, 80);
   };
-  return `${clean(projectName, "Project")}_${clean(versionName, "Version")}_${exportDate}.pdf`;
+  const parts = [clean(projectCode, ""), clean(projectName, "Project"), exportDate].filter(Boolean);
+  return `${parts.join(" - ")}.pdf`;
 }
 
 /**
@@ -261,6 +268,8 @@ export interface PlannerPdfModel {
 }
 
 export interface PlannerPdfInput {
+  /** The project's short code, when the project has one. */
+  projectCode?: string;
   projectName: string;
   client?: string;
   versionName: string;
@@ -465,7 +474,7 @@ export function buildPlannerPdfModel(input: PlannerPdfInput): PlannerPdfModel {
   const baselineName = (input.baselineName ?? "").trim();
 
   return {
-    fileName: plannerPdfFileName(input.projectName, input.versionName, exportDate),
+    fileName: plannerPdfFileName(input.projectCode ?? "", input.projectName, exportDate),
     meta: {
       projectName: input.projectName || "Untitled project",
       client: (input.client ?? "").trim(),
