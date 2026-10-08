@@ -386,6 +386,15 @@ function recalculateProjects(
   return next;
 }
 
+/**
+ * How long the workspace must be still before it is written. A burst of changes
+ * (typing a task name, dragging a bar) becomes one save of the newest state
+ * instead of one save per keystroke. The wait is measured from the first
+ * pending change, so continuous editing is still written every
+ * `WORKSPACE_SAVE_QUIET_MS`.
+ */
+const WORKSPACE_SAVE_QUIET_MS = 400;
+
 export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [system, setSystem] = useState<CalendarSystem>({ calendars: [], exceptions: [], defaultCalendarId: "" });
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -452,6 +461,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    * dropped on a timer. A skipped write is impossible; only an identical one is.
    */
   const lastSyncedRef = useRef<string | null>(null);
+  /** The newest workspace waiting to be written, and the one write in flight. */
+  const pendingSaveRef = useRef<{ serialised: string; payload: unknown } | null>(null);
+  const saveInFlightRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** The whole workspace exactly as it is sent to the server, relations repaired. */
   const buildWorkspacePayload = useCallback(
@@ -576,6 +589,60 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       });
   }, [isAuthenticated, ensureCompanyRemote]);
 
+  /**
+   * Puts the workspace back exactly as the database has it, after a refused
+   * write, so the screen never shows a change that was not stored.
+   */
+  const restoreLastSaved = useCallback(() => {
+    const previous = lastServerStateRef.current as {
+      projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[];
+      resources: ResourceRecord[]; assignments: TaskAssignment[]; planVersions?: PlanVersion[]; baselines?: Baseline[]; baselineTasks?: BaselineTask[];
+    } | null;
+    if (!previous) return;
+    restoringRef.current = true;
+    lastSyncedRef.current = null;
+    setProjects(previous.projects);
+    setSystem({ calendars: previous.calendars, exceptions: previous.exceptions, defaultCalendarId: previous.calendars.find((calendar) => calendar.isDefault)?.id ?? "" });
+    setResources(previous.resources);
+    setAssignments(previous.assignments);
+    const restored: Record<string, PlannerTask[]> = {};
+    for (const task of previous.tasks) (restored[task.projectId] ??= []).push(task);
+    setTasksByProject(restored);
+    setPlanVersions(previous.planVersions ?? []);
+    setBaselines(previous.baselines ?? []);
+    setBaselineTasks(previous.baselineTasks ?? []);
+  }, []);
+
+  /**
+   * Writes the newest workspace, once. Two full saves never race each other: a
+   * change that arrives while a write is in flight waits its turn, and the state
+   * written is always the newest one — an older pending payload is dropped
+   * instead of being queued behind it.
+   */
+  const drainSaves = useCallback(async () => {
+    if (saveInFlightRef.current) return;
+    const pending = pendingSaveRef.current;
+    if (!pending) return;
+    pendingSaveRef.current = null;
+    saveInFlightRef.current = true;
+    try {
+      await replaceRemoteState({ state: pending.payload });
+      lastSyncedRef.current = pending.serialised;
+      lastServerStateRef.current = pending.payload;
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error("[vintage-gantt] could not persist planner state:", error);
+      toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
+      // The refused state is dropped, not retried: the screen goes back to what
+      // the database holds, and the next change starts from there.
+      pendingSaveRef.current = null;
+      restoreLastSaved();
+    } finally {
+      saveInFlightRef.current = false;
+      if (pendingSaveRef.current) void drainSaves();
+    }
+  }, [replaceRemoteState, restoreLastSaved]);
+
   useEffect(() => {
     if (!isAuthenticated || !hydratedRef.current) return;
     // One run is skipped while a refused write is rolled back, so the rollback
@@ -586,32 +653,25 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // Nothing to write when the workspace is already what the database holds.
     // Only an identical payload is skipped — never a change the user made.
     if (serialised === lastSyncedRef.current) return;
-    void replaceRemoteState({ state: payload }).then(() => {
-      lastSyncedRef.current = serialised;
-      lastServerStateRef.current = payload;
-    }).catch((error: unknown) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error("[vintage-gantt] could not persist planner state:", error);
-      toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
-      const previous = lastServerStateRef.current as {
-        projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[];
-        resources: ResourceRecord[]; assignments: TaskAssignment[]; planVersions?: PlanVersion[]; baselines?: Baseline[]; baselineTasks?: BaselineTask[];
-      } | null;
-      if (!previous) return;
-      restoringRef.current = true;
-      lastSyncedRef.current = null;
-      setProjects(previous.projects);
-      setSystem({ calendars: previous.calendars, exceptions: previous.exceptions, defaultCalendarId: previous.calendars.find((calendar) => calendar.isDefault)?.id ?? "" });
-      setResources(previous.resources);
-      setAssignments(previous.assignments);
-      const restored: Record<string, PlannerTask[]> = {};
-      for (const task of previous.tasks) (restored[task.projectId] ??= []).push(task);
-      setTasksByProject(restored);
-      setPlanVersions(previous.planVersions ?? []);
-      setBaselines(previous.baselines ?? []);
-      setBaselineTasks(previous.baselineTasks ?? []);
-    });
-  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload]);
+    // The newest state is what will be written; an earlier waiting one is
+    // replaced rather than written first and thrown away after.
+    pendingSaveRef.current = { serialised, payload };
+    if (saveInFlightRef.current || saveTimerRef.current !== null) return;
+    // A burst of changes (typing a name, dragging a bar) is written as one save
+    // once the workspace has been still for a moment, instead of one save per
+    // keystroke — each of which rewrites the whole workspace on the server.
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void drainSaves();
+    }, WORKSPACE_SAVE_QUIET_MS);
+  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload, drainSaves]);
+
+  useEffect(() => () => {
+    // Leaving the screen never drops the last change: whatever is still waiting
+    // is written straight away.
+    if (saveTimerRef.current !== null) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    if (pendingSaveRef.current) void drainSaves();
+  }, [drainSaves]);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? projects.find((project) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project") ?? {
       id: "",

@@ -9,7 +9,8 @@ import {
 } from "../lib/company-integrity";
 import { remapPredecessorText } from "../lib/planner-model";
 import { R3_CHRIS_LEAVE, R3_PROJECTS, R3_RESOURCES, R3_SEED_KEY } from "../lib/r3-fixture";
-import { companyTable, deleteCompanyRows, requireCompany, rowsByOwner, viewerScope } from "./companies";
+import { companyTable, requireCompany, rowsByOwner, viewerScope } from "./companies";
+import type { CompanyScopedTable } from "../lib/company-scope";
 
 /**
  * The workspace: projects, plans, calendars, people and capacity.
@@ -748,6 +749,107 @@ export const ensureTestProject = mutation({
   },
 });
 
+/* -------------------------------------------------- workspace write budget */
+
+/**
+ * One value's serialisation, with object keys in a fixed order, so two saves of
+ * the same row always compare equal — however the client happened to build it.
+ */
+const canonical = (value: unknown): string => {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+};
+
+/** What a stored row holds besides the storage columns the client never sends. */
+const storedContent = (row: Record<string, unknown>): string => {
+  const { _id: _id, _creationTime: _creationTime, ...app } = row;
+  return canonical(withoutScope(app));
+};
+
+/** The counts of one table's write: what a save really had to do. */
+export interface WorkspaceWriteCount {
+  inserted: number;
+  updated: number;
+  removed: number;
+  kept: number;
+}
+
+/**
+ * Brings one company table in line with the payload — and touches only the rows
+ * that actually differ.
+ *
+ * Every save sends the whole workspace, so writing it by deleting every row and
+ * inserting it again cost twice the company's row count in writes, on every
+ * single change. That is what a workspace eventually outgrows: one mutation may
+ * write 16,000 documents (and 16 MiB) altogether, so a plan that grows — a large
+ * project, or "Optimize planning" adding a whole second version of every task —
+ * can reach a point where no edit can be saved at all, and until then every edit
+ * pays for the whole plan. Comparing first makes a save cost one write per
+ * changed row: editing a task writes that task, and a save that changes nothing
+ * writes nothing.
+ *
+ * The meaning of the save is unchanged: the stored workspace is exactly this
+ * payload, so a row the payload no longer has is deleted.
+ */
+const syncCompanyTable = async (
+  ctx: MutationCtx,
+  table: CompanyScopedTable,
+  companyId: Id<"companies">,
+  scope: { ownerId: Id<"users">; companyId: Id<"companies"> },
+  incoming: readonly unknown[],
+  totals: WorkspaceWriteCount,
+): Promise<void> => {
+  // The table name is a runtime union here, so the typed database API is used
+  // with the table as a plain name — the same way `companyTable` reads it.
+  const db = ctx.db as unknown as {
+    insert: (table: string, value: Record<string, unknown>) => Promise<unknown>;
+    replace: (id: unknown, value: Record<string, unknown>) => Promise<unknown>;
+    delete: (id: unknown) => Promise<unknown>;
+  };
+  const stored = (await companyTable(ctx, table, companyId)) as unknown as Record<string, unknown>[];
+  const storedById = new Map<string, Record<string, unknown>>();
+  for (const row of stored) {
+    if (typeof row.id === "string" && row.id) storedById.set(row.id, row);
+  }
+  const seen = new Set<string>();
+  for (const item of incoming) {
+    const row = withoutScope(item) as Record<string, unknown>;
+    const key = typeof row.id === "string" ? row.id : "";
+    const existing = key ? storedById.get(key) : undefined;
+    if (key) seen.add(key);
+    if (!existing) {
+      await db.insert(table, { ...row, ...scope });
+      totals.inserted += 1;
+      continue;
+    }
+    if (storedContent(existing) === canonical(row)) {
+      totals.kept += 1;
+      continue;
+    }
+    // The row is written as a whole, so a field the plan no longer has cannot
+    // survive on the stored row.
+    await db.replace(existing._id, { ...row, ...scope });
+    totals.updated += 1;
+  }
+  for (const [key, row] of storedById) {
+    if (seen.has(key)) continue;
+    await db.delete(row._id);
+    totals.removed += 1;
+  }
+};
+
+/** Tasks carry their own order; a row without one keeps its place in the payload. */
+const orderedTasks = (rows: readonly unknown[]): unknown[] =>
+  rows.map((item, index) => {
+    const row = withoutScope(item) as Record<string, unknown>;
+    return { ...row, sortOrder: row.sortOrder ?? index };
+  });
+
 export const replaceState = mutation({
   args: { state: v.any() },
   handler: async (ctx, args) => {
@@ -767,22 +869,21 @@ export const replaceState = mutation({
         `That workspace save refers to ${describeReferences(foreign).join("; ")}. Nothing was written.`,
       );
     }
-    const tableNames = ["projects", "tasks", "dependencies", "calendars", "calendarExceptions", "resources", "taskAssignments", "planVersions", "baselines", "baselineTasks"] as const;
-    for (const table of tableNames) await deleteCompanyRows(ctx, table, companyId);
     const scope = { ownerId: userId, companyId };
-    for (const item of state.projects ?? []) await ctx.db.insert("projects", { ...withoutScope(item), ...scope });
-    for (const [index, item] of (state.tasks ?? []).entries()) {
-      const row = withoutScope(item);
-      await ctx.db.insert("tasks", { ...row, ...scope, sortOrder: row.sortOrder ?? index });
-    }
-    for (const item of state.dependencies ?? []) await ctx.db.insert("dependencies", { ...withoutScope(item), ...scope });
-    for (const item of state.calendars ?? []) await ctx.db.insert("calendars", { ...withoutScope(item), ...scope });
-    for (const item of state.exceptions ?? []) await ctx.db.insert("calendarExceptions", { ...withoutScope(item), ...scope });
-    for (const item of state.resources ?? []) await ctx.db.insert("resources", { ...withoutScope(item), ...scope });
-    for (const item of state.assignments ?? []) await ctx.db.insert("taskAssignments", { ...withoutScope(item), ...scope });
-    for (const item of state.planVersions ?? []) await ctx.db.insert("planVersions", { ...withoutScope(item), ...scope });
-    for (const item of state.baselines ?? []) await ctx.db.insert("baselines", { ...withoutScope(item), ...scope });
-    for (const item of state.baselineTasks ?? []) await ctx.db.insert("baselineTasks", { ...withoutScope(item), ...scope });
+    const totals: WorkspaceWriteCount = { inserted: 0, updated: 0, removed: 0, kept: 0 };
+    await syncCompanyTable(ctx, "projects", companyId, scope, state.projects ?? [], totals);
+    await syncCompanyTable(ctx, "tasks", companyId, scope, orderedTasks(state.tasks ?? []), totals);
+    await syncCompanyTable(ctx, "dependencies", companyId, scope, state.dependencies ?? [], totals);
+    await syncCompanyTable(ctx, "calendars", companyId, scope, state.calendars ?? [], totals);
+    await syncCompanyTable(ctx, "calendarExceptions", companyId, scope, state.exceptions ?? [], totals);
+    await syncCompanyTable(ctx, "resources", companyId, scope, state.resources ?? [], totals);
+    await syncCompanyTable(ctx, "taskAssignments", companyId, scope, state.assignments ?? [], totals);
+    await syncCompanyTable(ctx, "planVersions", companyId, scope, state.planVersions ?? [], totals);
+    await syncCompanyTable(ctx, "baselines", companyId, scope, state.baselines ?? [], totals);
+    await syncCompanyTable(ctx, "baselineTasks", companyId, scope, state.baselineTasks ?? [], totals);
+    // What this save actually had to write, so a save that rewrote the whole
+    // workspace is visible rather than silent.
+    return totals;
   },
 });
 
