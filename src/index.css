@@ -135,6 +135,8 @@
 .optimize-fixed-row td { background: #efe4cd; }
 .optimize-summary-ok { margin-top: 12px; padding: 12px 14px; border: 1px solid #b8c9b2; background: #eef3ea; color: #47603f; font: 12px/1.5 Georgia, serif; }
 .optimize-summary-ok b { color: #3c5535; }
+.optimize-progress { margin-top: 12px; height: 8px; border: 1px solid #d0bea0; background: #f3ebdc; overflow: hidden; }
+.optimize-progress-fill { height: 100%; background: #8a7757; transition: width .25s ease; }
 .planner-context-bar { min-height: 68px; }
 .timeline-controls { display: none; }
 .context-selectors { display: flex; align-items: center; gap: 10px; margin-left: auto; margin-right: 18px; }

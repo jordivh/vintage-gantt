@@ -11,6 +11,7 @@
  * version-per-apply that leaves the original untouched.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { convexTest } from "convex-test";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
@@ -22,10 +23,12 @@ import {
   maxDurationFor,
   optimizeProject,
   type OptimizationPlan,
+  type OptimizeProgress,
   type OptimizeProjectInput,
   type OptimizeResource,
   type OptimizeUnresolved,
 } from "./resource-optimizer";
+import { runOptimizeJob, type OptimizeJobMessage } from "./optimize-job";
 import { computeResourceLoads } from "./capacity-engine";
 
 const modules = {
@@ -81,6 +84,8 @@ const run = (input: {
   maxExtensionDays?: number;
   resources?: OptimizeResource[];
   calendarSystem?: CalendarSystem;
+  timeLimitMs?: number;
+  onProgress?: (progress: OptimizeProgress) => void;
 }) => optimizeProject({
   projectId: "proj-open",
   projects: [
@@ -93,7 +98,11 @@ const run = (input: {
   mode: input.mode ?? "planning",
   today: input.today ?? "2026-09-01",
   fixedMilestoneIds: input.fixedMilestoneIds,
-  limits: { maxExtensionDays: input.maxExtensionDays ?? 8 },
+  limits: {
+    maxExtensionDays: input.maxExtensionDays ?? 8,
+    ...(input.timeLimitMs !== undefined ? { timeLimitMs: input.timeLimitMs } : {}),
+  },
+  onProgress: input.onProgress,
 });
 
 /** A zero-duration row without children — a milestone, with a date to keep. */
@@ -797,5 +806,153 @@ describe("resource optimization — extending task duration", () => {
     // The very same plan may change while planning, so the rule is the mode's.
     const planning = ok(run({ tasks, assignments, mode: "planning", today }));
     expect(planning.moves.length).toBeGreaterThan(0);
+  });
+});
+
+/* --------------------------- the step-by-step method, its limits and its job */
+
+/**
+ * How the button now calculates: everything is prepared once, then the movable
+ * tasks are walked one at a time with a bounded set of options — never all
+ * combinations — under a wall-clock limit, as a background worker job so the page
+ * never blocks. These cases pin that down on projects big enough that trying every
+ * combination could not finish, and re-check the rules on the result.
+ */
+describe("resource optimization — the step-by-step method", () => {
+  /** `count` two-day tasks, all starting the same Monday, all on the same employee. */
+  const pile = (count: number): PlannerTask[] => Array.from({ length: count }, (_, index) => task({
+    id: `T${index}`, name: `T${index}`, duration: 2, start: "2026-10-05", finish: "2026-10-06", work: 16,
+  }));
+  const pileAssignments = (count: number) => onAnna(Array.from({ length: count }, (_, index) => `T${index}`));
+
+  test("a run reports each phase and where it spent the time", () => {
+    const phases: OptimizeProgress[] = [];
+    const tasks = pile(20);
+    const result = ok(run({ tasks, assignments: pileAssignments(20), onProgress: (progress) => phases.push(progress) }));
+
+    expect(phases[0].phase).toBe("preparing");
+    expect(phases.some((progress) => progress.phase === "optimizing")).toBe(true);
+    expect(phases.some((progress) => progress.phase === "reporting")).toBe(true);
+    for (const progress of phases) expect(progress.ratio >= 0 && progress.ratio <= 1).toBe(true);
+    // The phases are measured, they add up, and they cover the run.
+    const { prepareMs, optimizeMs, reportMs, totalMs, evaluations } = result.timings;
+    expect(evaluations).toBeGreaterThan(0);
+    expect(prepareMs + optimizeMs + reportMs <= totalMs + 1).toBe(true);
+    expect(result.timeLimited).toBe(false);
+  });
+
+  test("the largest project finishes inside the time budget and keeps every rule", () => {
+    const tasks = [...pile(80), milestone("M", "2026-12-18", "T79")];
+    const result = ok(run({
+      tasks,
+      assignments: pileAssignments(80),
+      fixedMilestoneIds: ["M"],
+      timeLimitMs: 10_000,
+    }));
+
+    expect(result.timeLimited).toBe(false);
+    expect(result.timings.totalMs).toBeLessThan(10_000);
+    expect(result.workHoursPreserved).toBe(true);
+    // No rule is broken: the fixed milestone keeps its date and every task keeps
+    // its dependencies, work hours and duration range.
+    expect(byId(result.tasks).get("M")!.start).toBe("2026-12-18");
+    expectPlanSound(tasks, result.tasks);
+  });
+
+  test("never all combinations: the options grow with the tasks, not exponentially", () => {
+    const small = ok(run({ tasks: pile(20), assignments: pileAssignments(20), timeLimitMs: 10_000 }));
+    const large = ok(run({ tasks: pile(40), assignments: pileAssignments(40), timeLimitMs: 10_000 }));
+
+    // A task tries at most its allowed window (start days × the six duration
+    // steps), a few rounds over it — and twice the tasks stay about twice the
+    // options instead of exploding into combinations.
+    expect(small.timings.evaluations <= 20 * 21 * 6 * 4).toBe(true);
+    expect(large.timings.evaluations <= small.timings.evaluations * 3 + 50).toBe(true);
+  });
+
+  test("the same input always gives exactly the same plan", () => {
+    const first = ok(run({ tasks: pile(30), assignments: pileAssignments(30), timeLimitMs: 10_000 }));
+    const second = ok(run({ tasks: pile(30), assignments: pileAssignments(30), timeLimitMs: 10_000 }));
+
+    expect(second.moves).toEqual(first.moves);
+    expect(second.tasks).toEqual(first.tasks);
+    expect(second.unresolved).toEqual(first.unresolved);
+    expect(second.timings.evaluations).toBe(first.timings.evaluations);
+  });
+
+  test("the 10-second limit stops the search early and still returns a valid plan", () => {
+    const tasks = pile(60);
+    const result = ok(run({ tasks, assignments: pileAssignments(60), timeLimitMs: 1 }));
+
+    expect(result.timeLimited).toBe(true);
+    expect(result.workHoursPreserved).toBe(true);
+    expectPlanSound(tasks, result.tasks);
+    for (const move of result.moves) {
+      expect(move.newDuration >= move.oldDuration).toBe(true);
+      expect(move.newDuration - move.oldDuration <= Math.floor(move.oldDuration * (EXTENSION_LIMIT - 1))).toBe(true);
+    }
+  });
+
+  test("the background job reports progress and one result, and writes nothing", () => {
+    const messages: OptimizeJobMessage[] = [];
+    const tasks = pile(16);
+    const snapshot = JSON.stringify(tasks);
+    const result = runOptimizeJob({
+      projectId: "proj-open",
+      projects: [{ projectId: "proj-open", projectName: "Open project", projectCalendarId: "base", tasks }],
+      resources: [anna],
+      assignments: pileAssignments(16),
+      system,
+      mode: "planning",
+      today: "2026-09-01",
+    }, (message) => messages.push(message));
+
+    expect(result.ok).toBe(true);
+    expect(messages.some((message) => message.type === "progress")).toBe(true);
+    expect(messages[messages.length - 1].type).toBe("result");
+    // The job is pure: a cancelled run can never leave anything behind.
+    expect(JSON.stringify(tasks)).toBe(snapshot);
+  });
+
+  test("a job that cannot run reports the failure instead of throwing", () => {
+    const messages: OptimizeJobMessage[] = [];
+    const result = runOptimizeJob({
+      projectId: "not-this-project",
+      projects: [{ projectId: "proj-open", projectName: "Open project", projectCalendarId: "base", tasks: pile(5) }],
+      resources: [anna],
+      assignments: pileAssignments(5),
+      system,
+      mode: "planning",
+      today: "2026-09-01",
+    }, (message) => messages.push(message));
+
+    expect(result.ok).toBe(false);
+    expect(messages[messages.length - 1].type).toBe("result");
+    const last = messages[messages.length - 1];
+    if (last.type === "result" && !last.result.ok) expect(last.result.error).toContain("workspace");
+  });
+});
+
+/* --------------------------------- how the page runs it: never on the main thread */
+
+describe("resource optimization — the page stays responsive", () => {
+  const dashboard = () => readFileSync("src/pages/Dashboard.tsx", "utf8");
+
+  test("the whole calculation runs in a background worker with progress and a Cancel", () => {
+    const page = dashboard();
+    const worker = readFileSync("src/lib/optimize-worker.ts", "utf8");
+
+    // The engine runs in the worker module, never inline on the page.
+    expect(worker).toContain("runOptimizeJob");
+    expect(page).toContain('new Worker(new URL("../lib/optimize-worker.ts", import.meta.url), { type: "module" })');
+    // "Optimizing…" with progress while it runs, and Cancel dropping the worker.
+    expect(page).toContain("Optimizing…");
+    expect(page).toContain("cancelOptimizeRun");
+    expect(page).toContain("optimizeWorker.current?.terminate()");
+    expect(page).toContain("setOptimizeRun(null)");
+  });
+
+  test("a run that hit the time limit says its result may not be optimal", () => {
+    expect(dashboard()).toContain("optimizePlan.timeLimited");
   });
 });

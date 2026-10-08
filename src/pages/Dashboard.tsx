@@ -49,7 +49,8 @@ import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
 import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engine";
-import { groupUnresolvedWeeks, optimizeProject, OCCUPANCY_TARGET, type OptimizationPlan } from "@/lib/resource-optimizer";
+import { groupUnresolvedWeeks, OCCUPANCY_TARGET, OPTIMIZE_DEFAULTS, type OptimizationPlan, type OptimizeProgress } from "@/lib/resource-optimizer";
+import { runOptimizeJob, type OptimizeJobMessage } from "@/lib/optimize-job";
 import { fixedMilestoneChoices, loadFixedMilestones, saveFixedMilestones } from "@/lib/optimize-milestones";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
@@ -317,6 +318,10 @@ export default function Dashboard() {
   // until "Apply" stores it as its own plan version.
   const [optimizePlan, setOptimizePlan] = useState<OptimizationPlan | null>(null);
   const [optimizeError, setOptimizeError] = useState<string | null>(null);
+  // The running calculation, while it is in the background: its progress, and the
+  // worker that can be dropped to cancel it. Cancel changes nothing.
+  const [optimizeRun, setOptimizeRun] = useState<OptimizeProgress | null>(null);
+  const optimizeWorker = useRef<Worker | null>(null);
   // The settings dialog comes before the run, so the fixed milestones are chosen
   // first. `null` means closed; a list of ids means open with that selection, and
   // the selection is only remembered when the optimization is actually run —
@@ -1295,6 +1300,13 @@ export default function Dashboard() {
     setOptimizeError(null);
     setOptimizeSettings(loadFixedMilestones(activeProjectId));
   };
+  /** Stops a running calculation: the worker is dropped and nothing is kept. */
+  const cancelOptimizeRun = () => {
+    optimizeWorker.current?.terminate();
+    optimizeWorker.current = null;
+    setOptimizeRun(null);
+  };
+  useEffect(() => () => optimizeWorker.current?.terminate(), []);
   /** Cancel changes nothing: the dialog simply closes, nothing is remembered. */
   const cancelOptimizeSettings = () => setOptimizeSettings(null);
   const runOptimize = () => {
@@ -1303,7 +1315,10 @@ export default function Dashboard() {
     const fixedMilestoneIds = optimizeSettings ?? [];
     saveFixedMilestones(activeProjectId, fixedMilestoneIds);
     setOptimizeSettings(null);
-    const result = optimizeProject({
+    const startedAt = performance.now();
+    // Phase 1 — loading data: gather every project's active version into one plain
+    // job. It is posted to a worker below, so none of this blocks the page.
+    const input = {
       projectId: activeProjectId,
       projects: selectCapacityProjects(projects).map((project) => ({
         projectId: project.id,
@@ -1317,14 +1332,61 @@ export default function Dashboard() {
       mode: activeMode,
       today: todayLineDate,
       fixedMilestoneIds,
-    });
-    if (!result.ok) {
-      setOptimizePlan(null);
-      setOptimizeError(result.error);
+    };
+    const loadedMs = performance.now() - startedAt;
+    setOptimizePlan(null);
+    setOptimizeError(null);
+    setOptimizeRun({ phase: "preparing", ratio: 0, message: "Preparing the calculation…" });
+
+    /** The end of a run, however it ended: nothing is kept from a failed or cancelled one. */
+    const finish = (message: OptimizeJobMessage) => {
+      optimizeWorker.current?.terminate();
+      optimizeWorker.current = null;
+      setOptimizeRun(null);
+      if (message.type === "failed") {
+        setOptimizeError(message.error);
+        console.info(`[optimize] load ${loadedMs.toFixed(1)} ms · failed: ${message.error}`);
+        return;
+      }
+      if (message.type !== "result") {
+        setOptimizeError(message.progress.message);
+        return;
+      }
+      const plan = message.result;
+      if (!plan.ok) {
+        setOptimizeError(plan.error);
+        console.info(`[optimize] load ${loadedMs.toFixed(1)} ms · failed: ${plan.error}`);
+        return;
+      }
+      const { timings } = plan;
+      setOptimizePlan(plan);
+      requestAnimationFrame(() => console.info(
+        `[optimize] load ${loadedMs.toFixed(1)} ms · prepare ${timings.prepareMs.toFixed(1)} ms · optimize ${timings.optimizeMs.toFixed(1)} ms · preview ${timings.reportMs.toFixed(1)} ms · ${timings.evaluations} options · total ${timings.totalMs.toFixed(1)} ms${plan.timeLimited ? " (time limited)" : ""}`,
+      ));
+    };
+
+    // Phases 2 and 3 — the whole calculation runs off the main thread, so the page
+    // stays responsive and Cancel can drop it at any moment. A browser without
+    // workers runs the very same job inline; the result is identical.
+    if (typeof Worker === "undefined") {
+      runOptimizeJob(input, (message) => {
+        if (message.type === "progress") setOptimizeRun(message.progress);
+        else finish(message);
+      });
       return;
     }
-    setOptimizeError(null);
-    setOptimizePlan(result);
+    const worker = new Worker(new URL("../lib/optimize-worker.ts", import.meta.url), { type: "module" });
+    optimizeWorker.current = worker;
+    worker.onmessage = (event: MessageEvent<OptimizeJobMessage>) => {
+      const message = event.data;
+      if (message.type === "progress") {
+        setOptimizeRun(message.progress);
+        return;
+      }
+      finish(message);
+    };
+    worker.onerror = () => finish({ type: "failed", error: "The optimization could not be completed." });
+    worker.postMessage(input);
   };
   const cancelOptimize = () => {
     // Cancel changes nothing: the preview is simply dropped.
@@ -1696,6 +1758,38 @@ a fixed milestone is never moved, and a task that would push it is left alone.
         </div>
       )}
 
+      {optimizeRun && (
+        <div className="modal-backdrop">
+          <div className="task-modal optimize-modal" role="status" aria-live="polite">
+            <div className="modal-heading">
+              <div><div className="eyebrow">OPTIMIZE PLANNING</div><h2>Optimizing…</h2></div>
+            </div>
+            <p className="calendar-copy">
+              The calculation runs in the background in <b>{activeProject.name}</b>, so the page stays responsive — you can keep
+              working. It stops by itself after at most {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds and shows the best
+              valid plan it has found.
+            </p>
+            <div className="optimize-progress" aria-hidden="true">
+              <div
+                className="optimize-progress-fill"
+                style={{ width: `${Math.round(Math.max(0, Math.min(1, optimizeRun.ratio)) * 100)}%` }}
+              />
+            </div>
+            <p className="optimize-hint">
+              {optimizeRun.message}{" "}
+              {optimizeRun.phase === "preparing"
+                ? "Reading the plan, the employees and the weeks this project can use."
+                : optimizeRun.phase === "optimizing"
+                  ? "Trying a limited set of start dates and durations, task by task."
+                  : "Building the preview."}
+            </p>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={cancelOptimizeRun}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {(optimizePlan || optimizeError) && (
         <div className="modal-backdrop" onClick={cancelOptimize}>
           <div className="task-modal optimize-modal" onClick={(event) => event.stopPropagation()}>
@@ -1800,6 +1894,13 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                     </>
                   )}
                 </div>
+
+                {optimizePlan.timeLimited && (
+                  <p className="optimize-hint">
+                    The calculation reached its time budget of {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds and stopped
+                    early with the best valid plan it had found — it may not be optimal, but every rule still holds.
+                  </p>
+                )}
 
                 {nothingToChange && (
                   <div className="optimize-summary-ok">

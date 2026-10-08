@@ -1,11 +1,13 @@
 import {
   addWorkingDays,
+  durationInWorkingDays,
   earliestDependencyStart,
   ensureWorkingDay,
   workingDaysBetween,
   type CalendarSystem,
 } from "./scheduling-engine";
 import {
+  dailyAllocation,
   dependenciesForTasks,
   planFinishDate,
   recalculateTasks,
@@ -14,6 +16,7 @@ import {
   type PlannerTask,
   type PlanMode,
 } from "./planner-model";
+import { availableHours } from "./resource-capacity";
 import {
   aggregatePeriods,
   computeResourceLoads,
@@ -75,6 +78,24 @@ import { shiftDays, weekEnd, weekStart } from "./capacity-period";
  *     smaller extensions.
  * The same input always gives the same result: the search is ordered, bounded and
  * free of any clock or random value.
+ *
+ * HOW IT CALCULATES — a step-by-step walk, never all combinations:
+ *  - everything is prepared once: the dependency order, each task's earliest and
+ *    latest allowed start, and the weekly hours per relevant employee as plain
+ *    numbers (including every other project's share);
+ *  - the movable tasks are then walked one at a time in dependency order, the
+ *    tasks sitting in a week above 100 % first. For each task only its own
+ *    allowed window is tried — every working day as a start and the duration
+ *    steps up to +50 % — and only that one task's hours are swapped, never the
+ *    whole plan;
+ *  - per task the best-scoring option wins; equal scores lose to the smaller
+ *    change, and a tie is still broken by task id, so the result is stable;
+ *  - a window is refreshed only for the tasks that depend on one that moved;
+ *  - after the walk, at most three improvement rounds per phase, and a round that
+ *    brings no improvement ends its phase;
+ *  - the whole run is bounded: a hard option ceiling and a 10-second wall clock,
+ *    after which the best valid plan so far is returned and marked as such.
+ * The page never waits for it: the run is a background worker job.
  */
 
 export const OCCUPANCY_TARGET = 0.9;
@@ -84,18 +105,58 @@ export const OFF_TARGET_MARGIN = 0.1;
 /** A duration may grow by at most this factor of what it was before the run. */
 export const EXTENSION_LIMIT = 1.5;
 
+/**
+ * The duration steps one option may try, as a share of the duration a task had
+ * before the run: 100 %, 110 %, 120 %, 130 %, 140 %, 150 %. Rounded to the task's
+ * own unit, never shorter and never past the +50 % cap.
+ */
+export const DURATION_STEPS = [1, 1.1, 1.2, 1.3, 1.4, 1.5] as const;
+
 const EPSILON = 1e-9;
 
+/**
+ * Where a run spends its time. Reported so a slow project can be diagnosed, and
+ * so a slow phase can be measured instead of guessed at.
+ */
+export interface OptimizeTimings {
+  /** Window, weekly numbers and task order — everything a search needs up front. */
+  prepareMs: number;
+  /** The whole search for improvements. */
+  optimizeMs: number;
+  /** Turning the result into the preview payload (rows, warnings, checks). */
+  reportMs: number;
+  totalMs: number;
+  /**
+   * How many options were scored. Each one only swaps that task's own weekly
+   * hours, so this stays small and grows with the tasks, not with their
+   * combinations.
+   */
+  evaluations: number;
+}
+
+/** A progress message of a running optimization, for a background worker. */
+export interface OptimizeProgress {
+  phase: "preparing" | "optimizing" | "reporting";
+  /** How far the phase is, 0…1. */
+  ratio: number;
+  message: string;
+}
+
+/** Wall-clock reading. Never decides anything unless a limit explicitly allows it. */
+const clock = (): number => (typeof performance === "undefined" ? Date.now() : performance.now());
+
 export const OPTIMIZE_DEFAULTS = {
-  /** Improving rounds applied before the search stops. */
-  maxIterations: 12,
+  /**
+   * The walk over all movable tasks, then at most this many improvement rounds
+   * per phase. A round that changes nothing better is rolled back and ends its
+   * phase, so the search stops on its own — every loop here has a maximum.
+   */
+  maxIterations: 3,
   /** Working days a single candidate may shift, either way. */
   maxShiftDays: 10,
-  /** Candidate tasks considered per round, most float first. */
-  maxTasks: 20,
   /**
    * Duration steps considered per task (the +50% cap is always considered too),
-   * so a long task does not explode the candidate set. 0 turns duration
+   * so a long task does not explode the option set. 0 turns duration
    * extension off and leaves the optimizer to moving tasks only.
    */
   maxExtensionDays: 8,
@@ -105,6 +166,11 @@ export const OPTIMIZE_DEFAULTS = {
    * then is a valid plan, and the same input still gives the same result.
    */
   maxEvaluations: 8000,
+  /**
+   * Wall-clock budget for one run. When it is used up the search stops and the
+   * best valid plan found so far is returned, marked as not necessarily optimal.
+   */
+  timeLimitMs: 10000,
 };
 
 /* ------------------------------------------------------------------- input */
@@ -132,9 +198,10 @@ export interface OptimizeAssignment {
 export interface OptimizeLimits {
   maxIterations?: number;
   maxShiftDays?: number;
-  maxTasks?: number;
   maxExtensionDays?: number;
   maxEvaluations?: number;
+  /** Wall-clock budget of one run; the search stops when it is used up. */
+  timeLimitMs?: number;
 }
 
 export interface OptimizeInput {
@@ -152,6 +219,11 @@ export interface OptimizeInput {
   /** The milestones the user marked "Fixed date" in the settings dialog. */
   fixedMilestoneIds?: string[];
   limits?: OptimizeLimits;
+  /**
+   * Progress of a running optimization. Called a bounded number of times, so a
+   * background worker can show "Optimizing…" and how far the run has come.
+   */
+  onProgress?: (progress: OptimizeProgress) => void;
 }
 
 /* ------------------------------------------------------------------ output */
@@ -313,6 +385,13 @@ export interface OptimizationPlan {
   workHoursPreserved: boolean;
   /** The open project's tasks with the changes applied, same ids, ready to version. */
   tasks: PlannerTask[];
+  /** Where the run spent its time. */
+  timings: OptimizeTimings;
+  /**
+   * True when the wall-clock limit stopped the search early. The plan is valid and
+   * follows every rule, but it may not be optimal — the preview says so.
+   */
+  timeLimited: boolean;
 }
 
 export interface OptimizeFailure {
@@ -399,6 +478,11 @@ function shiftOffsets(laterUpTo: number, earlierUpTo: number): number[] {
 
 export function optimizeProject(input: OptimizeInput): OptimizeResult {
   const limits = { ...OPTIMIZE_DEFAULTS, ...(input.limits ?? {}) };
+  const startedAt = clock();
+  const progress = (phase: OptimizeProgress["phase"], ratio: number, message: string) => {
+    input.onProgress?.({ phase, ratio, message });
+  };
+  progress("preparing", 0, "Preparing the calculation…");
   const openProject = input.projects.find((project) => project.projectId === input.projectId);
   if (!openProject) return { ok: false, error: "That project is not part of this workspace." };
   const source = openProject.tasks;
@@ -691,200 +775,508 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     return null;
   };
 
-  interface ChangeOutcome {
-    tasks?: PlannerTask[];
-    /** A fixed milestone would have had to move for this candidate. */
-    blockedBy?: string;
+  /* ---- preparation: everything the search needs, calculated once ---------- */
+
+  /**
+   * The open project's tasks in dependency order: a predecessor always comes
+   * before its successors, so one walk over this order can change a task knowing
+   * that everything it depends on is already settled. Ties keep the plan's own row
+   * order, which is what makes the walk — and the result — stable.
+   */
+  const dependencyOrder: PlannerTask[] = (() => {
+    const dependencies = dependenciesForTasks(source);
+    const placed = new Set<string>();
+    const order: PlannerTask[] = [];
+    while (order.length < source.length) {
+      const ready = source.filter((task) => !placed.has(task.id) && dependencies.every((dependency) =>
+        dependency.successorId !== task.id || placed.has(dependency.predecessorId) || !sourceById.has(dependency.predecessorId)));
+      // A dependency cycle leaves tasks behind; the planner refuses such a plan
+      // anyway, and this keeps the walk bounded instead of looping forever.
+      if (!ready.length) break;
+      for (const task of ready) {
+        placed.add(task.id);
+        order.push(task);
+      }
+    }
+    for (const task of source) if (!placed.has(task.id)) order.push(task);
+    return order;
+  })();
+  const orderIndex = new Map(dependencyOrder.map((task, index) => [task.id, index]));
+  /** Who follows whom, so a moved task updates exactly the windows it affects. */
+  const successorsOf = new Map<string, string[]>();
+  for (const dependency of dependenciesForTasks(source)) {
+    successorsOf.set(dependency.predecessorId, [...(successorsOf.get(dependency.predecessorId) ?? []), dependency.successorId]);
   }
 
   /**
-   * Applies one candidate — a whole-start-date shift and/or a duration extension
-   * — and re-plans the network. Returns no tasks when the change is empty or
-   * illegal (before a dependency, no-op), and names the fixed milestone when the
-   * candidate could only work by moving one.
+   * The weekly hours of the open project, per employee and week, as plain numbers,
+   * plus the hours each task contributes to them. Both are built once: an option is
+   * then only a swap of that one task's own hours, never a re-calculation of the
+   * project and never a reload of its data.
    */
-  const applyTaskChange = (tasks: PlannerTask[], taskId: string, shiftDays: number, extensionDays: number): ChangeOutcome => {
-    const task = tasks.find((candidate) => candidate.id === taskId);
-    if (!task) return {};
-    if (!shiftDays && !extensionDays) return {};
-    let target = task.start;
-    let constraint = task.startConstraint;
-    if (shiftDays) {
-      // A task may never start before its dependencies permit, whatever the shift.
-      const earliest = earliestDependencyStart(task, tasks, dependenciesForTasks(tasks), {
-        calendarSystem: system,
-        projectCalendarId: calendarId,
-      })?.date ?? null;
-      target = ensureWorkingDay(addWorkingDays(task.start, shiftDays, task.calendarId ?? calendarId, system), task.calendarId ?? calendarId, system);
-      if (earliest && target < earliest) return {};
-      if (target === task.start) return {};
-      constraint = earliest && target > earliest ? target : undefined;
-    }
-    // The +50% cap is a hard limit, applied here as well as in the candidate
-    // list, so no path can ever grow a task past it.
-    const cap = maxDurationFor(baselineDurations.get(taskId) ?? task.duration, isMilestoneRow(task));
-    const next = tasks.map((candidate) => (candidate.id === taskId
-      ? {
-          ...candidate,
-          start: target,
-          duration: Math.min(candidate.duration + extensionDays, cap),
-          startConstraint: constraint,
-          startConstraintActive: false,
-        }
-      : candidate));
-    const recalculated = recalculateTasks(next, { direction: "forward", calendarSystem: system, projectCalendarId: calendarId });
-    if (recalculated.error) return {};
-    // The search only ever works inside the period the run is about: a candidate
-    // that would push work out of it is refused, so no task can leave the weeks
-    // the calculation and the preview cover.
-    if (!insideWindow(recalculated.tasks)) return {};
-    // A fixed milestone that the re-planning would have shifted is a refusal,
-    // never a silent move.
-    const blockedBy = movedFixedMilestone(recalculated.tasks);
-    if (blockedBy) return { blockedBy };
-    return { tasks: recalculated.tasks };
+  const movableList = movableTasks(source);
+  const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
+  const employeeIndexOf = new Map(resources.map((resource, index) => [resource.id, index]));
+  const weekIndexOf = new Map(weekStarts.map((week, index) => [week, index]));
+  const weekCount = weekStarts.length;
+  const slotCount = resources.length * weekCount;
+  const slotOf = (employeeIndex: number, weekIndex: number) => employeeIndex * weekCount + weekIndex;
+
+  const otherBySlot = new Array<number>(slotCount).fill(0);
+  const availableBySlot = new Array<number>(slotCount).fill(0);
+  resources.forEach((resource, employeeIndex) => {
+    weekStarts.forEach((week, weekIndex) => {
+      const slot = slotOf(employeeIndex, weekIndex);
+      availableBySlot[slot] = availability.get(`${resource.id}|${week}`) ?? 0;
+      otherBySlot[slot] = otherLoad.get(`${resource.id}|${week}`) ?? 0;
+    });
+  });
+  const load = new Array<number>(slotCount).fill(0);
+
+  /** The work finish a task has for a start and duration, exactly as the planner sets it. */
+  const finishOf = (task: PlannerTask, start: string, duration: number): string => {
+    const calendar = task.calendarId ?? calendarId;
+    const span = isMilestoneRow(task) ? 1 : durationInWorkingDays({ ...task, duration });
+    return span <= 1 ? ensureWorkingDay(start, calendar, system) : addWorkingDays(start, span - 1, calendar, system);
   };
 
-  let current = source;
-  let computed = baselineComputed;
-  let currentScore = score(current);
+  /**
+   * The weekly hours one task books per employee for a given start and duration —
+   * the same daily split the Capacity screen shows, so the two can never disagree.
+   */
+  const cellsOf = (task: PlannerTask, start: string, duration: number): { slot: number; hours: number }[] => {
+    const totals = new Map<number, number>();
+    const virtualTask: PlannerTask = { ...task, start, duration };
+    for (const resourceId of assignedByTask.get(task.id) ?? []) {
+      const employeeIndex = employeeIndexOf.get(resourceId);
+      const resource = resourceById.get(resourceId);
+      if (employeeIndex === undefined || !resource) continue;
+      const allocation = dailyAllocation(virtualTask, system, task.calendarId ?? calendarId, (date) => availableHours(resource, date, system) > 0);
+      for (const day of allocation) {
+        if (day.hours <= 0) continue;
+        const weekIndex = weekIndexOf.get(weekStart(day.date));
+        if (weekIndex === undefined) continue;
+        const slot = slotOf(employeeIndex, weekIndex);
+        totals.set(slot, (totals.get(slot) ?? 0) + day.hours);
+      }
+    }
+    return [...totals.entries()].map(([slot, hours]) => ({ slot, hours }));
+  };
 
-  interface Candidate {
-    tasks: PlannerTask[];
-    score: Score;
-    taskId: string;
-    shift: number;
-    extension: number;
-    float: number;
-    /** The task's start before the change, used only to break a tie. */
+  /** Where each task sits and which weekly hours it books there. */
+  interface TaskState {
     start: string;
+    duration: number;
+    cells: { slot: number; hours: number }[];
+  }
+  const states = new Map<string, TaskState>();
+  for (const task of source) {
+    const cells = carriedTasks([task]).length ? cellsOf(task, task.start, task.duration) : [];
+    states.set(task.id, { start: task.start, duration: task.duration, cells });
+    for (const cell of cells) load[cell.slot] += cell.hours;
+  }
+
+  /** Priorities 1 and 4 over the weekly numbers: hours over 100 %, distance from 90 %. */
+  const loadScore = (): { excess: number; deviation: number } => {
+    let excess = 0;
+    let deviation = 0;
+    for (let slot = 0; slot < slotCount; slot += 1) {
+      const available = availableBySlot[slot];
+      const allocated = load[slot] + otherBySlot[slot];
+      if (allocated <= 0 || available <= 0) continue;
+      excess += Math.max(0, allocated - available);
+      deviation += Math.abs(allocated - OCCUPANCY_TARGET * available);
+    }
+    return { excess, deviation };
+  };
+
+  /** Priority 5, tracked per task, so an option only has to adjust one entry. */
+  const changedMagnitude = new Map<string, number>();
+  const refreshChanged = (taskId: string, start: string, duration: number) => {
+    const origin = sourceById.get(taskId);
+    const baseline = baselineDurations.get(taskId) ?? duration;
+    const magnitude = origin
+      ? Math.abs(workingDayGap(origin.start, start, calendarId, system)) + Math.max(0, duration - baseline)
+      : 0;
+    if (magnitude > 0) changedMagnitude.set(taskId, magnitude);
+    else changedMagnitude.delete(taskId);
+  };
+  const changeCost = (): number => {
+    let magnitude = 0;
+    for (const value of changedMagnitude.values()) magnitude += value;
+    return changedMagnitude.size * 1000 + magnitude;
+  };
+  for (const task of source) refreshChanged(task.id, task.start, task.duration);
+
+  /** The score of the plan as it stands, built from the weekly numbers alone. */
+  const scoreOfLoad = (finishDelta: number): Score => ({ ...loadScore(), violations: 0, finishDelta, changeCost: changeCost() });
+
+  /** The planned finish of every task, kept up to date as tasks move. */
+  const finishById = new Map(source.map((task) => [task.id, task.finish]));
+  const maxFinishWithout = (taskId: string): string => {
+    let latest = "";
+    for (const [id, value] of finishById) if (id !== taskId && value > latest) latest = value;
+    return latest;
+  };
+
+  /**
+   * The earliest start a task's dependencies allow in the plan as it stands. Cached
+   * and invalidated only for the tasks that depend on one that moved, so no window
+   * is ever derived from stale dates and none is derived for the whole project.
+   */
+  const depEarliestCache = new Map<string, string | null>();
+  const depEarliest = (task: PlannerTask): string | null => {
+    const cached = depEarliestCache.get(task.id);
+    if (cached !== undefined) return cached;
+    const scheduled = [...states.entries()].map(([id, state]) => ({
+      ...sourceById.get(id)!,
+      start: state.start,
+      duration: state.duration,
+      finish: finishById.get(id) ?? state.start,
+    }));
+    const value = earliestDependencyStart(task, scheduled, dependenciesForTasks(scheduled), {
+      calendarSystem: system,
+      projectCalendarId: calendarId,
+    })?.date ?? null;
+    depEarliestCache.set(task.id, value);
+    return value;
+  };
+
+  /** Fixed milestones a round needed to move, with the weeks and employees that were over 100 %. */
+  const blockedByMilestone = new Map<string, { resources: Set<string>; weeks: Set<string> }>();
+  const recordMilestoneBlocker = (milestoneId: string) => {
+    const record = blockedByMilestone.get(milestoneId) ?? { resources: new Set<string>(), weeks: new Set<string>() };
+    for (let slot = 0; slot < slotCount; slot += 1) {
+      if (availableBySlot[slot] <= 0) continue;
+      if (load[slot] + otherBySlot[slot] <= availableBySlot[slot] + EPSILON) continue;
+      record.resources.add(resources[Math.floor(slot / weekCount)].id);
+      record.weeks.add(weekStarts[slot % weekCount]);
+    }
+    blockedByMilestone.set(milestoneId, record);
+  };
+
+  let currentScore: Score = scoreOfLoad(0);
+  let current = source;
+  /** Options scored so far, over the whole run (a hard ceiling, always ends). */
+  let evaluations = 0;
+  /** True once the wall-clock limit stopped the search before it was finished. */
+  let timeLimited = false;
+
+  /* ---- one task at a time, with a bounded set of options ------------------ */
+
+  /** Where one option would put one task: its start and its duration. */
+  interface TaskOption {
+    start: string;
+    duration: number;
+    /** Working days against where the task sits now: positive is later. */
+    shift: number;
+    /** Extra duration against where the task sits now. */
+    extension: number;
+    /** Working days the project end would move. */
+    finishDelta: number;
   }
 
   /**
-   * Which of two equally good changes to take: the smallest change first ("move
-   * as little as possible"), then the task with the most float, then the task
-   * that already starts latest, then a stable id order.
+   * The options of one task, and nothing else: every working day of its allowed
+   * window as a start date, and the promised duration steps. Never a combination
+   * of several tasks, and never a duration past the +50 % cap.
    */
-  const breaksTie = (candidate: Candidate, incumbent: Candidate): boolean => {
+  const optionsFor = (task: PlannerTask, allowDelay: boolean, laterLimit: number): TaskOption[] => {
+    const state = states.get(task.id)!;
+    const calendar = task.calendarId ?? calendarId;
+    const baseline = baselineDurations.get(task.id) ?? task.duration;
+    const cap = maxDurationFor(baseline, isMilestoneRow(task));
+    const durations = new Set<number>([state.duration]);
+    if (limits.maxExtensionDays > 0) {
+      for (const step of DURATION_STEPS) {
+        durations.add(Math.max(state.duration, Math.min(cap, Math.round(baseline * step))));
+      }
+    }
+    // The allowed window: as early as the dependencies permit, never further than
+    // one bounded shift back, and never a day outside the weeks this run covers.
+    const earliestDependency = depEarliest(task);
+    let first = addWorkingDays(state.start, -limits.maxShiftDays, calendar, system);
+    if (earliestDependency && earliestDependency > first) first = earliestDependency;
+    first = ensureWorkingDay(first, calendar, system);
+    const last = ensureWorkingDay(addWorkingDays(state.start, laterLimit, calendar, system), calendar, system);
+    const otherFinish = maxFinishWithout(task.id);
+    const options: TaskOption[] = [];
+    for (let start = first; start <= last; start = addWorkingDays(start, 1, calendar, system)) {
+      if (start < state.start && earliestDependency && start < earliestDependency) continue;
+      for (const duration of [...durations].sort((left, right) => left - right)) {
+        if (start === state.start && duration === state.duration) continue;
+        const finish = finishOf(task, start, duration);
+        if (weekWindow && (start < weekWindow.start || finish > weekWindow.end)) continue;
+        const projectFinish = finish > otherFinish ? finish : otherFinish;
+        const finishDelta = Math.max(0, workingDayGap(oldFinish, projectFinish, calendarId, system));
+        // Rounds that may not change the project end refuse exactly the options
+        // that would; the rounds that may accept the smallest delay measured here.
+        if (!allowDelay && projectFinish !== oldFinish) continue;
+        options.push({
+          start,
+          duration,
+          shift: workingDayGap(state.start, start, calendar, system),
+          extension: duration - state.duration,
+          finishDelta,
+        });
+      }
+    }
+    return options;
+  };
+
+  /**
+   * The score an option would produce, without keeping it. Only the slots of the
+   * task that changes are touched — the weeks and employees it affects, and no
+   * other part of the plan is re-calculated.
+   */
+  const optionScore = (task: PlannerTask, option: TaskOption): Score => {
+    const state = states.get(task.id)!;
+    for (const cell of state.cells) load[cell.slot] -= cell.hours;
+    const cells = cellsOf(task, option.start, option.duration);
+    for (const cell of cells) load[cell.slot] += cell.hours;
+    const { excess, deviation } = loadScore();
+    for (const cell of cells) load[cell.slot] -= cell.hours;
+    for (const cell of state.cells) load[cell.slot] += cell.hours;
+    const before = changedMagnitude.get(task.id) ?? 0;
+    const origin = sourceById.get(task.id)?.start ?? option.start;
+    const magnitude = Math.abs(workingDayGap(origin, option.start, calendarId, system))
+      + Math.max(0, option.duration - (baselineDurations.get(task.id) ?? option.duration));
+    return {
+      excess,
+      violations: 0,
+      finishDelta: option.finishDelta,
+      deviation,
+      changeCost: currentScore.changeCost - (before > 0 ? 1000 + before : 0) + (magnitude > 0 ? 1000 + magnitude : 0),
+    };
+  };
+
+  /**
+   * Which of two equally good options of one task to take: the smallest change
+   * first, then the later start, then the smaller extension. The option order is
+   * fixed, so a full tie keeps the first found — the same input always gives the
+   * same plan.
+   */
+  const breaksTie = (candidate: TaskOption, incumbent: TaskOption): boolean => {
     const candidateSize = Math.abs(candidate.shift) + candidate.extension;
     const incumbentSize = Math.abs(incumbent.shift) + incumbent.extension;
     if (candidateSize !== incumbentSize) return candidateSize < incumbentSize;
-    if (candidate.float !== incumbent.float) return candidate.float > incumbent.float;
     if (candidate.start !== incumbent.start) return candidate.start > incumbent.start;
     if (candidate.shift !== incumbent.shift) return candidate.shift > incumbent.shift;
     if (candidate.extension !== incumbent.extension) return candidate.extension < incumbent.extension;
-    return candidate.taskId < incumbent.taskId;
+    return false;
   };
 
-  /** Scored candidates so far — the search stops once the ceiling is reached. */
-  let evaluations = 0;
-  /**
-   * Fixed milestones a candidate needed to move, with the weeks and employees
-   * that were over capacity at that moment. Reported when the problem is still
-   * there at the end — that is exactly "only solvable by moving the milestone".
-   */
-  const blockedByMilestone = new Map<string, { resources: Set<string>; weeks: Set<string> }>();
-  let overloadRows: WeekRow[] | null = null;
-  const currentOverloads = (): WeekRow[] => {
-    overloadRows ??= weekRows(current).filter((row) => row.allocated > row.available + EPSILON);
-    return overloadRows;
-  };
+  /** Options that only worked by moving a fixed milestone: never tried again. */
+  const refused = new Set<string>();
+  const optionKey = (taskId: string, option: TaskOption) => `${taskId}|${option.start}|${option.duration}`;
 
-  /**
-   * One greedy round: every movable task, every allowed shift and extension, and
-   * the single best improving change. Tasks are considered most-float first
-   * (step 2's order) and equally good changes are separated by `breaksTie`, so
-   * the same input always produces the same plan.
-   */
-  const searchRound = (allowFinishChange: boolean): Candidate | null => {
-    const entries = movableTasks(computed)
-      .map((task) => ({
-        task,
-        float: baselineById.get(task.id)?.totalFloat ?? 0,
-        critical: baselineById.get(task.id)?.isCritical ?? false,
-        // The +50% cap is measured against the duration the task had before this
-        // run, so the headroom that is left is the cap minus what it has already
-        // grown to — never the cap itself again, or a second round could push a
-        // task past +50%.
-        maxExtension: Math.max(0, maxDurationFor(baselineDurations.get(task.id) ?? task.duration, isMilestoneRow(task)) - task.duration),
-      }))
-      // Step 2 uses the float only; step 3 may move the critical path too.
-      .filter((entry) => (allowFinishChange ? true : (!entry.critical && entry.float > 0)))
-      .sort((left, right) => right.float - left.float || left.task.id.localeCompare(right.task.id))
-      .slice(0, limits.maxTasks);
-
-    let best: Candidate | null = null;
-    for (const entry of entries) {
-      const laterUpTo = allowFinishChange ? limits.maxShiftDays : Math.min(limits.maxShiftDays, Math.floor(entry.float));
-      for (const shift of shiftOffsets(laterUpTo, limits.maxShiftDays)) {
-        for (const extension of extensionSteps(entry.maxExtension, limits.maxExtensionDays)) {
-          if (evaluations >= limits.maxEvaluations) break;
-          if (!shift && !extension) continue;
-          const outcome = applyTaskChange(current, entry.task.id, shift, extension);
-          if (outcome.blockedBy) {
-            const record = blockedByMilestone.get(outcome.blockedBy) ?? { resources: new Set<string>(), weeks: new Set<string>() };
-            for (const row of currentOverloads()) {
-              record.resources.add(row.resourceId);
-              record.weeks.add(row.weekStart);
-            }
-            blockedByMilestone.set(outcome.blockedBy, record);
-            continue;
-          }
-          if (!outcome.tasks) continue;
-          evaluations += 1;
-          const candidateScore = score(outcome.tasks);
-          // Step 2 may never change the project end date; step 3 accepts a delay
-          // but measures it as a delay only — finishing earlier is never a reason
-          // to keep moving the plan backwards.
-          if (allowFinishChange) {
-            candidateScore.finishDelta = Math.max(0, workingDayGap(oldFinish, planFinishDate(outcome.tasks), calendarId, system));
-          } else if (planFinishDate(outcome.tasks) !== oldFinish) {
-            continue;
-          }
-          // A round only ever applies a change that makes the plan strictly
-          // better, so the search cannot wander between equally good plans.
-          if (!ranksBetter(candidateScore, currentScore)) continue;
-          const candidate: Candidate = {
-            tasks: outcome.tasks,
-            score: candidateScore,
-            taskId: entry.task.id,
-            shift,
-            extension,
-            float: entry.float,
-            start: entry.task.start,
-          };
-          if (best) {
-            const improves = ranksBetter(candidateScore, best.score);
-            const equal = isEqualScore(candidateScore, best.score);
-            if (!improves && !(equal && breaksTie(candidate, best))) continue;
-          }
-          best = candidate;
-        }
+  /** The best option of one task, ranked by the existing priorities, or none. */
+  const bestOption = (task: PlannerTask, allowDelay: boolean, laterLimit: number): TaskOption | null => {
+    let best: TaskOption | null = null;
+    let bestScore: Score | null = null;
+    for (const option of optionsFor(task, allowDelay, laterLimit)) {
+      if (refused.has(optionKey(task.id, option))) continue;
+      evaluations += 1;
+      if (evaluations > limits.maxEvaluations) break;
+      const candidate = optionScore(task, option);
+      // A task is only ever changed when the change makes the plan strictly
+      // better, exactly as before: no wandering between equally good plans.
+      if (!ranksBetter(candidate, currentScore)) continue;
+      if (!best || !bestScore || ranksBetter(candidate, bestScore) || (isEqualScore(candidate, bestScore) && breaksTie(option, best))) {
+        best = option;
+        bestScore = candidate;
       }
     }
     return best;
   };
 
-  // Step 2 — use float first, and never change the project end date.
-  for (let iteration = 0; iteration < limits.maxIterations; iteration += 1) {
-    const round = searchRound(false);
-    if (!round) break;
-    current = round.tasks;
-    computed = withCalculatedPlanningFields(current, system, calendarId);
-    currentScore = score(current);
-    overloadRows = null;
-  }
+  /** Applies one option: the task's own hours move, and nothing else is re-calculated. */
+  const applyOption = (task: PlannerTask, option: TaskOption) => {
+    const state = states.get(task.id)!;
+    for (const cell of state.cells) load[cell.slot] -= cell.hours;
+    state.start = option.start;
+    state.duration = option.duration;
+    state.cells = cellsOf(task, option.start, option.duration);
+    for (const cell of state.cells) load[cell.slot] += cell.hours;
+    finishById.set(task.id, finishOf(task, option.start, option.duration));
+    refreshChanged(task.id, option.start, option.duration);
+    // Only the windows of the tasks that depend on this one can have changed.
+    for (const successorId of successorsOf.get(task.id) ?? []) depEarliestCache.delete(successorId);
+    currentScore = scoreOfLoad(0);
+  };
 
-  // Step 3 — only when a task of the open project still overloads someone, the
-  // critical path may change too, delaying the project as little as possible.
-  for (let iteration = 0; currentScore.excess > EPSILON && iteration < limits.maxIterations; iteration += 1) {
-    const round = searchRound(true);
-    if (!round) break;
-    current = round.tasks;
-    computed = withCalculatedPlanningFields(current, system, calendarId);
-    currentScore = score(current);
-    overloadRows = null;
+  const prepareMs = clock() - startedAt;
+  progress("optimizing", 0, "Optimizing…");
+  const searchStart = clock();
+
+  /** A point the search can always return to: one whole, valid plan. */
+  interface SearchSnapshot {
+    states: Map<string, TaskState>;
+    load: number[];
+    finishById: Map<string, string>;
+    changedMagnitude: Map<string, number>;
+    score: Score;
+    current: PlannerTask[];
   }
+  const takeSnapshot = (): SearchSnapshot => ({
+    states: new Map([...states].map(([id, state]) => [id, { ...state, cells: [...state.cells] }])),
+    load: [...load],
+    finishById: new Map(finishById),
+    changedMagnitude: new Map(changedMagnitude),
+    score: currentScore,
+    current,
+  });
+  const restore = (snapshot: SearchSnapshot) => {
+    states.clear();
+    for (const [id, state] of snapshot.states) states.set(id, state);
+    for (let slot = 0; slot < slotCount; slot += 1) load[slot] = snapshot.load[slot];
+    finishById.clear();
+    for (const [id, value] of snapshot.finishById) finishById.set(id, value);
+    changedMagnitude.clear();
+    for (const [id, value] of snapshot.changedMagnitude) changedMagnitude.set(id, value);
+    depEarliestCache.clear();
+    currentScore = snapshot.score;
+    current = snapshot.current;
+  };
+
+  /** The plan the walk has built, in the shape the planner expects to receive. */
+  const plannedTasks = (): PlannerTask[] => source.map((task) => {
+    const state = states.get(task.id)!;
+    const dependencyEarliest = depEarliest({ ...task, start: state.start, duration: state.duration });
+    const constraint = dependencyEarliest && state.start > dependencyEarliest ? state.start : task.startConstraint;
+    return { ...task, start: state.start, duration: state.duration, startConstraint: constraint, startConstraintActive: false };
+  });
+
+  /**
+   * Takes the planner's own schedule as the truth after a round: it is what
+   * "Apply" writes, it can pull a task back to what its dependencies allow and
+   * push a successor along, and it is where a fixed milestone would show up as
+   * moved. The weekly numbers are rebuilt from it, so the next round starts from
+   * the plan as it really is.
+   */
+  const adoptScheduled = (tasks: PlannerTask[]) => {
+    load.fill(0);
+    for (const task of tasks) {
+      const cells = carriedTasks([task]).length ? cellsOf(task, task.start, task.duration) : [];
+      states.set(task.id, { start: task.start, duration: task.duration, cells });
+      for (const cell of cells) load[cell.slot] += cell.hours;
+      finishById.set(task.id, task.finish);
+      refreshChanged(task.id, task.start, task.duration);
+    }
+    depEarliestCache.clear();
+    current = tasks;
+    currentScore = scoreOfLoad(0);
+  };
+
+  /**
+   * One improvement round: every movable task once, in dependency order, with the
+   * tasks that sit in a week above 100 % first. Each task contributes its best
+   * option, and the options are then applied best score first, smallest change
+   * next, task id last — so an equally good but smaller change is never beaten by
+   * a bigger one, and the same input always gives the same plan.
+   */
+  const runRound = (allowDelay: boolean, floatOnly: boolean): string[] => {
+    const overloaded = new Set<string>();
+    for (const [taskId, state] of states) {
+      if (state.cells.some((cell) => load[cell.slot] + otherBySlot[cell.slot] > availableBySlot[cell.slot] + EPSILON)) {
+        overloaded.add(taskId);
+      }
+    }
+    const walk = movableList
+      // A round that may not change the project end only changes tasks that have
+      // float to spend, exactly as before: a task on the critical path is left to
+      // the rounds that may accept a delay.
+      .filter((task) => !floatOnly || (!(baselineById.get(task.id)?.isCritical ?? false) && (baselineById.get(task.id)?.totalFloat ?? 0) > 0))
+      .sort((left, right) => {
+        const byOverload = Number(!overloaded.has(left.id)) - Number(!overloaded.has(right.id));
+        if (byOverload !== 0) return byOverload;
+        return (orderIndex.get(left.id) ?? 0) - (orderIndex.get(right.id) ?? 0);
+      });
+    const chosen: { task: PlannerTask; option: TaskOption; score: Score }[] = [];
+    for (const task of walk) {
+      // Every loop is bounded: the option count by a ceiling, the time by the wall clock.
+      if (clock() - searchStart > limits.timeLimitMs) {
+        timeLimited = true;
+        break;
+      }
+      const float = baselineById.get(task.id)?.totalFloat ?? 0;
+      const laterLimit = floatOnly ? Math.min(limits.maxShiftDays, Math.floor(float)) : limits.maxShiftDays;
+      const option = bestOption(task, allowDelay, laterLimit);
+      if (!option) continue;
+      chosen.push({ task, option, score: optionScore(task, option) });
+    }
+    chosen.sort((left, right) => {
+      if (ranksBetter(left.score, right.score)) return -1;
+      if (ranksBetter(right.score, left.score)) return 1;
+      const leftSize = Math.abs(left.option.shift) + left.option.extension;
+      const rightSize = Math.abs(right.option.shift) + right.option.extension;
+      if (leftSize !== rightSize) return leftSize - rightSize;
+      return left.task.id.localeCompare(right.task.id);
+    });
+    const applied: string[] = [];
+    for (const entry of chosen) {
+      // Applying one change can make another one pointless: a change is only kept
+      // while it still makes the plan strictly better.
+      if (!ranksBetter(optionScore(entry.task, entry.option), currentScore)) continue;
+      applyOption(entry.task, entry.option);
+      applied.push(optionKey(entry.task.id, entry.option));
+    }
+    return applied;
+  };
+
+  /**
+   * The rounds: at most `rounds` of them, each verified against the planner's own
+   * schedule. A round that does not make the whole plan better is rolled back —
+   * which is also how the search stops early.
+   */
+  const runPhase = (allowDelay: boolean, floatOnly: boolean, rounds: number) => {
+    for (let round = 0; round < rounds; round += 1) {
+      if (timeLimited) break;
+      if (allowDelay && currentScore.excess <= EPSILON) break;
+      if (clock() - searchStart > limits.timeLimitMs) {
+        timeLimited = true;
+        break;
+      }
+      const snapshot = takeSnapshot();
+      const applied = runRound(allowDelay, floatOnly);
+      if (!applied.length) break;
+      const scheduled = recalculateTasks(plannedTasks(), {
+        direction: "forward",
+        calendarSystem: system,
+        projectCalendarId: calendarId,
+      });
+      const blocker = scheduled.error ? null : movedFixedMilestone(scheduled.tasks);
+      if (scheduled.error || blocker || !insideWindow(scheduled.tasks)) {
+        // A round that could only work by moving a fixed milestone is refused
+        // outright — the same answer as ever, and the options that needed it are
+        // never tried again.
+        for (const key of applied) refused.add(key);
+        // Recorded from the plan as it was, so the weeks that are still over 100 %
+        // are the ones the pinned milestone is standing in the way of.
+        restore(snapshot);
+        if (blocker) recordMilestoneBlocker(blocker);
+        continue;
+      }
+      adoptScheduled(scheduled.tasks);
+      if (!ranksBetter(currentScore, snapshot.score)) {
+        restore(snapshot);
+        break;
+      }
+      progress("optimizing", Math.min(0.95, 0.15 + (0.8 * (round + 1)) / Math.max(1, rounds)), "Optimizing…");
+    }
+  };
+
+  // Float first: a round may move a task, but never the project end date.
+  runPhase(false, true, Math.max(1, limits.maxIterations));
+  // Only while a task of the project still overloads someone may the critical
+  // path change too, delaying the project as little as possible.
+  runPhase(true, false, Math.max(1, limits.maxIterations));
+
+
+
+  const optimizeMs = clock() - searchStart;
+  progress("reporting", 0, "Building the preview…");
+  const reportStart = clock();
 
   /* ------------------------------------------------------------- reporting */
 
@@ -993,14 +1385,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     }))
     .sort((left, right) => left.resourceName.localeCompare(right.resourceName) || left.resourceId.localeCompare(right.resourceId));
 
-  /**
-   * Who follows whom, so a fixed milestone can be named as the reason a task
-   * cannot give way without moving the date the user pinned.
-   */
-  const successorsOf = new Map<string, string[]>();
-  for (const dependency of dependenciesForTasks(source)) {
-    successorsOf.set(dependency.predecessorId, [...(successorsOf.get(dependency.predecessorId) ?? []), dependency.successorId]);
-  }
+  /** Everything that follows a task, so a pinned milestone can be named as the reason. */
   const downstreamOf = (taskId: string): Set<string> => {
     const seen = new Set<string>();
     const queue = [...(successorsOf.get(taskId) ?? [])];
@@ -1013,6 +1398,33 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     return seen;
   };
 
+  /** The fixed milestones that follow a task, named once each. */
+  const pinnedMilestonesOf = new Map<string, string[]>();
+  for (const task of source) {
+    pinnedMilestonesOf.set(task.id, [...downstreamOf(task.id)].filter((id) => fixedMilestoneIds.has(id)));
+  }
+
+  /**
+   * How far each task may move or grow, worked out once from the prepared facts
+   * instead of re-deriving the dependency network for every week.
+   */
+  const allowedWindow = new Map<string, { from: string; to: string }>();
+  const allowedWindowOf = (task: PlannerTask): { from: string; to: string } => {
+    const cached = allowedWindow.get(task.id);
+    if (cached) return cached;
+    const calendar = task.calendarId ?? calendarId;
+    const searchBound = addWorkingDays(task.start, -limits.maxShiftDays, calendar, system);
+    const earliest = depEarliest(task);
+    const from = ensureWorkingDay(earliest && earliest > searchBound ? earliest : searchBound, calendar, system);
+    const duration = states.get(task.id)?.duration ?? task.duration;
+    const headroom = Math.max(0, maxDurationFor(baselineDurations.get(task.id) ?? duration, isMilestoneRow(task)) - duration);
+    const finish = finishById.get(task.id) ?? task.finish;
+    const to = ensureWorkingDay(addWorkingDays(finish, limits.maxShiftDays + headroom, calendar, system), calendar, system);
+    const value = { from, to };
+    allowedWindow.set(task.id, value);
+    return value;
+  };
+
   /**
    * The rule that stopped a task from being placed in one week — the honest answer
    * to "why is this week still far below 90%?". `null` when no rule applies, i.e.
@@ -1022,19 +1434,17 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     if (input.mode === "monitoring" && task.start <= input.today) {
       return `“${task.name}” has already started, and Monitoring keeps started work where it is`;
     }
-    const pinned = [...downstreamOf(task.id)].filter((id) => fixedMilestoneIds.has(id));
+    const pinned = pinnedMilestonesOf.get(task.id) ?? [];
     if (pinned.length) {
       const names = pinned.map((id) => sourceById.get(id)?.name ?? id);
       return `moving or extending “${task.name}” would shift the fixed milestone${names.length > 1 ? "s" : ""} ${names.join(", ")}`;
     }
-    const earliest = earliestDependencyStart(task, current, dependenciesForTasks(current), {
-      calendarSystem: system,
-      projectCalendarId: calendarId,
-    })?.date ?? null;
+    const earliest = depEarliest(task);
     if (earliest && earliest > week.weekEnd) {
       return `“${task.name}” cannot start before ${earliest}, after its predecessor`;
     }
-    const headroom = maxDurationFor(baselineDurations.get(task.id) ?? task.duration, isMilestoneRow(task)) - task.duration;
+    const duration = states.get(task.id)?.duration ?? task.duration;
+    const headroom = maxDurationFor(baselineDurations.get(task.id) ?? duration, isMilestoneRow(task)) - duration;
     if (headroom <= 0) return `the +50% limit leaves “${task.name}” no longer duration to spread over`;
     const float = baselineById.get(task.id)?.totalFloat ?? 0;
     if (float <= 0) return `“${task.name}” has no float, so moving it later would delay the project end`;
@@ -1044,9 +1454,10 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   /** Every rule that blocks a move or extension able to reach one week. */
   const blockedInWeek = (week: WeekRow): string[] => {
     const rules = new Set<string>();
-    for (const task of movableTasks(computed)) {
-      if (earliestAllowedStart(task, current) > week.weekEnd) continue;
-      if (latestAllowedEnd(task) < week.weekStart) continue;
+    for (const task of movableList) {
+      const window = allowedWindowOf(task);
+      if (window.from > week.weekEnd) continue;
+      if (week.weekStart > window.to) continue;
       const rule = blockedRule(task, week);
       if (rule) rules.add(rule);
     }
@@ -1173,8 +1584,13 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     return !after || Math.max(0, after.work ?? 0) === Math.max(0, task.work ?? 0);
   });
 
+  const reportMs = clock() - reportStart;
   return {
     ok: true,
+    timings: { prepareMs, optimizeMs, reportMs, totalMs: clock() - startedAt, evaluations },
+    // True when the wall-clock limit stopped the search: the plan is whole and
+    // follows every rule, but the preview says it may not be optimal.
+    timeLimited,
     moves,
     movedCriticalTasks: moves.some((move) => move.critical),
     milestones,
