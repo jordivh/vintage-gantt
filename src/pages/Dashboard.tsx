@@ -24,6 +24,7 @@ import {
   Plus,
   Redo2,
   RotateCcw,
+  Sparkles,
   Layers,
   Trash2,
   TriangleAlert,
@@ -48,6 +49,7 @@ import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
 import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engine";
+import { optimizeProject, OCCUPANCY_TARGET, type OptimizationPlan } from "@/lib/resource-optimizer";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -310,6 +312,10 @@ export default function Dashboard() {
   const [baselinePendingDelete, setBaselinePendingDelete] = useState<Baseline | null>(null);
   const [baselineError, setBaselineError] = useState<string | null>(null);
   const [baselineOpen, setBaselineOpen] = useState(false);
+  // Resource optimization: the preview is computed first and nothing changes
+  // until "Apply" stores it as its own plan version.
+  const [optimizePlan, setOptimizePlan] = useState<OptimizationPlan | null>(null);
+  const [optimizeError, setOptimizeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -1257,6 +1263,61 @@ export default function Dashboard() {
     setVersionDialog(false);
     toast.success("New version created in Planning mode");
   };
+  /**
+   * Resource optimization: computes a preview for the open project only.
+   *
+   * The whole company's active versions are handed in — so every employee's
+   * occupancy counts the work of the other projects — but only this project's
+   * rows are ever returned as movable. Nothing is written: the result is shown
+   * first, and only "Apply" turns it into a new plan version.
+   */
+  const openOptimize = () => {
+    setOverflowOpen(false);
+    const result = optimizeProject({
+      projectId: activeProjectId,
+      projects: selectCapacityProjects(projects).map((project) => ({
+        projectId: project.id,
+        projectName: project.name,
+        projectCalendarId: project.calendarId,
+        tasks: projectTasks(project.id),
+      })),
+      resources: resources.map((resource) => ({ id: resource.id, name: resource.name, hoursPerWeek: resource.hoursPerWeek, calendarId: resource.calendarId })),
+      assignments,
+      system,
+      mode: activeMode,
+      today: todayLineDate,
+    });
+    if (!result.ok) {
+      setOptimizePlan(null);
+      setOptimizeError(result.error);
+      return;
+    }
+    setOptimizeError(null);
+    setOptimizePlan(result);
+  };
+  const cancelOptimize = () => {
+    // Cancel changes nothing: the preview is simply dropped.
+    setOptimizePlan(null);
+    setOptimizeError(null);
+  };
+  /**
+   * Apply stores the optimized planning as a new plan version through the same
+   * version management as "New version": the current version is left untouched
+   * so the user can always go back, and the copy is one complete action — a
+   * refused copy creates nothing.
+   */
+  const applyOptimize = () => {
+    if (!optimizePlan) return;
+    const result = createPlanVersion(`Optimized ${formatDate(todayLineDate)}`, optimizePlan.tasks);
+    if (!result.ok) {
+      toast.error(result.message ?? "The optimized version could not be created.");
+      return;
+    }
+    setHistory([]);
+    setFuture([]);
+    setOptimizePlan(null);
+    toast.success("Optimized planning saved as a new version. The original version is unchanged.");
+  };
   const openSaveTemplate = () => {
     setTemplateName(`${activeProject.name} template`);
     setTemplateDialog(true);
@@ -1465,6 +1526,7 @@ export default function Dashboard() {
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
             <button onClick={openNewVersion}><Copy size={14} /> New version</button>
+            <button onClick={openOptimize}><Sparkles size={14} /> Optimize planning</button>
             <div className="menu-rule" />
             <button onClick={openBaseline}><FileSpreadsheet size={14} /> Set baseline</button>
             <button onClick={openSaveTemplate}><Copy size={14} /> Save as template</button>
@@ -1556,6 +1618,118 @@ export default function Dashboard() {
               <button className="tool-button" onClick={() => setVersionDialog(false)}>Cancel</button>
               <button className="tool-button primary" onClick={confirmNewVersion}>Create version</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {(optimizePlan || optimizeError) && (
+        <div className="modal-backdrop" onClick={cancelOptimize}>
+          <div className="task-modal optimize-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">OPTIMIZE PLANNING</div><h2>Resource optimization preview</h2></div>
+              <button className="icon-button" onClick={cancelOptimize} aria-label="Cancel"><X size={18} /></button>
+            </div>
+            {optimizeError || !optimizePlan ? (
+              <>
+                <p className="calendar-copy">{optimizeError}</p>
+                <div className="modal-actions">
+                  <button className="tool-button" onClick={cancelOptimize}>Cancel</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="calendar-copy">
+                  Only <b>{activeProject.name}</b> may move. Durations, resource assignments and dependencies stay exactly as they are,
+                  every task stays one block, and each employee&apos;s weekly occupancy counts the work of all other projects.
+                  Target {Math.round(OCCUPANCY_TARGET * 100)}% per week, hard limit 100%.
+                </p>
+
+                <div className="optimize-summary">
+                  <span>Project end</span>
+                  <b>{formatFullDate(optimizePlan.oldProjectFinish)} → {formatFullDate(optimizePlan.newProjectFinish)}</b>
+                  <span className={optimizePlan.finishDeltaWorkingDays === 0 ? "optimize-badge ok" : "optimize-badge up"}>
+                    {optimizePlan.finishDeltaWorkingDays === 0
+                      ? "unchanged"
+                      : `${optimizePlan.finishDeltaWorkingDays > 0 ? "+" : ""}${optimizePlan.finishDeltaWorkingDays} working day${Math.abs(optimizePlan.finishDeltaWorkingDays) === 1 ? "" : "s"}`}
+                  </span>
+                  <span>{optimizePlan.movedCriticalTasks ? "Critical path tasks were moved." : "No critical path task was moved."}</span>
+                </div>
+
+                <div className="optimize-section">
+                  <h3>Moved tasks ({optimizePlan.moves.length})</h3>
+                  {optimizePlan.moves.length === 0 ? (
+                    <p className="optimize-empty">No task needs to move — the plan already meets the target within its rules.</p>
+                  ) : (
+                    <div className="optimize-table-wrap">
+                      <table className="optimize-table">
+                        <thead>
+                          <tr><th>Task</th><th>Old start</th><th>Old finish</th><th>New start</th><th>New finish</th><th>Float used</th><th>Critical</th></tr>
+                        </thead>
+                        <tbody>
+                          {optimizePlan.moves.map((move) => (
+                            <tr key={move.taskId}>
+                              <td>{move.taskName}</td>
+                              <td>{formatDate(move.oldStart)}</td>
+                              <td>{formatDate(move.oldFinish)}</td>
+                              <td>{formatDate(move.newStart)}</td>
+                              <td>{formatDate(move.newFinish)}</td>
+                              <td>{move.floatUsed > 0 ? `${move.floatUsed} d of ${move.floatAvailable} d` : move.shiftDays < 0 ? "moved earlier" : "beyond float"}</td>
+                              <td>{move.critical ? "yes" : "no"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div className="optimize-section">
+                  <h3>Weekly occupancy per employee (before → after)</h3>
+                  {optimizePlan.occupancy.every((resource) => resource.weeks.every((week) => week.before <= 0 && week.after <= 0)) ? (
+                    <p className="optimize-empty">No planned hours this period.</p>
+                  ) : (
+                    <div className="optimize-table-wrap">
+                      <table className="optimize-table">
+                        <thead>
+                          <tr><th>Employee</th><th>Week</th><th>Available</th><th>Before</th><th>After</th></tr>
+                        </thead>
+                        <tbody>
+                          {optimizePlan.occupancy.flatMap((resource) => resource.weeks
+                            .filter((week) => week.before > 0 || week.after > 0)
+                            .map((week) => (
+                              <tr key={`${resource.resourceId}-${week.weekStart}`}>
+                                <td>{resource.resourceName}</td>
+                                <td>{formatFullDate(week.weekStart)}</td>
+                                <td>{formatAvailableHours(week.available)} h</td>
+                                <td>{formatAvailableHours(week.before)} h{week.available > 0 ? ` (${Math.round((week.before / week.available) * 100)}%)` : ""}</td>
+                                <td className={week.available > 0 && week.after > week.available ? "negative" : undefined}>{formatAvailableHours(week.after)} h{week.available > 0 ? ` (${Math.round((week.after / week.available) * 100)}%)` : ""}</td>
+                              </tr>
+                            )))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div className="optimize-section">
+                  <h3>Remaining weeks above 100% or far from 90% ({optimizePlan.unresolved.length})</h3>
+                  {optimizePlan.unresolved.length === 0 ? (
+                    <p className="optimize-empty">Every booked week is at or below the hard limit and within a healthy distance of the target.</p>
+                  ) : (
+                    <div className="optimize-problems">
+                      {optimizePlan.unresolved.map((problem) => (
+                        <div key={`${problem.resourceId}-${problem.weekStart}-${problem.kind}`} className="optimize-problem">{problem.reason}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="modal-actions">
+                  <button className="tool-button" onClick={cancelOptimize}>Cancel</button>
+                  <button className="tool-button primary" onClick={applyOptimize}>Apply</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

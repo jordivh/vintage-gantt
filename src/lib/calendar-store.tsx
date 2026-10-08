@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, copyTasksToVersion, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import {
   canManageMembers as roleCanManageMembers,
@@ -316,7 +316,13 @@ interface CalendarStoreValue {
    * in the version's history.
    */
   setPlanMode: (versionId: string, mode: PlanMode) => { ok: boolean; message?: string };
-  createPlanVersion: (name: string) => { ok: boolean; message?: string; versionId?: string };
+  /**
+   * Starts a new plan version of the active project. Without `rows` the current
+   * version is copied as it is; with `rows` those task rows are copied instead,
+   * which is how the resource optimizer stores its moved planning as a new
+   * version. Either way the current version is left untouched.
+   */
+  createPlanVersion: (name: string, rows?: PlannerTask[]) => { ok: boolean; message?: string; versionId?: string };
   /**
    * Builds fresh reserve for the remaining work: always creates a new plan
    * version, leaving the current one untouched, then applies the new margin
@@ -654,22 +660,21 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     return { ok: true };
   }, [activeProjectId, planVersions, baselines]);
 
-  const createPlanVersion = useCallback((name: string) => {
-    const source = (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
+  const createPlanVersion = useCallback((name: string, rows?: PlannerTask[]) => {
+    const source = rows ?? (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
     const id = `version-${uid()}`;
     // A new version always starts out being planned: consumed margin resets and
     // the reserve in days is re-derived from each percentage.
     const version: PlanVersion = { id, projectId: activeProjectId, name: name.trim() || `Version ${planVersions.filter((item) => item.projectId === activeProjectId).length + 1}`, isActive: true, createdAt: new Date().toISOString(), mode: "planning", modeHistory: [] };
-    const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
     // Remap parents, predecessors (type + lag) and the start constraint through
     // the id map; a single unresolvable reference fails the whole copy.
-    const remapped = remapCopiedTasks(source, idMap, id);
-    if (remapped.error) return { ok: false, message: remapped.error };
-    const copied = applyPlanningModeMargins(remapped.tasks);
+    const copy = copyTasksToVersion(source, id, () => `task-${uid()}`);
+    if (copy.error) return { ok: false, message: copy.error };
+    const copied = applyPlanningModeMargins(copy.tasks);
     const sourceTaskIds = new Set(source.map((task) => task.id));
     const copiedAssignments = assignments
       .filter((assignment) => sourceTaskIds.has(assignment.taskId))
-      .map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: idMap.get(assignment.taskId) ?? assignment.taskId }));
+      .map((assignment) => ({ ...assignment, id: `as-${uid()}`, taskId: copy.idMap.get(assignment.taskId) ?? assignment.taskId }));
     setPlanVersions((current) => [...current.map((item) => item.projectId === activeProjectId ? { ...item, isActive: false } : item), version]);
     setTasksByProject((current) => ({ ...current, [activeProjectId]: [...(current[activeProjectId] ?? []), ...copied] }));
     setAssignments((current) => [...current, ...copiedAssignments]);

@@ -216,6 +216,23 @@ export function remapCopiedTasks<T extends RemapTaskShape>(
   return { tasks: copied };
 }
 
+/**
+ * Copies task rows into a new plan version: every row gets an id from `newIdFor`
+ * and every reference (parent, predecessors with type and lag, start size) is
+ * remapped through the resulting id map. A single unresolvable reference fails
+ * the whole copy, so a version is never created with missing links. The rows are
+ * read, never changed, so the version they came from stays exactly as it was.
+ */
+export function copyTasksToVersion<T extends RemapTaskShape>(
+  source: T[],
+  versionId: string,
+  newIdFor: (task: T) => string,
+): { tasks: T[]; idMap: Map<string, string>; error?: string } {
+  const idMap = new Map(source.map((task) => [task.id, newIdFor(task)]));
+  const remapped = remapCopiedTasks(source, idMap, versionId);
+  return remapped.error ? { tasks: source, idMap, error: remapped.error } : { tasks: remapped.tasks, idMap };
+}
+
 /** One dependency that was deliberately left out of a task copy. */
 export interface DroppedDependency {
   /** The source task the dependency sat on. */
