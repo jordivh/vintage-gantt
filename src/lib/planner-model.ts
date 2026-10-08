@@ -177,6 +177,59 @@ export function remapPredecessorText(
   return { value, unmapped };
 }
 
+/** One predecessor token that named no task of its own version. */
+export interface DeadPredecessor {
+  taskId: string;
+  taskName: string;
+  /** The token exactly as it was stored, so the report names what was removed. */
+  token: string;
+}
+
+/**
+ * Removes predecessor tokens that name no task of their own plan version.
+ *
+ * Such a token is not a link at all: the version it sits in has no such task, so
+ * nothing is scheduled from it (the grid already shows the surviving ones only)
+ * — and it is what makes a later copy refuse (`Could not copy: 1 reference could
+ * not be remapped`), because a copy cannot carry a reference onto a task that is
+ * not there. Removing it changes no date, no duration and no live dependency; it
+ * only takes away a claim the plan never had.
+ *
+ * Two versions hold two different sets of tasks, so each version is judged on its
+ * own: a token naming a task of another version of the same project is dead too.
+ * A task whose tokens all resolve keeps its string byte for byte, so nothing that
+ * was already correct is rewritten — and the save writes only the rows that held
+ * a dead reference.
+ */
+export function pruneDeadPredecessors<T extends RemapTaskShape & { versionId?: string }>(
+  rows: T[],
+): { tasks: T[]; dropped: DeadPredecessor[] } {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = row.versionId ?? "";
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+  const dropped: DeadPredecessor[] = [];
+  const pruned = new Map<T, T>();
+  for (const group of groups.values()) {
+    const ordered = orderTasksForDisplay(group);
+    for (const task of group) {
+      const parts = task.predecessors.split(",").map((part) => part.trim()).filter(Boolean);
+      const resolved = parts.map((part) => ({ part, dependency: resolvePredecessorReference(part, group, ordered) }));
+      const live = resolved.filter((entry) => entry.dependency);
+      if (live.length === parts.length) continue;
+      for (const entry of resolved) {
+        if (!entry.dependency) dropped.push({ taskId: task.id, taskName: task.name ?? task.id, token: entry.part });
+      }
+      pruned.set(task, { ...task, predecessors: live.map((entry) => entry.part).join(", ") } as T);
+    }
+  }
+  if (!pruned.size) return { tasks: rows, dropped };
+  return { tasks: rows.map((row) => pruned.get(row) ?? row), dropped };
+}
+
 export interface RemapCopiedTasksResult<T> {
   tasks: T[];
   error?: string;

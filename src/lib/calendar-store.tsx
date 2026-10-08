@@ -19,7 +19,7 @@ import {
   type PlannerCalendar,
   type Weekday,
 } from "./scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, copyTasksToVersion, dependenciesForTasks, planFinishDate, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, copyTasksToVersion, dependenciesForTasks, planFinishDate, pruneDeadPredecessors, recalculateTasks, remapCopiedTasks, removeBaselineAndSnapshots, replanScopeIds, settleMonitoringPlan, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "./planner-model";
 import type { PlanningDirection } from "./scheduling-engine";
 import {
   canManageMembers as roleCanManageMembers,
@@ -395,6 +395,23 @@ function recalculateProjects(
  */
 const WORKSPACE_SAVE_QUIET_MS = 400;
 
+/**
+ * The rows a copy may be taken from: dead predecessor references removed first.
+ *
+ * A token that names no task of its own version is not a dependency — the grid
+ * already shows the surviving ones only — but it makes `remapCopiedTasks` refuse
+ * the whole copy ("Could not copy: N references could not be remapped"), which is
+ * what stopped "Apply" of an optimized plan on a version that had lost a task.
+ * Only dead tokens go: every live link, with its type and lag, is copied exactly.
+ */
+function copyableSource(source: PlannerTask[]): PlannerTask[] {
+  const repaired = pruneDeadPredecessors(source);
+  if (repaired.dropped.length) {
+    console.info(`[vintage-gantt] copy: dropped ${repaired.dropped.length} predecessor reference(s) naming no task of their version:`, repaired.dropped);
+  }
+  return repaired.tasks;
+}
+
 export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [system, setSystem] = useState<CalendarSystem>({ calendars: [], exceptions: [], defaultCalendarId: "" });
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -546,6 +563,21 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveVersionId((current) => versions.some((version) => version.id === current && version.projectId === activeProjectId) ? current : versions.find((version) => version.projectId === activeProjectId && version.isActive)?.id ?? versions.find((version) => version.projectId === activeProjectId)?.id ?? "");
     setBaselines(state.baselines ?? []);
     setBaselineTasks(state.baselineTasks ?? []);
+    // A predecessor reference that names no task of its own version is removed
+    // here, where the workspace enters the app: it is not a dependency (nothing is
+    // scheduled from it and the grid never showed it), and it is what made a later
+    // version copy refuse. Judged per version, because two versions hold two
+    // different sets of tasks. The repaired form is the state below, so the save
+    // effect writes it and the database is healed too.
+    const deadReferences = Object.keys(grouped).flatMap((projectId) => {
+      const repaired = pruneDeadPredecessors(grouped[projectId]);
+      if (!repaired.dropped.length) return [];
+      grouped[projectId] = repaired.tasks;
+      return repaired.dropped;
+    });
+    if (deadReferences.length) {
+      console.info(`[vintage-gantt] removed ${deadReferences.length} predecessor reference(s) naming no task of their version:`, deadReferences);
+    }
     setTasksByProject(grouped);
     const isRegularProject = (project: ProjectRecord) => (project.kind ?? (project.status === "template" ? "template" : "project")) === "project";
     const fallback = (state.projects ?? []).filter((project) => project.status === "active" && isRegularProject(project)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? (state.projects ?? []).find((project) => project.status !== "archived" && isRegularProject(project));
@@ -565,6 +597,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       baselines: state.baselines ?? [],
       baselineTasks: state.baselineTasks ?? [],
     }));
+    // When a dead reference was removed above, the database still holds it, so the
+    // workspace is deliberately not recorded as synced: the save effect may write
+    // the repaired form, and the diff-based save then touches only those rows.
+    if (deadReferences.length) lastSyncedRef.current = null;
   }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, initializeWorkspace, buildWorkspacePayload]);
 
   /**
@@ -727,8 +763,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // the reserve in days is re-derived from each percentage.
     const version: PlanVersion = { id, projectId: activeProjectId, name: name.trim() || `Version ${planVersions.filter((item) => item.projectId === activeProjectId).length + 1}`, isActive: true, createdAt: new Date().toISOString(), mode: "planning", modeHistory: [] };
     // Remap parents, predecessors (type + lag) and the start constraint through
-    // the id map; a single unresolvable reference fails the whole copy.
-    const copy = copyTasksToVersion(source, id, () => `task-${uid()}`);
+    // the id map; a single unresolvable reference fails the whole copy. The source
+    // is repaired first, so a token left behind by an earlier deletion — or by an
+    // optimized plan applied before this repair existed — cannot refuse the copy.
+    const copy = copyTasksToVersion(copyableSource(source), id, () => `task-${uid()}`);
     if (copy.error) return { ok: false, message: copy.error };
     const copied = applyPlanningModeMargins(copy.tasks);
     const sourceTaskIds = new Set(source.map((task) => task.id));
@@ -749,7 +787,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const margined = applyReplanMargins(source, input);
     const version: PlanVersion = { id, projectId: activeProjectId, name: input.name.trim() || `Replan ${input.marginPct}%`, isActive: true, createdAt: new Date().toISOString(), mode: "planning", modeHistory: [] };
     const idMap = new Map(source.map((task) => [task.id, `task-${uid()}`]));
-    const remapped = remapCopiedTasks(margined, idMap, id);
+    const remapped = remapCopiedTasks(copyableSource(margined), idMap, id);
     if (remapped.error) return { ok: false, versionId: "", affected, finish: "", message: remapped.error };
     const copied = remapped.tasks;
     const result = recalculateTasks(copied, {
@@ -945,7 +983,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const id = `proj-${uid()}`;
     const now = new Date().toISOString();
     if (!source) return id;
-    const sourceTasks = tasksByProject[projectId] ?? [];
+    const sourceTasks = copyableSource(tasksByProject[projectId] ?? []);
     const idMap = new Map(sourceTasks.map((task) => [task.id, `task-${uid()}`]));
     const remapped = remapCopiedTasks(sourceTasks, idMap);
     if (remapped.error) { toast.error(remapped.error); return ""; }

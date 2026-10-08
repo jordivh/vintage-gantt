@@ -14,12 +14,14 @@ import {
   applyModeCommit,
   applyPlanningModeMargins,
   applyReplanMargins,
+  copyTasksToVersion,
   dependenciesForTasks,
   fieldModeReadOnly,
   formatPredecessorsForDisplay,
   marginAfterPctChange,
   orderTasksForDisplay,
   planFinishDate,
+  pruneDeadPredecessors,
   recalculateTasks,
   remapCopiedTasks,
   replanScopeIds,
@@ -790,6 +792,61 @@ describe("version copy — references are remapped onto the new ids", () => {
     expect(formatPredecessorsForDisplay(get("t6").predecessors, copied, displayIds)).toBe("3FS");
     expect(formatPredecessorsForDisplay(get("t7").predecessors, copied, displayIds)).toBe("5FS");
     expect(formatPredecessorsForDisplay(get("t8").predecessors, copied, displayIds)).toBe("7FS");
+  });
+});
+
+describe("dead predecessor references — a copy is never refused over one", () => {
+  /**
+   * The state a delete used to leave behind: "t2" is gone from the version, while
+   * "t3" still names it. Nothing was scheduled from that token (the grid showed
+   * no predecessor for t3), but it was enough to refuse every later copy.
+   */
+  const afterDeletingConcept = () => tpR2(4).filter((task) => task.id !== "t2");
+
+  test("the dead token is removed and reported, every live row is left untouched", () => {
+    const source = afterDeletingConcept();
+    const result = pruneDeadPredecessors(source);
+    expect(result.dropped).toEqual([{ taskId: "t3", taskName: "Concept nakijken", token: "t2FS" }]);
+    expect(result.tasks.find((task) => task.id === "t3")!.predecessors).toBe("");
+    // Nothing that was already correct is rewritten: same row objects, same strings.
+    for (const task of source.filter((task) => task.id !== "t3")) {
+      expect(result.tasks.find((candidate) => candidate.id === task.id)).toBe(task);
+    }
+    // Only the dead token goes — a live link keeps its type and lag, in place.
+    const mixed = pruneDeadPredecessors(source.map((task) => task.id === "t6" ? { ...task, predecessors: "t999FS, t3SS+2d" } : task));
+    expect(mixed.tasks.find((task) => task.id === "t6")!.predecessors).toBe("t3SS+2d");
+    expect(mixed.dropped.map((entry) => `${entry.taskId}:${entry.token}`)).toEqual(["t3:t2FS", "t6:t999FS"]);
+  });
+
+  test("a token naming a task of another version of the same project is dead too", () => {
+    const versionOne = tpR2(4).map((task) => ({ ...task, versionId: "v1" }));
+    const versionTwo = [{ ...tpR2(4)[2], id: "v2-1", versionId: "v2", predecessors: "t3FS" }];
+    const result = pruneDeadPredecessors([...versionOne, ...versionTwo]);
+    // t3 lives in v1 only, so v2's reference to it is not a dependency of v2.
+    expect(result.dropped).toEqual([{ taskId: "v2-1", taskName: "Concept nakijken", token: "t3FS" }]);
+    expect(result.tasks.find((task) => task.id === "v2-1")!.predecessors).toBe("");
+    // Both versions are still whole, and v1 keeps its own live links.
+    expect(result.tasks).toHaveLength(versionOne.length + 1);
+    expect(result.tasks.find((task) => task.id === "t5")!.predecessors).toBe("t3FS");
+  });
+
+  test("Apply of an optimized plan goes through once the source is repaired", () => {
+    const source = afterDeletingConcept();
+    // Exactly the refusal the plan showed when "Optimize planning" was applied.
+    const refused = copyTasksToVersion(source, "version-2", () => "task-copy");
+    expect(refused.error).toContain("Could not copy: 1 reference could not be remapped");
+    expect(refused.error).toContain("t2FS on \u201cConcept nakijken\u201d");
+    // With the repair in front of the copy — what the store does now — the whole
+    // version is created, and no row of it names a task that is not there.
+    let counter = 0;
+    const copy = copyTasksToVersion(pruneDeadPredecessors(source).tasks, "version-2", () => `task-copy-${++counter}`);
+    expect(copy.error).toBeUndefined();
+    expect(copy.tasks).toHaveLength(source.length);
+    expect(copy.tasks.every((task) => task.versionId === "version-2")).toBe(true);
+    expect(copy.tasks.find((task) => task.id === copy.idMap.get("t3")!)!.predecessors).toBe("");
+    // The copy carries exactly the links the version had: the four that resolved.
+    expect(dependenciesForTasks(copy.tasks).length).toBe(dependenciesForTasks(source).length);
+    expect(pruneDeadPredecessors(copy.tasks).dropped).toEqual([]);
   });
 });
 

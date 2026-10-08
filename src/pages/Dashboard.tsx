@@ -42,7 +42,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, duplicateTaskAssignments, duplicateTaskGroup, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, duplicateTaskAssignments, duplicateTaskGroup, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, pruneDeadPredecessors, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { allocationSegments, canAdjustTask, displayHours, editLastAdjustment, fixedDaysOnNonWorkingDays, fixedUntil, lastActiveAdjustment, planAdjustment, previewRemoval, removeAllAdjustments, removeLastAdjustment, type AdjustmentInput } from "@/lib/remaining-work";
 import { availableHours } from "@/lib/resource-capacity";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
@@ -917,7 +917,13 @@ export default function Dashboard() {
     // Exactly what the database removed leaves the plan — including the whole
     // subtree of a removed parent, so nothing is left pointing at a gone task.
     const removed = new Set(result.removedTaskIds);
-    commit(tasks.filter((task) => !removed.has(task.id)));
+    // A task that survives keeps the predecessors it still has: the reference to a
+    // removed task is taken out of its text here. That token named no task any
+    // more (nothing was scheduled from it), but leaving it behind is what used to
+    // make a later version copy refuse with "Could not copy … could not be
+    // remapped" — so "Optimize planning" could never be applied again.
+    const survivors = pruneDeadPredecessors(tasks.filter((task) => !removed.has(task.id))).tasks;
+    commit(survivors);
     setSelected([]);
   };
 
