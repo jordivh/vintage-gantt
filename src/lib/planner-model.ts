@@ -216,6 +216,112 @@ export function remapCopiedTasks<T extends RemapTaskShape>(
   return { tasks: copied };
 }
 
+/** One dependency that was deliberately left out of a task copy. */
+export interface DroppedDependency {
+  /** The source task the dependency sat on. */
+  sourceTaskId: string;
+  sourceTaskName: string;
+  /** The stored predecessor token, kept verbatim so it can be reported. */
+  token: string;
+}
+
+export interface DuplicatedTaskGroup<T> {
+  /** The copies, in display order (the duplicated task first, then its subtree). */
+  tasks: T[];
+  /** Source task id → the id its copy got, for every task in the group. */
+  idMap: Map<string, string>;
+  /**
+   * Dependencies that pointed outside the duplicated group. They are not carried
+   * into the copies — reported so the caller can warn instead of silently
+   * changing the original plan or inventing a link back to an original.
+   */
+  droppedDependencies: DroppedDependency[];
+}
+
+export interface DuplicateTaskGroupResult<T> {
+  group?: DuplicatedTaskGroup<T>;
+  error?: string;
+}
+
+/**
+ * Copies a task and every task below it, at all levels, into the same plan.
+ *
+ * Every field (name, duration, dates, margins, assignments-side data, …) travels
+ * untouched; only the ids are new:
+ * - a parent link inside the group is remapped onto the copy, while the group's
+ *   own root keeps its original parent (a duplicated subtask stays at its level);
+ * - a predecessor inside the group is remapped onto the new copy;
+ * - a predecessor outside the group is dropped and reported in
+ *   `droppedDependencies`, so the original never gains a link and the copy never
+ *   points back at an original.
+ *
+ * Nothing is emitted when a new id would collide with an existing one, so a
+ * failed call creates nothing. All new ids are supplied by `newIdFor`, keeping
+ * generation outside this pure function.
+ */
+export function duplicateTaskGroup<T extends RemapTaskShape>(
+  tasks: T[],
+  rootId: string,
+  newIdFor: (task: T) => string,
+): DuplicateTaskGroupResult<T> {
+  const root = tasks.find((task) => task.id === rootId);
+  if (!root) return { error: "That task is not part of this plan." };
+
+  // The duplicated group is the task and every descendant, whatever the depth.
+  const subtree = new Set<string>([rootId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const task of tasks) {
+      if (task.parentId && subtree.has(task.parentId) && !subtree.has(task.id)) {
+        subtree.add(task.id);
+        grew = true;
+      }
+    }
+  }
+  const ordered = orderTasksForDisplay(tasks);
+  const group = ordered.filter((task) => subtree.has(task.id));
+
+  const idMap = new Map<string, string>();
+  const taken = new Set(tasks.map((task) => task.id));
+  for (const task of group) {
+    const newId = newIdFor(task);
+    if (!newId || taken.has(newId)) return { error: "The copy could not be given a unique task id; nothing was created." };
+    idMap.set(task.id, newId);
+    taken.add(newId);
+  }
+
+  const droppedDependencies: DroppedDependency[] = [];
+  const copied = group.map((task) => {
+    const parentId = task.parentId && idMap.has(task.parentId) ? idMap.get(task.parentId)! : (task.parentId ?? null);
+    const remapped = remapPredecessorText(task.predecessors, idMap, tasks, ordered);
+    for (const token of remapped.unmapped) {
+      droppedDependencies.push({ sourceTaskId: task.id, sourceTaskName: task.name ?? task.id, token });
+    }
+    return { ...task, id: idMap.get(task.id)!, parentId, predecessors: remapped.value } as T;
+  });
+
+  return { group: { tasks: copied, idMap, droppedDependencies } };
+}
+
+/**
+ * Re-points the resource assignments of a duplicated group at the copies.
+ * Returns, for each new task id, the resource ids it keeps — dropping the
+ * assignments of any task outside the group, so nothing else is touched.
+ */
+export function duplicateTaskAssignments(
+  assignments: { taskId: string; resourceId: string }[],
+  idMap: ReadonlyMap<string, string>,
+): Map<string, string[]> {
+  const copied = new Map<string, string[]>();
+  for (const assignment of assignments) {
+    const newTaskId = idMap.get(assignment.taskId);
+    if (!newTaskId) continue;
+    copied.set(newTaskId, [...(copied.get(newTaskId) ?? []), assignment.resourceId]);
+  }
+  return copied;
+}
+
 export function resolvePredecessorInput(
   value: string,
   successorId: string,

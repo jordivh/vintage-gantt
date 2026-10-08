@@ -41,7 +41,7 @@ import {
   workingDaysBetween,
   type PlanningDirection,
 } from "@/lib/scheduling-engine";
-import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
+import { applyPlanningModeMargins, applyReplanMargins, dependenciesForTasks, duplicateTaskAssignments, duplicateTaskGroup, DISTRIBUTION_OPTIONS, fieldModeReadOnly, formatPredecessorsForDisplay, hasAllocationSegments, marginAfterPctChange, normalizeDistribution, normalizeWorkHours, orderTasksForDisplay, planFinishDate, recalculateTasks, replanScopeIds, resolvePredecessorInput, settleMonitoringPlan, startConstraintFor, startEditRestriction, withCalculatedPlanningFields, type PlannerTask, type PlanMode, type ReplanScope } from "@/lib/planner-model";
 import { allocationSegments, canAdjustTask, displayHours, editLastAdjustment, fixedDaysOnNonWorkingDays, fixedUntil, lastActiveAdjustment, planAdjustment, previewRemoval, removeAllAdjustments, removeLastAdjustment, type AdjustmentInput } from "@/lib/remaining-work";
 import { availableHours } from "@/lib/resource-capacity";
 import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
@@ -886,6 +886,47 @@ export default function Dashboard() {
     const removed = new Set(result.removedTaskIds);
     commit(tasks.filter((task) => !removed.has(task.id)));
     setSelected([]);
+  };
+
+  /**
+   * Duplicates a task together with every task below it, at all levels.
+   *
+   * The copies keep their structure, order, names, durations, dates and every
+   * other field, land right below the original subtree, and belong to this
+   * project and active version (the company is the signed-in one — the browser
+   * never supplies it). Dependencies inside the group are re-pointed to the new
+   * copies, while a dependency that leaves the group is left out entirely: the
+   * original plan is untouched and the user is told. Assignments travel with the
+   * rows, and `commit` re-plans the network exactly as it does for a manual edit,
+   * so workload and capacity follow. Nothing is created when the copy is refused.
+   */
+  const duplicateTask = (sourceId: string) => {
+    const used = new Set(tasks.map((item) => item.id));
+    const nextId = () => {
+      let id = String(Date.now());
+      while (used.has(id)) id = String(Number(id) + 1);
+      used.add(id);
+      return id;
+    };
+    const result = duplicateTaskGroup(tasks, sourceId, () => nextId());
+    if (result.error || !result.group) {
+      toast.error(result.error ?? "The task could not be duplicated.");
+      return;
+    }
+    const { tasks: copies, idMap, droppedDependencies } = result.group;
+    // The copies go directly under the original subtree, so the new rows read in
+    // the same order and nesting as the ones they came from.
+    const lastIndex = tasks.reduce((last, item, index) => (idMap.has(item.id) ? index : last), -1);
+    const next = [...tasks.slice(0, lastIndex + 1), ...copies, ...tasks.slice(lastIndex + 1)];
+    if (!commit(next)) return;
+    // Assignments are a separate table, so they are copied task by task onto the
+    // new rows. Workload and capacity read them, so the copy counts as planned.
+    for (const [newTaskId, resourceIds] of duplicateTaskAssignments(assignments, idMap)) {
+      setTaskAssignments(newTaskId, resourceIds);
+    }
+    toast(droppedDependencies.length
+      ? `Task duplicated. ${droppedDependencies.length} dependenc${droppedDependencies.length === 1 ? "y" : "ies"} pointing outside the copy were not copied.`
+      : "Task duplicated");
   };
 
   const taskDepth = (task: Task, items: Task[] = tasks) => {
@@ -2184,11 +2225,7 @@ export default function Dashboard() {
           <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button>
           <button
             onClick={() => {
-              const source = taskById.get(showMenu.id);
-              if (source) {
-                commit([...tasks, { ...source, id: String(Date.now()), name: `${source.name} copy` }]);
-                toast("Task duplicated");
-              }
+              duplicateTask(showMenu.id);
               setShowMenu(null);
             }}
           >
