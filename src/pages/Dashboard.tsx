@@ -1766,8 +1766,8 @@ a fixed milestone is never moved, and a task that would push it is left alone.
             </div>
             <p className="calendar-copy">
               The calculation runs in the background in <b>{activeProject.name}</b>, so the page stays responsive — you can keep
-              working. It stops by itself after at most {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds and shows the best
-              valid plan it has found.
+              working, or cancel it without changing anything. It walks the tasks one at a time with a limited set of options, and stops
+              by itself after at most {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds with the best valid plan it found.
             </p>
             <div className="optimize-progress" aria-hidden="true">
               <div
@@ -1897,8 +1897,9 @@ a fixed milestone is never moved, and a task that would push it is left alone.
 
                 {optimizePlan.timeLimited && (
                   <p className="optimize-hint">
-                    The calculation reached its time budget of {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds and stopped
-                    early with the best valid plan it had found — it may not be optimal, but every rule still holds.
+                    The calculation stopped early — at its time budget of {Math.round(OPTIMIZE_DEFAULTS.timeLimitMs / 1000)} seconds, or
+                    after trying as many options as one run may — and kept the best valid plan it had found. It may not be optimal, but
+                    every rule still holds.
                   </p>
                 )}
 

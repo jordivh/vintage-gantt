@@ -82,6 +82,8 @@ const run = (input: {
   fixedMilestoneIds?: string[];
   /** 0 turns duration extension off, which is how a case is compared to moves only. */
   maxExtensionDays?: number;
+  /** The hard ceiling on scored options, for the limit cases. */
+  maxEvaluations?: number;
   resources?: OptimizeResource[];
   calendarSystem?: CalendarSystem;
   timeLimitMs?: number;
@@ -101,6 +103,7 @@ const run = (input: {
   limits: {
     maxExtensionDays: input.maxExtensionDays ?? 8,
     ...(input.timeLimitMs !== undefined ? { timeLimitMs: input.timeLimitMs } : {}),
+    ...(input.maxEvaluations !== undefined ? { maxEvaluations: input.maxEvaluations } : {}),
   },
   onProgress: input.onProgress,
 });
@@ -848,11 +851,16 @@ describe("resource optimization — the step-by-step method", () => {
       assignments: pileAssignments(80),
       fixedMilestoneIds: ["M"],
       timeLimitMs: 10_000,
+      // Room to work: with a ceiling high enough the search finishes on its own,
+      // inside the 10-second budget.
+      maxEvaluations: 100_000,
     }));
 
     expect(result.timeLimited).toBe(false);
     expect(result.timings.totalMs).toBeLessThan(10_000);
     expect(result.workHoursPreserved).toBe(true);
+    // It really optimizes: the pile of same-week tasks is spread out.
+    expect(result.moves.length).toBeGreaterThan(0);
     // No rule is broken: the fixed milestone keeps its date and every task keeps
     // its dependencies, work hours and duration range.
     expect(byId(result.tasks).get("M")!.start).toBe("2026-12-18");
@@ -878,6 +886,17 @@ describe("resource optimization — the step-by-step method", () => {
     expect(second.tasks).toEqual(first.tasks);
     expect(second.unresolved).toEqual(first.unresolved);
     expect(second.timings.evaluations).toBe(first.timings.evaluations);
+  });
+
+  test("the option ceiling is a hard limit too, and the result says so", () => {
+    const tasks = pile(80);
+    const result = ok(run({ tasks, assignments: pileAssignments(80), timeLimitMs: 10_000, maxEvaluations: 200 }));
+
+    // Every loop has a maximum: 200 options scored, then the search ends and the
+    // best plan so far is returned, marked as possibly not optimal.
+    expect(result.timeLimited).toBe(true);
+    expect(result.timings.evaluations <= 300).toBe(true);
+    expectPlanSound(tasks, result.tasks);
   });
 
   test("the 10-second limit stops the search early and still returns a valid plan", () => {

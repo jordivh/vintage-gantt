@@ -161,9 +161,10 @@ export const OPTIMIZE_DEFAULTS = {
    */
   maxExtensionDays: 8,
   /**
-   * Hard ceiling on scored candidates, so a very large plan still answers
-   * quickly. It only ever stops the search early: whatever has been found by
-   * then is a valid plan, and the same input still gives the same result.
+   * Hard ceiling on scored options, so a very large plan still answers quickly.
+   * It only ever stops the search early: whatever has been found by then is a
+   * valid plan, reported as possibly not optimal, and the same input still gives
+   * the same result.
    */
   maxEvaluations: 8000,
   /**
@@ -388,8 +389,9 @@ export interface OptimizationPlan {
   /** Where the run spent its time. */
   timings: OptimizeTimings;
   /**
-   * True when the wall-clock limit stopped the search early. The plan is valid and
-   * follows every rule, but it may not be optimal — the preview says so.
+   * True when a limit stopped the search early — the 10-second wall clock or the
+   * hard option ceiling. The plan is valid and follows every rule, but it may not
+   * be optimal — the preview says so.
    */
   timeLimited: boolean;
 }
@@ -961,6 +963,8 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   let evaluations = 0;
   /** True once the wall-clock limit stopped the search before it was finished. */
   let timeLimited = false;
+  /** True once the option ceiling stopped the search — the same honest early stop. */
+  let optionLimited = false;
 
   /* ---- one task at a time, with a bounded set of options ------------------ */
 
@@ -1077,7 +1081,12 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     for (const option of optionsFor(task, allowDelay, laterLimit)) {
       if (refused.has(optionKey(task.id, option))) continue;
       evaluations += 1;
-      if (evaluations > limits.maxEvaluations) break;
+      if (evaluations > limits.maxEvaluations) {
+        // A very large plan may not score every option: the ceiling ends the
+        // search here and the best plan so far is the answer.
+        optionLimited = true;
+        break;
+      }
       const candidate = optionScore(task, option);
       // A task is only ever changed when the change makes the plan strictly
       // better, exactly as before: no wandering between equally good plans.
@@ -1199,6 +1208,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
         timeLimited = true;
         break;
       }
+      if (optionLimited) break;
       const float = baselineById.get(task.id)?.totalFloat ?? 0;
       const laterLimit = floatOnly ? Math.min(limits.maxShiftDays, Math.floor(float)) : limits.maxShiftDays;
       const option = bestOption(task, allowDelay, laterLimit);
@@ -1231,7 +1241,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
    */
   const runPhase = (allowDelay: boolean, floatOnly: boolean, rounds: number) => {
     for (let round = 0; round < rounds; round += 1) {
-      if (timeLimited) break;
+      if (timeLimited || optionLimited) break;
       if (allowDelay && currentScore.excess <= EPSILON) break;
       if (clock() - searchStart > limits.timeLimitMs) {
         timeLimited = true;
@@ -1588,9 +1598,10 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   return {
     ok: true,
     timings: { prepareMs, optimizeMs, reportMs, totalMs: clock() - startedAt, evaluations },
-    // True when the wall-clock limit stopped the search: the plan is whole and
-    // follows every rule, but the preview says it may not be optimal.
-    timeLimited,
+    // True when a limit stopped the search — the 10-second wall clock or the hard
+    // option ceiling: the plan is whole and follows every rule, but the preview
+    // says it may not be optimal.
+    timeLimited: timeLimited || optionLimited,
     moves,
     movedCriticalTasks: moves.some((move) => move.critical),
     milestones,
