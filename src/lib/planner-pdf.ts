@@ -229,6 +229,8 @@ export interface PlannerPdfChart {
 }
 
 export interface PlannerPdfMeta {
+  /** The project's short code, or "" when the project has none. */
+  projectCode: string;
   projectName: string;
   client: string;
   versionName: string;
@@ -289,26 +291,13 @@ export interface PlannerPdfInput {
   projectCalendarId?: string;
 }
 
+/** The printed document is the Gantt chart: this is its only section title. */
 export const PDF_SECTION_TITLES = {
-  tasks: "Task list",
   chart: "Gantt chart",
-} as const;
-
-/** Shown instead of a table when the project has no tasks at all. */
+} as const;/** Shown on the single page of a project that has nothing to chart. */
 export const PDF_NO_TASKS_MESSAGE = "No tasks in this project";
 
-export const PDF_TABLE_HEADERS = [
-  "WBS",
-  "Task",
-  "Start",
-  "Finish",
-  "Duration",
-  "Workload",
-  "Assignee",
-  "Status",
-  "Margin",
-  "Critical",
-] as const;
+
 
 /** The screen's own timeline rule: tasks and today, two weeks either side. */
 const TIMELINE_PADDING_DAYS = 14;
@@ -476,6 +465,7 @@ export function buildPlannerPdfModel(input: PlannerPdfInput): PlannerPdfModel {
   return {
     fileName: plannerPdfFileName(input.projectCode ?? "", input.projectName, exportDate),
     meta: {
+      projectCode: (input.projectCode ?? "").trim(),
       projectName: input.projectName || "Untitled project",
       client: (input.client ?? "").trim(),
       versionName: input.versionName || "Plan version",

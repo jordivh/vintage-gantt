@@ -4,8 +4,9 @@
  * The export must produce a real file, hand it to the browser in the same click,
  * name it after the project and the date, and never claim "Export ready" for a
  * file that does not exist. These cases pin exactly that down: the file name, the
- * file itself (a PDF that pdf-lib can open again, with the plan's content), the
- * download that starts, the released temporary file, and the error path.
+ * file itself (a PDF that pdf-lib can open again, holding the Gantt chart and no
+ * task list), the rows the chart covers, the download that starts, the released
+ * temporary file, and the error path.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -13,7 +14,7 @@ import { inflateSync } from "node:zlib";
 import { PDFDocument } from "pdf-lib";
 import { createDefaultCalendarSystem, type CalendarSystem } from "./scheduling-engine";
 import type { PlannerTask } from "./planner-model";
-import { buildPlannerPdfModel, plannerPdfFileName } from "./planner-pdf";
+import { PDF_NO_TASKS_MESSAGE, buildPlannerPdfModel, plannerPdfFileName } from "./planner-pdf";
 import { createPlannerPdfFile, releasePlannerPdfFile, startPdfDownload, type PlannerPdfFile } from "./planner-pdf-document";
 
 /* -------------------------------------------------------------- fixtures */
@@ -45,8 +46,8 @@ const smallProject = (): PlannerTask[] => [
   task({ id: "M", name: "Handover", duration: 0, start: "2026-10-16", finish: "2026-10-16", isMilestone: true, work: 0, predecessors: "S3FS" }),
 ];
 
-/** The largest project of the planner: 245 tasks in one outline. */
-const largestProject = (count = 245): PlannerTask[] => {
+/** The largest project of the planner: 249 tasks in one outline. */
+const largestProject = (count = 249): PlannerTask[] => {
   const tasks: PlannerTask[] = [task({
     id: "P0", name: "Main works", duration: count * 2, start: "2026-10-05", finish: "2028-01-01", work: count * 16,
   })];
@@ -83,11 +84,10 @@ const inputFor = (tasks: PlannerTask[], over: Partial<Parameters<typeof buildPla
 });
 
 /**
- * The text a PDF really holds. Every stream is inflated, and the hex strings
- * pdf-lib writes are decoded, so the check is on the document's own drawing
- * commands and not on the layout model that produced them.
+ * Every stream the file really holds, inflated: the check is on the document's
+ * own drawing commands, never on the layout model that produced them.
  */
-const pdfText = (bytes: Uint8Array): string => {
+const pdfStreams = (bytes: Uint8Array): string[] => {
   const buffer = Buffer.from(bytes);
   const raw = buffer.toString("latin1");
   const streams: string[] = [];
@@ -117,17 +117,68 @@ const pdfText = (bytes: Uint8Array): string => {
     }
     index = end;
   }
-  const decoded: string[] = [];
-  for (const stream of streams) {
-    for (const match of stream.matchAll(/<([0-9A-Fa-f]+)>/g)) {
-      const hex = match[1];
-      let text = "";
-      for (let at = 0; at + 1 < hex.length; at += 2) text += String.fromCharCode(Number.parseInt(hex.slice(at, at + 2), 16));
-      decoded.push(text);
-    }
-  }
-  return decoded.join("\n");
+  return streams;
 };
+
+/** The text one stream really draws: every hex string pdf-lib wrote, decoded. */
+const drawnText = (stream: string): string => {
+  const lines: string[] = [];
+  for (const match of stream.matchAll(/<([0-9A-Fa-f]+)>/g)) {
+    const hex = match[1];
+    let text = "";
+    for (let at = 0; at + 1 < hex.length; at += 2) text += String.fromCharCode(Number.parseInt(hex.slice(at, at + 2), 16));
+    lines.push(text);
+  }
+  return lines.join("\n");
+};
+
+/** Everything the document draws as text, in file order. */
+const pdfText = (bytes: Uint8Array): string => pdfStreams(bytes).map(drawnText).join("\n");
+
+interface RenderedPage {
+  /** The page number the page's own footer prints. */
+  number: number;
+  /** What the page draws as text, one drawn string per line. */
+  text: string;
+  /** The page's drawing commands, for the shapes that carry no text. */
+  stream: string;
+}
+
+/**
+ * The pages of a rendered document, found by the page number printed in their
+ * footer — a page is identified by what a reader sees, not by object order. A
+ * stream that prints no page number is not a page of this export.
+ */
+const pdfPages = (bytes: Uint8Array): { total: number; pages: Map<number, RenderedPage> } => {
+  const pages = new Map<number, RenderedPage>();
+  let total = 0;
+  for (const stream of pdfStreams(bytes)) {
+    const text = drawnText(stream);
+    const printed = /Page (\d+) of (\d+)/.exec(text);
+    if (!printed) continue;
+    const number = Number(printed[1]);
+    total = Number(printed[2]);
+    pages.set(number, { number, text, stream });
+  }
+  return { total, pages };
+};
+
+/** The chart rows a page prints: the WBS number, then the task's name. */
+const rowLabels = (text: string): string[] => text.split("\n").filter((line) => /^\d+(\.\d+)* {2}\S/.test(line));
+
+/**
+ * How often a colour is used in a stream: pdf-lib writes the channels as
+ * decimal numbers followed by `rg` (fill) or `RG` (stroke), so counting the
+ * triple counts the shapes of that colour.
+ */
+const countColour = (stream: string, hex: string): number => {
+  const value = Number.parseInt(hex.replace("#", ""), 16);
+  const triple = [(value >> 16) & 255, (value >> 8) & 255, value & 255].map((channel) => channel / 255).join(" ");
+  return stream.split(triple).length - 1;
+};
+
+/** The planner's palette, as the renderer paints it. */
+const PALETTE = { marginFill: "#eeddab", marginHatch: "#c9a86a", baseline: "#8d765a", link: "#1468c4" } as const;
 
 /** A minimal DOM + object-URL recorder: enough to observe a real download start. */
 const withFakeBrowser = <T>(run: (recorder: {
@@ -190,7 +241,7 @@ describe("PDF export — the file name", () => {
 });
 
 describe("PDF export — the file that is created", () => {
-  test("a small project becomes a real PDF with the plan's content", async () => {
+  test("a small project becomes a real PDF holding the Gantt chart, and nothing else", async () => {
     const tasks = smallProject();
     const model = buildPlannerPdfModel(inputFor(tasks));
     expect(model.rows.length).toBe(tasks.length);
@@ -204,26 +255,62 @@ describe("PDF export — the file that is created", () => {
 
     // The bytes really are a PDF, and it opens again with the same title.
     const reopened = await PDFDocument.load(file.bytes);
-    expect(reopened.getPageCount()).toBeGreaterThan(0);
+    expect(reopened.getPageCount()).toBe(1);
     expect(reopened.getTitle()).toBe("Jackon Insulation - Planning");
     expect(reopened.getCreator()).toBe("Vintage GANTT");
     expect(reopened.getPage(0).getWidth()).toBeGreaterThan(100);
-
-    // The plan's own figures are in the document, not only in the model.
     expect(Buffer.from(file.bytes).toString("latin1").startsWith("%PDF-")).toBe(true);
-    const text = pdfText(file.bytes);
-    expect(text).toContain("Site preparation");
-    expect(text).toContain("Foundations");
-    expect(text).toContain("Handover");
-    expect(text).toContain("Task list");
-    // The footer names the file, exactly as the download does.
+
+    // The chart starts the document: the only page is page 1 of 1, and it is a
+    // chart page.
+    const { total, pages } = pdfPages(file.bytes);
+    expect(total).toBe(1);
+    expect([...pages.keys()]).toEqual([1]);
+    const text = pages.get(1)?.text ?? "";
+
+    // Every task of the plan is on the chart, with the milestone marked.
+    for (const name of ["Site works", "Site preparation", "Foundations", "Drainage", "Handover"]) {
+      expect(text).toContain(name);
+    }
+    expect(text).toContain("Handover (milestone)");
+
+    // The chart's own content: the title with its date range, the six legend
+    // entries, and the Today line.
+    expect(/Gantt chart[^\n]*\d{1,2} [A-Za-z]+ \d{4} - \d{1,2} [A-Za-z]+ \d{4}/.test(text)).toBe(true);
+    for (const legend of ["Critical path", "Summary bar", "Milestone", "Margin zone", "Baseline", "% complete"]) {
+      expect(text).toContain(legend);
+    }
+    expect(text).toContain("Today");
+
+    // The header of every page: project code, project name, client, then the
+    // version, the mode, the active baseline and the export date.
+    expect(text).toContain("P26032  ·  Jackon Insulation  ·  Jackon");
+    expect(text).toContain("Version: Planning  ·  Mode: Planning  ·  Baseline active: No  ·  Export date: 8 Oct 2026");
+    // The footer names the file, exactly as the download does, and numbers the page.
     expect(text).toContain("P26032 - Jackon Insulation - 2026-10-08.pdf");
+    expect(text).toContain("Page 1 of 1");
   });
 
-  test("the largest project (245 tasks) becomes a complete, multi-page PDF in time", async () => {
+  test("the task list is gone from every page", async () => {
+    const file = await createPlannerPdfFile(buildPlannerPdfModel(inputFor(smallProject())));
+    const { total, pages } = pdfPages(file.bytes);
+    expect(pages.size).toBe(total);
+    for (const page of pages.values()) {
+      // Every page of the export is a chart page…
+      expect(page.text).toContain("Gantt chart");
+      // …and none of them carries the removed table's title or its columns.
+      expect(page.text).not.toContain("Task list");
+      expect(page.text).not.toContain("Workload");
+      expect(page.text).not.toContain("Assignee");
+    }
+    // Not one task-list heading survives anywhere in the document.
+    expect(pdfText(file.bytes)).not.toContain("Task list");
+  });
+
+  test("the largest project (249 tasks) keeps every row, in time and without gaps", async () => {
     const tasks = largestProject();
     const model = buildPlannerPdfModel(inputFor(tasks));
-    expect(model.rows.length).toBe(246);
+    expect(model.rows.length).toBe(250);
 
     const started = performance.now();
     const file = await createPlannerPdfFile(model);
@@ -231,23 +318,101 @@ describe("PDF export — the file that is created", () => {
 
     const reopened = await PDFDocument.load(file.bytes);
     expect(reopened.getPageCount()).toBeGreaterThan(1);
-    // Every page names the file and counts itself: the document is complete.
-    const text = pdfText(file.bytes);
-    expect(text).toContain("Page 1 of ");
-    expect(text).toContain(`Page ${reopened.getPageCount()} of ${reopened.getPageCount()}`);
-    expect(text).toContain("Work package 1");
-    expect(text).toContain("Work package 245");
+
+    const { total, pages } = pdfPages(file.bytes);
+    // The page numbers match the real total, with no gap and no repeat.
+    expect(total).toBe(reopened.getPageCount());
+    expect([...pages.keys()].sort((left, right) => left - right))
+      .toEqual(Array.from({ length: total }, (_, index) => index + 1));
+
+    // Every page is a chart page, and every one repeats the timeline header: a
+    // day tick and a month band, plus the title's date range.
+    for (const page of pages.values()) {
+      expect(page.text).toContain("Gantt chart");
+      expect(page.text).not.toContain("Task list");
+      const lines = page.text.split("\n");
+      expect(lines.some((line) => /^\d{2}\/\d{2}$/.test(line))).toBe(true);
+      expect(lines.some((line) => /^[A-Z][a-z]{2,4} \d{4}$/.test(line))).toBe(true);
+    }
+
+    // The chart starts on page 1, which is the first part of the timeline.
+    expect(pages.get(1)?.text).toContain("part 1 of ");
+    // A plan this long needs continued row blocks and more than one window.
+    const titled = [...pages.values()].map((page) => ({
+      text: page.text,
+      window: Number(/\bpart (\d+) of /.exec(page.text)?.[1] ?? 1),
+      block: /\brows (\d+) onwards\b/.exec(page.text)?.[1] ?? "1",
+    }));
+    const blocks = [...new Set(titled.map((entry) => entry.block))];
+    const windows = [...new Set(titled.map((entry) => entry.window))].sort((left, right) => left - right);
+    expect(blocks.length).toBeGreaterThan(1);
+    expect(windows.length).toBeGreaterThan(1);
+    expect(titled.some((entry) => entry.text.includes("(continued)"))).toBe(true);
+
+    // Within one window, a row block's pages hold that block's rows exactly
+    // once, in the same order — and every window of the block shows the same
+    // rows, so nothing is lost or repeated between pages.
+    const drawn: string[] = [];
+    for (const block of blocks) {
+      const perWindow = windows.map((window) => titled
+        .filter((entry) => entry.block === block && entry.window === window)
+        .flatMap((entry) => rowLabels(entry.text)));
+      for (const rows of perWindow) {
+        expect(new Set(rows).size).toBe(rows.length);
+        expect(rows).toEqual(perWindow[0]);
+      }
+      drawn.push(...perWindow[0]);
+    }
+
+    // Every task of the plan is drawn exactly once per window: none is missing
+    // from the chart, and none is printed twice.
+    const expected = model.rows.map((row) => `${row.wbs}  ${row.name}`);
+    expect(expected.length).toBe(250);
+    expect(drawn.length).toBe(expected.length);
+    expect(new Set(drawn).size).toBe(drawn.length);
+    for (const label of expected) expect(drawn).toContain(label);
     // Reported, not asserted tightly: a huge plan must render quickly, and the
     // buffer below is far above what this takes today.
     expect(elapsed).toBeLessThan(30_000);
   });
 
-  test("an empty project still produces a valid file rather than nothing", async () => {
+  test("the margin zones, the baseline bars and the dependency arrows are still drawn", async () => {
+    const tasks = smallProject();
+    const withReserves = tasks.map((item) => ({ ...item, marginPct: 25, marginDaysOriginal: 4, marginDaysConsumed: 1 }));
+    const chartPage = async (bytes: Uint8Array) => pdfPages(bytes).pages.get(1)?.stream ?? "";
+
+    // The legend draws one symbol of each kind on page 1, so a page only shows
+    // more of a colour when the chart itself draws that element.
+    const plain = await chartPage((await createPlannerPdfFile(buildPlannerPdfModel(inputFor(tasks)))).bytes);
+    const reserves = await chartPage((await createPlannerPdfFile(buildPlannerPdfModel(inputFor(withReserves)))).bytes);
+    expect(countColour(reserves, PALETTE.marginFill)).toBeGreaterThan(countColour(plain, PALETTE.marginFill));
+    expect(countColour(reserves, PALETTE.marginHatch)).toBeGreaterThan(countColour(plain, PALETTE.marginHatch));
+
+    const baseline = await chartPage((await createPlannerPdfFile(buildPlannerPdfModel(inputFor(withReserves, {
+      baselineName: "Baseline 1",
+      baselineTasks: tasks.map((item) => ({ taskId: item.id, startDate: item.start, finishDate: item.finish })),
+    })))).bytes);
+    expect(countColour(baseline, PALETTE.baseline)).toBeGreaterThan(countColour(reserves, PALETTE.baseline));
+
+    const unlinked = await chartPage((await createPlannerPdfFile(buildPlannerPdfModel(inputFor(
+      tasks.map((item) => ({ ...item, predecessors: "" })),
+    )))).bytes);
+    expect(countColour(plain, PALETTE.link)).toBeGreaterThan(countColour(unlinked, PALETTE.link));
+  });
+
+  test("an empty project still produces a valid file: one chart page and no table", async () => {
     const model = buildPlannerPdfModel(inputFor([]));
     expect(model.empty).toBe(true);
     const file = await createPlannerPdfFile(model);
     const reopened = await PDFDocument.load(file.bytes);
     expect(reopened.getPageCount()).toBe(1);
+    const { total, pages } = pdfPages(file.bytes);
+    expect(total).toBe(1);
+    const text = pages.get(1)?.text ?? "";
+    expect(text).toContain("Gantt chart");
+    expect(text).toContain(PDF_NO_TASKS_MESSAGE);
+    expect(text).not.toContain("Task list");
+    expect(text).toContain("Page 1 of 1");
   });
 });
 

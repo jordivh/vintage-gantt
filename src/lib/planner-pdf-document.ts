@@ -5,7 +5,6 @@ import {
   DEFAULT_PAPER,
   PDF_NO_TASKS_MESSAGE,
   PDF_SECTION_TITLES,
-  PDF_TABLE_HEADERS,
   chartWindows,
   chunkRows,
   formatPdfDate,
@@ -29,6 +28,10 @@ import {
  * the same library in the browser and in Node, so the export can be rendered
  * and inspected outside the browser as well.
  *
+ * The exported document is the Gantt chart only: the task list is not printed.
+ * Every chart page repeats the timeline header, and every page — chart or not —
+ * carries the project header and the footer with the file name and page number.
+ *
  * Nothing here can touch the plan: it draws what the model read.
  * ------------------------------------------------------------------------ */
 
@@ -49,16 +52,11 @@ const HEADER_H = 24;
 const FOOTER_H = 12;
 const SECTION_TITLE_H = 9;
 const LEGEND_H = 9;
-const TABLE_HEADER_H = 7;
-const TABLE_ROW_H = 6.4;
 const CHART_ROW_H = 7;
 const CHART_TICK_BAND = 9;
 const CHART_GAP = 2;
 /** Both chart axes paginate, so this is the budget the two share. */
 const CHART_PAGE_BUDGET = 30;
-
-/** Table column widths as fractions of the usable width, in header order. */
-const TABLE_COLUMNS = [0.05, 0.26, 0.085, 0.085, 0.07, 0.07, 0.14, 0.09, 0.1, 0.05];
 
 /** The planner's own palette, so the print matches the screen. */
 const PALETTE = {
@@ -68,8 +66,6 @@ const PALETTE = {
   rule: "#c4b292",
   rowRule: "#e2d7c4",
   zebra: "#f7f1e6",
-  summaryRow: "#efe7d8",
-  headerFill: "#e4d8c3",
   nonWorking: "#78644a",
   summaryBar: "#806346",
   milestone: "#9b593e",
@@ -119,8 +115,6 @@ export async function renderPlannerPdf(model: PlannerPdfModel, options: PlannerP
   const RULE = hex(PALETTE.rule);
   const ROW_RULE = hex(PALETTE.rowRule);
   const ZEBRA = hex(PALETTE.zebra);
-  const SUMMARY_ROW = hex(PALETTE.summaryRow);
-  const HEADER_FILL = hex(PALETTE.headerFill);
   const NON_WORKING = hex(PALETTE.nonWorking);
   const SUMMARY_BAR = hex(PALETTE.summaryBar);
   const MILESTONE = hex(PALETTE.milestone);
@@ -204,75 +198,6 @@ export async function renderPlannerPdf(model: PlannerPdfModel, options: PlannerP
     next.setDate(next.getDate() + amount);
     return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
   };
-
-  /* -------------------------------------------------------- table of tasks */
-
-  const tableTitle = `${PDF_SECTION_TITLES.tasks} — ${model.meta.summaryLine}`;
-  const rowsOnFirstTablePage = Math.max(1, Math.floor((usableHeight - SECTION_TITLE_H - TABLE_HEADER_H) / TABLE_ROW_H));
-  const rowsOnNextTablePage = Math.max(1, Math.floor((usableHeight - TABLE_HEADER_H) / TABLE_ROW_H));
-
-  const drawTableHeader = (pen: Pen, topMm: number) => {
-    pen.rect(left, topMm, usable, TABLE_HEADER_H, { color: HEADER_FILL });
-    let x = left;
-    TABLE_COLUMNS.forEach((fraction, index) => {
-      pen.text(PDF_TABLE_HEADERS[index] ?? "", x + 1.2, topMm, TABLE_HEADER_H, 8, bold, INK_SOFT);
-      x += usable * fraction;
-    });
-    pen.line(left, topMm + TABLE_HEADER_H, left + usable, topMm + TABLE_HEADER_H, { color: RULE, thickness: mm(0.3) });
-  };
-
-  const drawTableRows = (pen: Pen, rows: PlannerPdfRow[], topMm: number) => {
-    const widths = TABLE_COLUMNS.map((fraction) => usable * fraction);
-    rows.forEach((row, index) => {
-      const rowTop = topMm + index * TABLE_ROW_H;
-      if (row.isSummary) pen.rect(left, rowTop, usable, TABLE_ROW_H, { color: SUMMARY_ROW });
-      else if (index % 2 === 1) pen.rect(left, rowTop, usable, TABLE_ROW_H, { color: ZEBRA });
-      const cells = [
-        row.wbs,
-        `${row.name}${row.isMilestone ? " (milestone)" : ""}`,
-        formatPdfDate(row.start),
-        formatPdfDate(row.finish),
-        row.durationText,
-        row.workText,
-        row.assigneeText,
-        row.statusText,
-        row.marginText,
-        row.isCritical ? "*" : "",
-      ];
-      let x = left;
-      cells.forEach((cell, cellIndex) => {
-        const cellWidth = widths[cellIndex] ?? 0;
-        // The task name is the one cell that carries the outline hierarchy.
-        const pad = (cellIndex === 1 ? 1.6 + row.depth * 3.4 : 1.2);
-        const cellFont = row.isSummary ? bold : font;
-        pen.text(fit(cell, cellWidth - pad - 1.6, 8, cellFont), x + pad, rowTop, TABLE_ROW_H, 8, cellFont, row.isSummary ? INK : INK_SOFT);
-        x += cellWidth;
-      });
-      pen.line(left, rowTop + TABLE_ROW_H, left + usable, rowTop + TABLE_ROW_H, { color: ROW_RULE, thickness: mm(0.2) });
-    });
-  };
-
-  if (model.empty) {
-    const pen = newPage();
-    pen.text(tableTitle, left, contentTop, SECTION_TITLE_H, 10.5, bold, INK);
-    pen.text(PDF_NO_TASKS_MESSAGE, left, contentTop + SECTION_TITLE_H, 8, 9, italic, MUTED);
-  } else {
-    const tablePages: PlannerPdfRow[][] = [];
-    tablePages.push(model.rows.slice(0, rowsOnFirstTablePage));
-    for (let index = rowsOnFirstTablePage; index < model.rows.length; index += rowsOnNextTablePage) {
-      tablePages.push(model.rows.slice(index, index + rowsOnNextTablePage));
-    }
-    tablePages.forEach((block, index) => {
-      const pen = newPage();
-      let top = contentTop;
-      if (index === 0) {
-        pen.text(fit(tableTitle, usable, 10.5, bold), left, top, SECTION_TITLE_H, 10.5, bold, INK);
-        top += SECTION_TITLE_H;
-      }
-      drawTableHeader(pen, top);
-      drawTableRows(pen, block, top + TABLE_HEADER_H);
-    });
-  }
 
   /* ------------------------------------------------------------ Gantt chart */
 
@@ -490,12 +415,24 @@ export async function renderPlannerPdf(model: PlannerPdfModel, options: PlannerP
     });
   }
 
+  // A project with nothing to chart still gets one page, so the export is always a
+  // document: the chart heading and the reason the timeline is empty. The document
+  // holds no task-list pages at all.
+  if (!pens.length) {
+    const pen = newPage();
+    pen.text(PDF_SECTION_TITLES.chart, left, contentTop, SECTION_TITLE_H, 10.5, bold, INK);
+    pen.text(PDF_NO_TASKS_MESSAGE, left, contentTop + SECTION_TITLE_H, 8, 9, italic, MUTED);
+  }
+
   /* -------------------------------------------------------- header, footer */
 
   const total = pens.length;
   pens.forEach((pen, index) => {
+    // The project code leads the header when the project has one; a project
+    // without a code simply shows its name, exactly as the file name does.
+    const code = model.meta.projectCode ? `${model.meta.projectCode}  ·  ` : "";
     const client = model.meta.client ? `  ·  ${model.meta.client}` : "";
-    pen.text(fit(`${model.meta.projectName}${client}`, usable, 12, bold), left, 7, 12, 12, bold, INK);
+    pen.text(fit(`${code}${model.meta.projectName}${client}`, usable, 12, bold), left, 7, 12, 12, bold, INK);
     const details = `Version: ${model.meta.versionName}  ·  Mode: ${model.meta.modeLabel}  ·  Baseline active: ${model.meta.baselineLine}  ·  Export date: ${model.meta.exportDateLabel}`;
     pen.text(fit(details, usable, 8), left, 15, 8, 8, font, MUTED);
     pen.line(left, 21, left + usable, 21, { color: RULE, thickness: mm(0.35) });
