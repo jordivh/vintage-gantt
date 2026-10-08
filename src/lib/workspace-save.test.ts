@@ -288,4 +288,22 @@ describe("saving the workspace — how the screens send it", () => {
     // The state that failed is dropped, not retried in a loop.
     expect(text).toContain("pendingSaveRef.current = null;\n      restoreLastSaved();");
   });
+
+  test("a dead predecessor reference is removed where it is made, and before every copy", () => {
+    const text = store();
+    // Where the token is created: deleting a task takes the references to it with
+    // it, so the plan never stores a link to a task that is gone. Leaving it behind
+    // is what refused every later copy with "Could not copy … could not be
+    // remapped", i.e. what made "Optimize planning" impossible to apply again.
+    const dashboard = readFileSync("src/pages/Dashboard.tsx", "utf8");
+    expect(dashboard).toContain("pruneDeadPredecessors(tasks.filter((task) => !removed.has(task.id)))");
+    // On the way in: a reference that names no task of its own version is dropped
+    // per version, and the repaired workspace is written, so it is repaired once.
+    expect(text).toContain("pruneDeadPredecessors(grouped[projectId])");
+    expect(text).toContain("if (deadReferences.length) lastSyncedRef.current = null;");
+    // Before every copy: optimized apply and New version, Replan, duplicate project.
+    expect(text).toContain("copyTasksToVersion(copyableSource(source)");
+    expect(text).toContain("remapCopiedTasks(copyableSource(margined)");
+    expect(text).toContain("copyableSource(tasksByProject[projectId] ?? [])");
+  });
 });

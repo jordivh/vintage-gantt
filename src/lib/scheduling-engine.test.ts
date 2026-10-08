@@ -826,7 +826,7 @@ describe("dead predecessor references — a copy is never refused over one", () 
     expect(result.dropped).toEqual([{ taskId: "v2-1", taskName: "Concept nakijken", token: "t3FS" }]);
     expect(result.tasks.find((task) => task.id === "v2-1")!.predecessors).toBe("");
     // Both versions are still whole, and v1 keeps its own live links.
-    expect(result.tasks).toHaveLength(versionOne.length + 1);
+    expect(result.tasks.length).toBe(versionOne.length + 1);
     expect(result.tasks.find((task) => task.id === "t5")!.predecessors).toBe("t3FS");
   });
 
@@ -841,7 +841,7 @@ describe("dead predecessor references — a copy is never refused over one", () 
     let counter = 0;
     const copy = copyTasksToVersion(pruneDeadPredecessors(source).tasks, "version-2", () => `task-copy-${++counter}`);
     expect(copy.error).toBeUndefined();
-    expect(copy.tasks).toHaveLength(source.length);
+    expect(copy.tasks.length).toBe(source.length);
     expect(copy.tasks.every((task) => task.versionId === "version-2")).toBe(true);
     expect(copy.tasks.find((task) => task.id === copy.idMap.get("t3")!)!.predecessors).toBe("");
     // The copy carries exactly the links the version had: the four that resolved.

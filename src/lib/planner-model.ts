@@ -215,15 +215,29 @@ export function pruneDeadPredecessors<T extends RemapTaskShape & { versionId?: s
   const pruned = new Map<T, T>();
   for (const group of groups.values()) {
     const ordered = orderTasksForDisplay(group);
+    // The usual token names a task of the group directly. Reading that off the ids
+    // keeps the pass linear on a healthy plan (this runs on every load and in front
+    // of every copy, on plans of thousands of rows); a token that does not match an
+    // id is the rare case, and it goes through the full resolution, which also
+    // understands a legacy token that only carries a display number.
+    const ids = new Set(group.map((task) => task.id));
+    const namesATask = (part: string): boolean => {
+      for (let cut = part.length; cut > 0; cut -= 1) {
+        if (ids.has(part.slice(0, cut)) && dependencySuffixPattern.test(part.slice(cut))) return true;
+      }
+      return Boolean(resolvePredecessorReference(part, group, ordered));
+    };
     for (const task of group) {
       const parts = task.predecessors.split(",").map((part) => part.trim()).filter(Boolean);
-      const resolved = parts.map((part) => ({ part, dependency: resolvePredecessorReference(part, group, ordered) }));
-      const live = resolved.filter((entry) => entry.dependency);
-      if (live.length === parts.length) continue;
-      for (const entry of resolved) {
-        if (!entry.dependency) dropped.push({ taskId: task.id, taskName: task.name ?? task.id, token: entry.part });
+      const live: string[] = [];
+      const dead: string[] = [];
+      for (const part of parts) {
+        if (namesATask(part)) live.push(part);
+        else dead.push(part);
       }
-      pruned.set(task, { ...task, predecessors: live.map((entry) => entry.part).join(", ") } as T);
+      if (!dead.length) continue;
+      for (const token of dead) dropped.push({ taskId: task.id, taskName: task.name ?? task.id, token });
+      pruned.set(task, { ...task, predecessors: live.join(", ") } as T);
     }
   }
   if (!pruned.size) return { tasks: rows, dropped };
@@ -275,6 +289,11 @@ export function remapCopiedTasks<T extends RemapTaskShape>(
  * remapped through the resulting id map. A single unresolvable reference fails
  * the whole copy, so a version is never created with missing links. The rows are
  * read, never changed, so the version they came from stays exactly as it was.
+ *
+ * The caller repairs the source first (`pruneDeadPredecessors`): a token that
+ * names no task of the source version is not a link the copy would lose — the
+ * version never had it — so refusing over one only blocked the user. This guard
+ * therefore fires on genuinely inconsistent input, which a repaired source is not.
  */
 export function copyTasksToVersion<T extends RemapTaskShape>(
   source: T[],
