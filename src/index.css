@@ -119,6 +119,19 @@
 .optimize-problems { display: grid; gap: 6px; }
 .optimize-problem { padding: 9px 11px; border: 1px solid #d9b9a8; background: #f6e8e0; color: #7b4a38; font: 11.5px/1.45 Georgia, serif; }
 .optimize-empty { margin: 0; color: #806d54; font: 12px Georgia, serif; }
+/* The optimization settings dialog: one row per milestone, with a tick for the
+   date that must not move. */
+.optimize-milestone-list { display: grid; gap: 4px; border: 1px solid #d0bea0; background: #fbf7ee; padding: 8px; }
+.optimize-milestone { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid transparent; cursor: pointer; }
+.optimize-milestone:hover { background: #f3ebdc; }
+.optimize-milestone.is-fixed { border-color: #b9a37c; background: #efe4cd; }
+.optimize-milestone input { accent-color: #7c6a4f; }
+.optimize-milestone-name { flex: 1; color: #44372a; font: 12.5px Georgia, serif; }
+.optimize-milestone-date { color: #6b523d; font-size: 11px; font-variant-numeric: tabular-nums; }
+.optimize-milestone-flag { color: #806d54; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.optimize-hint { margin: 8px 0 0; color: #806d54; font: italic 11.5px Georgia, serif; }
+.optimize-problem b { display: block; margin-bottom: 3px; color: #6b3f2c; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.optimize-fixed-row td { background: #efe4cd; }
 .planner-context-bar { min-height: 68px; }
 .timeline-controls { display: none; }
 .context-selectors { display: flex; align-items: center; gap: 10px; margin-left: auto; margin-right: 18px; }

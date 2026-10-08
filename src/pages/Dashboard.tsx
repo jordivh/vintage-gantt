@@ -50,6 +50,7 @@ import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
 import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engine";
 import { optimizeProject, OCCUPANCY_TARGET, type OptimizationPlan } from "@/lib/resource-optimizer";
+import { fixedMilestoneChoices, loadFixedMilestones, saveFixedMilestones } from "@/lib/optimize-milestones";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -316,6 +317,21 @@ export default function Dashboard() {
   // until "Apply" stores it as its own plan version.
   const [optimizePlan, setOptimizePlan] = useState<OptimizationPlan | null>(null);
   const [optimizeError, setOptimizeError] = useState<string | null>(null);
+  // The settings dialog comes before the run, so the fixed milestones are chosen
+  // first. `null` means closed; a list of ids means open with that selection, and
+  // the selection is only remembered when the optimization is actually run —
+  // Cancel leaves the stored choice exactly as it was.
+  const [optimizeSettings, setOptimizeSettings] = useState<string[] | null>(null);
+  // The dialog's rows: every milestone of the open project (a zero-duration row
+  // without children, the rule the Gantt grid uses), pre-ticked from the selection
+  // remembered for this project. Purely derived — opening the dialog writes
+  // nothing.
+  const optimizeMilestoneChoices = useMemo(() => {
+    if (!optimizeSettings) return [];
+    const openTasks = projectTasks(activeProjectId);
+    const milestones = openTasks.filter((task) => task.duration === 0 && !openTasks.some((child) => child.parentId === task.id));
+    return fixedMilestoneChoices(milestones, optimizeSettings);
+  }, [optimizeSettings, projectTasks, activeProjectId]);
 
   useEffect(() => {
     if (!resourceEditor) return;
@@ -1264,15 +1280,29 @@ export default function Dashboard() {
     toast.success("New version created in Planning mode");
   };
   /**
-   * Resource optimization: computes a preview for the open project only.
+   * Resource optimization: the settings dialog first, then a preview.
    *
-   * The whole company's active versions are handed in — so every employee's
-   * occupancy counts the work of the other projects — but only this project's
-   * rows are ever returned as movable. Nothing is written: the result is shown
-   * first, and only "Apply" turns it into a new plan version.
+   * Opening the dialog changes nothing at all: it only reads the milestones of the
+   * open project and the selection remembered for it. The whole company's active
+   * versions are handed in — so every employee's occupancy counts the work of the
+   * other projects — but only this project's rows are ever returned as movable.
+   * Nothing is written: the result is shown first, and only "Apply" turns it into
+   * a new plan version.
    */
-  const openOptimize = () => {
+  const openOptimizeSettings = () => {
     setOverflowOpen(false);
+    setOptimizePlan(null);
+    setOptimizeError(null);
+    setOptimizeSettings(loadFixedMilestones(activeProjectId));
+  };
+  /** Cancel changes nothing: the dialog simply closes, nothing is remembered. */
+  const cancelOptimizeSettings = () => setOptimizeSettings(null);
+  const runOptimize = () => {
+    // The chosen milestones are remembered for this project, so the dialog comes
+    // back with the same boxes ticked.
+    const fixedMilestoneIds = optimizeSettings ?? [];
+    saveFixedMilestones(activeProjectId, fixedMilestoneIds);
+    setOptimizeSettings(null);
     const result = optimizeProject({
       projectId: activeProjectId,
       projects: selectCapacityProjects(projects).map((project) => ({
@@ -1286,6 +1316,7 @@ export default function Dashboard() {
       system,
       mode: activeMode,
       today: todayLineDate,
+      fixedMilestoneIds,
     });
     if (!result.ok) {
       setOptimizePlan(null);
@@ -1526,7 +1557,7 @@ export default function Dashboard() {
             <button onClick={openProjectSettings}><CalendarDays size={14} /> Project calendar</button>
             <button onClick={openReplan}><RotateCcw size={14} /> Replan</button>
             <button onClick={openNewVersion}><Copy size={14} /> New version</button>
-            <button onClick={openOptimize}><Sparkles size={14} /> Optimize planning</button>
+            <button onClick={openOptimizeSettings}><Sparkles size={14} /> Optimize planning</button>
             <div className="menu-rule" />
             <button onClick={openBaseline}><FileSpreadsheet size={14} /> Set baseline</button>
             <button onClick={openSaveTemplate}><Copy size={14} /> Save as template</button>
@@ -1622,6 +1653,49 @@ export default function Dashboard() {
         </div>
       )}
 
+      {optimizeSettings && (
+        <div className="modal-backdrop" onClick={cancelOptimizeSettings}>
+          <div className="task-modal optimize-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><div className="eyebrow">OPTIMIZE PLANNING</div><h2>Optimization settings</h2></div>
+              <button className="icon-button" onClick={cancelOptimizeSettings} aria-label="Cancel"><X size={18} /></button>
+            </div>
+            <p className="calendar-copy">
+              The optimization lowers every employee&apos;s weekly occupancy in <b>{activeProject.name}</b> by moving tasks and by spreading
+the same work hours over more working days (up to +50% duration). Tick the milestones that must keep exactly the date they have now:
+a fixed milestone is never moved, and a task that would push it is left alone.
+            </p>
+            <div className="optimize-section">
+              <h3>Milestones ({optimizeMilestoneChoices.length})</h3>
+              {optimizeMilestoneChoices.length === 0 ? (
+                <p className="optimize-empty">This project has no milestones.</p>
+              ) : (
+                <div className="optimize-milestone-list">
+                  {optimizeMilestoneChoices.map((milestone) => {
+                    const toggle = () => setOptimizeSettings((current) => (current ?? []).includes(milestone.taskId)
+                      ? (current ?? []).filter((id) => id !== milestone.taskId)
+                      : [...(current ?? []), milestone.taskId]);
+                    return (
+                      <label key={milestone.taskId} className={milestone.fixed ? "optimize-milestone is-fixed" : "optimize-milestone"}>
+                        <input type="checkbox" checked={milestone.fixed} onChange={toggle} />
+                        <span className="optimize-milestone-name">{milestone.name}</span>
+                        <span className="optimize-milestone-date">{formatFullDate(milestone.date)}</span>
+                        <span className="optimize-milestone-flag">Fixed date</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              <p className="optimize-hint">The selection is remembered for this project and pre-filled the next time.</p>
+            </div>
+            <div className="modal-actions">
+              <button className="tool-button" onClick={cancelOptimizeSettings}>Cancel</button>
+              <button className="tool-button primary" onClick={runOptimize}>Run optimization</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {(optimizePlan || optimizeError) && (
         <div className="modal-backdrop" onClick={cancelOptimize}>
           <div className="task-modal optimize-modal" onClick={(event) => event.stopPropagation()}>
@@ -1639,9 +1713,10 @@ export default function Dashboard() {
             ) : (
               <>
                 <p className="calendar-copy">
-                  Only <b>{activeProject.name}</b> may move. Durations, resource assignments and dependencies stay exactly as they are,
-                  every task stays one block, and each employee&apos;s weekly occupancy counts the work of all other projects.
-                  Target {Math.round(OCCUPANCY_TARGET * 100)}% per week, hard limit 100%.
+                  Only <b>{activeProject.name}</b> may change. A task may move and may grow by at most 50% of the duration it had before
+                  this run — never shorter, never split, and spreading a task over more days keeps exactly the same work hours. Resource
+                  assignments and dependencies stay as they are, fixed milestones keep their date, and each employee&apos;s weekly occupancy
+                  counts the work of all other projects. Target {Math.round(OCCUPANCY_TARGET * 100)}% per week, hard limit 100%.
                 </p>
 
                 <div className="optimize-summary">
@@ -1656,30 +1731,64 @@ export default function Dashboard() {
                 </div>
 
                 <div className="optimize-section">
-                  <h3>Moved tasks ({optimizePlan.moves.length})</h3>
-                  {optimizePlan.moves.length === 0 ? (
-                    <p className="optimize-empty">No task needs to move — the plan already meets the target within its rules.</p>
+                  <h3>Milestones ({optimizePlan.milestones.length})</h3>
+                  {optimizePlan.milestones.length === 0 ? (
+                    <p className="optimize-empty">This project has no milestones.</p>
                   ) : (
                     <div className="optimize-table-wrap">
                       <table className="optimize-table">
                         <thead>
-                          <tr><th>Task</th><th>Old start</th><th>Old finish</th><th>New start</th><th>New finish</th><th>Float used</th><th>Critical</th></tr>
+                          <tr><th>Milestone</th><th>Old date</th><th>New date</th><th>Kept fixed</th></tr>
                         </thead>
                         <tbody>
-                          {optimizePlan.moves.map((move) => (
-                            <tr key={move.taskId}>
-                              <td>{move.taskName}</td>
-                              <td>{formatDate(move.oldStart)}</td>
-                              <td>{formatDate(move.oldFinish)}</td>
-                              <td>{formatDate(move.newStart)}</td>
-                              <td>{formatDate(move.newFinish)}</td>
-                              <td>{move.floatUsed > 0 ? `${move.floatUsed} d of ${move.floatAvailable} d` : move.shiftDays < 0 ? "moved earlier" : "beyond float"}</td>
-                              <td>{move.critical ? "yes" : "no"}</td>
+                          {optimizePlan.milestones.map((milestone) => (
+                            <tr key={milestone.taskId} className={milestone.fixed ? "optimize-fixed-row" : undefined}>
+                              <td>{milestone.name}</td>
+                              <td>{formatDate(milestone.oldDate)}</td>
+                              <td>{milestone.moved ? formatDate(milestone.newDate) : "unchanged"}</td>
+                              <td>{milestone.fixed ? "yes — fixed for this run" : milestone.moved ? "no — follows the plan" : "no"}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
+                  )}
+                </div>
+
+                <div className="optimize-section">
+                  <h3>Changed tasks ({optimizePlan.moves.length})</h3>
+                  {optimizePlan.moves.length === 0 ? (
+                    <p className="optimize-empty">No task needs to change — the plan already meets the target within its rules.</p>
+                  ) : (
+                    <>
+                      <div className="optimize-table-wrap">
+                        <table className="optimize-table">
+                          <thead>
+                            <tr><th>Task</th><th>Change</th><th>Old dates</th><th>New dates</th><th>Duration</th><th>Extension</th><th>Float used</th><th>Critical</th><th>Work hours</th></tr>
+                          </thead>
+                          <tbody>
+                            {optimizePlan.moves.map((move) => (
+                              <tr key={move.taskId}>
+                                <td>{move.taskName}</td>
+                                <td>{move.changeKind === "both" ? "moved and extended" : move.changeKind}</td>
+                                <td>{formatDate(move.oldStart)} → {formatDate(move.oldFinish)}</td>
+                                <td>{formatDate(move.newStart)} → {formatDate(move.newFinish)}</td>
+                                <td>{move.newDuration === move.oldDuration ? `${move.oldDuration}` : `${move.oldDuration} → ${move.newDuration}`}</td>
+                                <td>{move.extensionDays > 0 ? `+${move.extensionDays} (+${move.extensionPct}%)` : "—"}</td>
+                                <td>{move.floatUsed > 0 ? `${move.floatUsed} d of ${move.floatAvailable} d` : move.shiftDays < 0 ? "moved earlier" : "—"}</td>
+                                <td>{move.critical ? "yes" : "no"}</td>
+                                <td>{move.extensionDays > 0 ? `${formatAvailableHours(move.newWork)} h, unchanged` : `${formatAvailableHours(move.newWork)} h`}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="optimize-hint">
+                        {optimizePlan.workHoursPreserved
+                          ? `Total work hours are unchanged: every extended task spreads exactly the same hours over more working days (${optimizePlan.moves.filter((move) => move.extensionDays > 0).length} extended).`
+                          : "Warning: a task's total work hours differ from the original — the change is not applied as shown."}
+                      </p>
+                    </>
                   )}
                 </div>
 
@@ -1710,6 +1819,20 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
+
+                {optimizePlan.blockers.length > 0 && (
+                  <div className="optimize-section">
+                    <h3>Warnings: fixed milestones and the +50% extension limit ({optimizePlan.blockers.length})</h3>
+                    <div className="optimize-problems">
+                      {optimizePlan.blockers.map((blocker, index) => (
+                        <div key={`${blocker.kind}-${index}`} className="optimize-problem">
+                          <b>{blocker.kind === "fixed-milestone" ? `Fixed milestone: ${blocker.milestoneName}` : "Extension limit reached"}</b>
+                          <span>{blocker.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="optimize-section">
                   <h3>Remaining weeks above 100% or far from 90% ({optimizePlan.unresolved.length})</h3>

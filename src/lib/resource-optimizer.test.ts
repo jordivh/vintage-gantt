@@ -16,7 +16,8 @@ import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { applyPlanningModeMargins, copyTasksToVersion, type PlannerTask } from "./planner-model";
 import { createDefaultCalendarSystem, type CalendarSystem, type PlannerCalendar, type Weekday } from "./scheduling-engine";
-import { optimizeProject, type OptimizeProjectInput } from "./resource-optimizer";
+import { optimizeProject, maxDurationFor, EXTENSION_LIMIT, type OptimizationPlan, type OptimizeProjectInput } from "./resource-optimizer";
+import { computeResourceLoads } from "./capacity-engine";
 
 const modules = {
   "./planner.ts": () => import("../convex/planner"),
@@ -66,6 +67,9 @@ const run = (input: {
   others?: OptimizeProjectInput[];
   mode?: "planning" | "monitoring";
   today?: string;
+  fixedMilestoneIds?: string[];
+  /** 0 turns duration extension off, which is how a case is compared to moves only. */
+  maxExtensionDays?: number;
 }) => optimizeProject({
   projectId: "proj-open",
   projects: [
@@ -77,7 +81,59 @@ const run = (input: {
   system,
   mode: input.mode ?? "planning",
   today: input.today ?? "2026-09-01",
+  fixedMilestoneIds: input.fixedMilestoneIds,
+  limits: { maxExtensionDays: input.maxExtensionDays ?? 8 },
 });
+
+/** A zero-duration row without children — a milestone, with a date to keep. */
+const milestone = (id: string, date: string, predecessors: string): PlannerTask =>
+  task({ id, name: id, duration: 0, start: date, finish: date, isMilestone: true, predecessors });
+
+/** The hours a task really plans, summed from the capacity engine's daily split. */
+const plannedHours = (tasks: PlannerTask[], tasksToMeasure: string[], assignments: { taskId: string; resourceId: string }[]) =>
+  Object.fromEntries(tasksToMeasure.map((taskId) => {
+    let total = 0;
+    for (const report of computeResourceLoads({
+      system,
+      resources: [anna],
+      assignments,
+      projects: [{ projectId: "proj-open", projectName: "Open project", projectCalendarId: "base", tasks }],
+    })) {
+      for (const day of report.days) {
+        for (const contribution of day.contributions) if (contribution.taskId === taskId) total += contribution.hours;
+      }
+    }
+    return [taskId, Math.round(total * 100) / 100];
+  }));
+
+/** Priority 4 as the preview shows it: distance of every booked week from 90 %. */
+const deviationOf = (plan: ReturnType<typeof optimizeProject>) => {
+  if (!plan.ok) throw new Error(plan.error);
+  return plan.occupancy.reduce((total, resource) => total + resource.weeks.reduce((sum, week) => (
+    week.after <= 0 || week.available <= 0 ? sum : sum + Math.abs(week.after - 0.9 * week.available)
+  ), 0), 0);
+};
+
+/**
+ * Every rule that must hold whatever the optimizer decides: a task is never
+ * shortened, never grows past +50 % of what it was, keeps its dependencies, stays
+ * one block, and keeps its stored work hours.
+ */
+const expectPlanSound = (before: PlannerTask[], after: PlannerTask[]) => {
+  expect(after.length).toBe(before.length);
+  const map = byId(after);
+  for (const item of before) {
+    const next = map.get(item.id)!;
+    expect(next.duration >= item.duration).toBe(true);
+    expect(next.duration <= maxDurationFor(item.duration, Boolean(item.isMilestone) || item.duration <= 0)).toBe(true);
+    expect(next.durationUnit).toBe(item.durationUnit);
+    expect(next.work ?? 0).toBe(item.work ?? 0);
+    expect(next.predecessors).toBe(item.predecessors);
+    expect(next.name).toBe(item.name);
+    expect(next.distribution ?? "even").toBe(item.distribution ?? "even");
+    expect(next.allocations).toEqual(item.allocations);
+  }
+};
 
 const ok = (result: ReturnType<typeof optimizeProject>) => {
   if (!result.ok) throw new Error(result.error);
@@ -371,5 +427,266 @@ describe("resource optimization — apply and cancel", () => {
     }
     // A version was created next to the original, and the original is active=false.
     expect(originals.size).toBe(tasks.length);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Fixed milestones (chosen in the settings dialog before the run).          */
+/* ------------------------------------------------------------------------ */
+
+/** Pins the start of the tasks that follow it at Monday 5 October. */
+const pinFiveOct = () => task({ id: "P", name: "P", duration: 5, start: "2026-09-28", finish: "2026-10-02" });
+/** Unassigned work that holds the project end at Friday 16 October. */
+const holdEnd = () => task({ id: "D", name: "D", duration: 10, start: "2026-10-05", finish: "2026-10-16" });
+
+const twoDaysEach = (): PlannerTask[] => [
+  task({ id: "A", name: "A", duration: 2, start: "2026-10-08", finish: "2026-10-09", work: 24, predecessors: "PFS", startConstraint: "2026-10-08" }),
+  task({ id: "B", name: "B", duration: 2, start: "2026-10-08", finish: "2026-10-09", work: 24, predecessors: "PFS", startConstraint: "2026-10-08" }),
+];
+
+describe("resource optimization — fixed milestones", () => {
+  test("a fixed milestone keeps its date while other tasks still change", () => {
+    // Anna is at 48 h in the week of 5 October, so something has to give — but the
+    // milestone the user ticked must not move, and it does not have to: A can move.
+    const tasks = [pinFiveOct(), ...twoDaysEach(), milestone("M", "2026-10-12", "BFS"), holdEnd()];
+    const result = ok(run({ tasks, assignments: onAnna(["A", "B"]), fixedMilestoneIds: ["M"] }));
+
+    const m = result.milestones.find((item) => item.taskId === "M")!;
+    expect(m.fixed).toBe(true);
+    expect(m.moved).toBe(false);
+    expect(m.newDate).toBe("2026-10-12");
+    expect(result.fixedMilestoneIds).toEqual(["M"]);
+
+    // Other tasks did change, and the milestone is not one of them.
+    expect(result.moves.length).toBeGreaterThan(0);
+    expect(result.moves.some((move) => move.taskId === "M")).toBe(false);
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expect(weekOf(result, "2026-10-05").after <= 40).toBe(true);
+    expect(result.finishDeltaWorkingDays).toBe(0);
+    expectPlanSound(tasks, result.tasks);
+  });
+
+  test("a milestone that is not fixed moves when the overload needs it", () => {
+    // Two critical 40 h tasks in one week: the only way to the hard limit is to
+    // move work past the milestone's date, so the milestone travels with it.
+    const tasks = [
+      pinFiveOct(),
+      task({ id: "A", name: "A", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 40, predecessors: "PFS" }),
+      task({ id: "B", name: "B", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 40, predecessors: "PFS" }),
+      milestone("M", "2026-10-12", "AFS,BFS"),
+    ];
+    const result = ok(run({ tasks, assignments: onAnna(["A", "B"]) }));
+
+    expect(result.fixedMilestoneIds).toEqual([]);
+    const m = result.milestones.find((item) => item.taskId === "M")!;
+    expect(m.fixed).toBe(false);
+    expect(m.moved).toBe(true);
+    expect(m.oldDate).toBe("2026-10-12");
+    expect(m.newDate).toBe("2026-10-19");
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expectPlanSound(tasks, result.tasks);
+  });
+
+  test("an overload that would need a fixed milestone to move is reported, and nothing moves", () => {
+    // Every way out of the overload would delay milestone M, which is fixed. The
+    // plan is left exactly as it is and the conflict is named instead.
+    const tasks = [
+      pinFiveOct(),
+      task({ id: "A", name: "A", duration: 4, start: "2026-10-05", finish: "2026-10-08", work: 32, predecessors: "PFS" }),
+      task({ id: "B", name: "B", duration: 2, start: "2026-10-05", finish: "2026-10-06", work: 16, predecessors: "PFS" }),
+      milestone("M", "2026-10-09", "AFS,BFS"),
+    ];
+    const result = ok(run({ tasks, assignments: onAnna(["A", "B"]), fixedMilestoneIds: ["M"] }));
+
+    expect(result.moves).toEqual([]);
+    expect(result.tasks).toEqual(tasks);
+    const m = result.milestones.find((item) => item.taskId === "M")!;
+    expect(m.newDate).toBe("2026-10-09");
+    expect(m.moved).toBe(false);
+
+    // The overload is reported, and the reason names the milestone, the employee
+    // and the week that is involved.
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity" && problem.weekStart === "2026-10-05")).toBe(true);
+    const blocker = result.blockers.find((item) => item.kind === "fixed-milestone")!;
+    expect(blocker).toBeDefined();
+    expect(blocker.milestoneName).toBe("M");
+    expect(blocker.milestoneDate).toBe("2026-10-09");
+    expect(blocker.resourceNames).toEqual(["Anna"]);
+    expect(blocker.weeks).toEqual(["2026-10-05"]);
+    expect(blocker.reason).toContain("M");
+    expect(blocker.reason).toContain("Anna");
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Extending task duration (the same work over more working days).           */
+/* ------------------------------------------------------------------------ */
+
+describe("resource optimization — extending task duration", () => {
+  test("an overload is cleared by extending a task, within the +50 % limit", () => {
+    // Anna is at 48 h in the week of 8 October. Nothing may move earlier (P) and
+    // moving later would delay the project, so A is spread over three working
+    // days instead — exactly +50 %, and its 24 h stay 24 h.
+    const tasks = [
+      pinFiveOct(),
+      ...twoDaysEach(),
+      task({ id: "X", name: "X", duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 32 }),
+    ];
+    const assignments = onAnna(["A", "B", "X"]);
+    const result = ok(run({ tasks, assignments }));
+
+    expect(result.moves.length).toBe(1);
+    const move = result.moves[0];
+    expect(move.taskId).toBe("A");
+    expect(move.changeKind).toBe("extended");
+    expect(move.shiftDays).toBe(0);
+    expect(move.extensionDays).toBe(1);
+    expect(move.oldDuration).toBe(2);
+    expect(move.newDuration).toBe(3);
+    expect(move.extensionPct).toBe(50);
+    expect(move.oldWork).toBe(24);
+    expect(move.newWork).toBe(24);
+
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expect(weekOf(result, "2026-10-05").after).toBe(40);
+    expect(result.finishDeltaWorkingDays).toBe(0);
+    expect(result.workHoursPreserved).toBe(true);
+    expectPlanSound(tasks, result.tasks);
+    // The same hours, measured by the capacity engine before and after.
+    expect(plannedHours(result.tasks, ["A"], assignments)).toEqual(plannedHours(tasks, ["A"], assignments));
+  });
+
+  test("extending gives a better result than moving alone", () => {
+    // Two pinned tasks in one week. Moving one later clears the limit but leaves a
+    // badly booked week; moving it and spreading it comes much closer to 90 %.
+    const tasks = [
+      pinFiveOct(),
+      task({ id: "A", name: "A", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 40, predecessors: "PFS" }),
+      task({ id: "B", name: "B", duration: 4, start: "2026-10-05", finish: "2026-10-08", work: 32, predecessors: "PFS" }),
+      holdEnd(),
+    ];
+    const assignments = onAnna(["A", "B"]);
+
+    const withExtension: OptimizationPlan = ok(run({ tasks, assignments }));
+    const movesOnly = ok(run({ tasks, assignments, maxExtensionDays: 0 }));
+
+    // Both clear the hard limit; the run that may extend is measurably closer to
+    // the 90 % target, at the very same project end date.
+    expect(withExtension.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expect(movesOnly.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expect(withExtension.finishDeltaWorkingDays).toBe(movesOnly.finishDeltaWorkingDays);
+    expect(deviationOf(withExtension)).toBeLessThan(deviationOf(movesOnly));
+
+    const move = withExtension.moves.find((item) => item.taskId === "A")!;
+    expect(move.extensionDays).toBeGreaterThan(0);
+    expect(move.changeKind).toBe("both");
+    expect(move.newDuration <= maxDurationFor(5, false)).toBe(true);
+    expect(withExtension.workHoursPreserved).toBe(true);
+    expectPlanSound(tasks, withExtension.tasks);
+  });
+
+  test("moving gives the better result when both are possible", () => {
+    // A fixed milestone sits one day after A's finish, so A can be neither moved
+    // nor extended; B may do either, and moving it one day is what helps most.
+    const tasks = [pinFiveOct(), ...twoDaysEach(), milestone("M", "2026-10-12", "AFS"), holdEnd()];
+    const assignments = onAnna(["A", "B"]);
+    const result = ok(run({ tasks, assignments, fixedMilestoneIds: ["M"] }));
+    const movesOnly = ok(run({ tasks, assignments, fixedMilestoneIds: ["M"], maxExtensionDays: 0 }));
+
+    expect(result.moves.length).toBeGreaterThan(0);
+    for (const move of result.moves) {
+      expect(move.extensionDays).toBe(0);
+      expect(move.shiftDays).not.toBe(0);
+    }
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity")).toBe(false);
+    expect(result.milestones[0].newDate).toBe("2026-10-12");
+    // Extension was available and adds nothing here: the move is the answer.
+    expect(movesOnly.moves.map((move) => [move.taskId, move.newStart])).toEqual(result.moves.map((move) => [move.taskId, move.newStart]));
+    expectPlanSound(tasks, result.tasks);
+  });
+
+  test("the +50 % limit is never exceeded and a one-day task cannot be spread further", () => {
+    // A one-day task has no headroom at all under the limit, so the overload it
+    // sits in can only be lifted by moving it — which its fixed milestone forbids.
+    const tasks = [
+      pinFiveOct(),
+      task({ id: "V", name: "V", duration: 1, start: "2026-10-05", finish: "2026-10-05", work: 16, predecessors: "PFS", startConstraint: "2026-10-05" }),
+      task({ id: "W", name: "W", duration: 1, start: "2026-10-05", finish: "2026-10-05", work: 16, predecessors: "PFS", startConstraint: "2026-10-05" }),
+      milestone("MV", "2026-10-06", "VFS,WFS"),
+    ];
+    const other = [{
+      projectId: "proj-other",
+      projectName: "Other project",
+      projectCalendarId: "base",
+      tasks: [task({ id: "O", name: "O", duration: 4, start: "2026-10-05", finish: "2026-10-08", work: 32 })],
+    }];
+    const result = ok(run({ tasks, others: other, assignments: onAnna(["V", "W", "O"]), fixedMilestoneIds: ["MV"] }));
+
+    // The limit holds: no duration grew, and none could have.
+    expect(result.tasks.map((item) => item.duration)).toEqual(tasks.map((item) => item.duration));
+    expect(result.moves.every((move) => move.extensionDays === 0)).toBe(true);
+    expect(maxDurationFor(4, false)).toBe(6);
+    expect(maxDurationFor(5, false)).toBe(7);
+    expect(maxDurationFor(1, false)).toBe(1);
+    expect(maxDurationFor(0, true)).toBe(0);
+    expect(EXTENSION_LIMIT).toBe(1.5);
+
+    // The remaining overload is reported, and so is the limit that stops it.
+    expect(result.unresolved.some((problem) => problem.kind === "over-capacity" && problem.weekStart === "2026-10-05")).toBe(true);
+    const limit = result.blockers.find((item) => item.kind === "extension-limit")!;
+    expect(limit).toBeDefined();
+    expect(limit.taskNames).toEqual(["V", "W"]);
+    expect(limit.resourceNames).toEqual(["Anna"]);
+    expect(limit.weeks).toEqual(["2026-10-05"]);
+    expect(limit.reason).toContain("+50%");
+    expect(result.blockers.some((item) => item.kind === "fixed-milestone" && item.milestoneName === "MV")).toBe(true);
+  });
+
+  test("no task is ever shortened and every extended task keeps exactly its work hours", () => {
+    const tasks = [
+      pinFiveOct(),
+      ...twoDaysEach(),
+      task({ id: "X", name: "X", duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 32 }),
+    ];
+    const assignments = onAnna(["A", "B", "X"]);
+    const result = ok(run({ tasks, assignments }));
+    const before = byId(tasks);
+
+    expect(result.workHoursPreserved).toBe(true);
+    const extended = result.moves.filter((move) => move.extensionDays > 0);
+    expect(extended.length).toBeGreaterThan(0);
+    const hoursBefore = plannedHours(tasks, extended.map((move) => move.taskId), assignments);
+    const hoursAfter = plannedHours(result.tasks, extended.map((move) => move.taskId), assignments);
+    for (const move of extended) {
+      const source = before.get(move.taskId)!;
+      expect(move.newDuration > move.oldDuration).toBe(true);
+      expect(move.newDuration - move.oldDuration <= Math.floor(source.duration * (EXTENSION_LIMIT - 1))).toBe(true);
+      // The same hours, only over more days.
+      expect(hoursAfter[move.taskId]).toBe(hoursBefore[move.taskId]);
+    }
+    for (const item of tasks) {
+      const after = byId(result.tasks).get(item.id)!;
+      expect(after.duration >= item.duration).toBe(true);
+    }
+  });
+
+  test("a started task is neither moved nor extended in monitoring mode", () => {
+    const tasks = [
+      task({ id: "A", name: "A", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 40 }),
+      task({ id: "B", name: "B", duration: 2, start: "2026-10-05", finish: "2026-10-06", work: 16 }),
+    ];
+    const assignments = onAnna(["A", "B"]);
+    const today = "2026-10-07";
+
+    const monitoring = ok(run({ tasks, assignments, mode: "monitoring", today }));
+    expect(monitoring.moves).toEqual([]);
+    expect(monitoring.tasks.map((item) => [item.start, item.finish, item.duration])).toEqual(
+      tasks.map((item) => [item.start, item.finish, item.duration]),
+    );
+    expect(monitoring.unresolved.some((problem) => problem.kind === "over-capacity" && problem.weekStart === "2026-10-05")).toBe(true);
+
+    // The very same plan may change while planning, so the rule is the mode's.
+    const planning = ok(run({ tasks, assignments, mode: "planning", today }));
+    expect(planning.moves.length).toBeGreaterThan(0);
   });
 });
