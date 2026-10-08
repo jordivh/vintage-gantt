@@ -131,7 +131,10 @@
 .optimize-milestone-flag { color: #806d54; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .optimize-hint { margin: 8px 0 0; color: #806d54; font: italic 11.5px Georgia, serif; }
 .optimize-problem b { display: block; margin-bottom: 3px; color: #6b3f2c; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.optimize-problem span { display: block; margin-top: 3px; }
 .optimize-fixed-row td { background: #efe4cd; }
+.optimize-summary-ok { margin-top: 12px; padding: 12px 14px; border: 1px solid #b8c9b2; background: #eef3ea; color: #47603f; font: 12px/1.5 Georgia, serif; }
+.optimize-summary-ok b { color: #3c5535; }
 .planner-context-bar { min-height: 68px; }
 .timeline-controls { display: none; }
 .context-selectors { display: flex; align-items: center; gap: 10px; margin-left: auto; margin-right: 18px; }

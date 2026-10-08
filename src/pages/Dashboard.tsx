@@ -49,7 +49,7 @@ import { leafMarginTotals, marginRowsFor } from "@/lib/margin-report";
 import { leaveLabels, taskLeaveInfo } from "@/lib/task-leave";
 import { buildOverloadIndex, overloadByTask, overloadTooltip, projectOverload, type OverloadWeek } from "@/lib/overload";
 import { selectCapacityProjects, unavailableWarning } from "@/lib/capacity-engine";
-import { optimizeProject, OCCUPANCY_TARGET, type OptimizationPlan } from "@/lib/resource-optimizer";
+import { groupUnresolvedWeeks, optimizeProject, OCCUPANCY_TARGET, type OptimizationPlan } from "@/lib/resource-optimizer";
 import { fixedMilestoneChoices, loadFixedMilestones, saveFixedMilestones } from "@/lib/optimize-milestones";
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
@@ -1710,13 +1710,22 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                   <button className="tool-button" onClick={cancelOptimize}>Cancel</button>
                 </div>
               </>
-            ) : (
+            ) : (() => {
+              const warningGroups = groupUnresolvedWeeks(optimizePlan.unresolved);
+              // Nothing to do at all: one clear message instead of a list of empty sections.
+              const nothingToChange = optimizePlan.moves.length === 0 && optimizePlan.unresolved.length === 0 && optimizePlan.blockers.length === 0;
+              return (
               <>
                 <p className="calendar-copy">
                   Only <b>{activeProject.name}</b> may change. A task may move and may grow by at most 50% of the duration it had before
                   this run — never shorter, never split, and spreading a task over more days keeps exactly the same work hours. Resource
-                  assignments and dependencies stay as they are, fixed milestones keep their date, and each employee&apos;s weekly occupancy
-                  counts the work of all other projects. Target {Math.round(OCCUPANCY_TARGET * 100)}% per week, hard limit 100%.
+                  assignments and dependencies stay as they are, and fixed milestones keep their date. Target {Math.round(OCCUPANCY_TARGET * 100)}%
+                  per week, hard limit 100%.
+                </p>
+                <p className="optimize-hint">
+                  Only the employees this project uses are calculated, and only the weeks one of its tasks could actually be placed in —
+                  from the earliest allowed start to the latest allowed end of this project&apos;s movable tasks. The work of all other
+                  projects counts for those employees and weeks, and nothing outside them is calculated or changed.
                 </p>
 
                 <div className="optimize-summary">
@@ -1792,8 +1801,15 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                   )}
                 </div>
 
+                {nothingToChange && (
+                  <div className="optimize-summary-ok">
+                    <b>Nothing needs to change.</b> Every employee of this project stays at or below the hard limit in every week this
+                    project can use, and no task has to move or be extended.
+                  </div>
+                )}
+
                 <div className="optimize-section">
-                  <h3>Weekly occupancy per employee (before → after)</h3>
+                  <h3>Weekly occupancy per employee of this project (before → after)</h3>
                   {optimizePlan.occupancy.every((resource) => resource.weeks.every((week) => week.before <= 0 && week.after <= 0)) ? (
                     <p className="optimize-empty">No planned hours this period.</p>
                   ) : (
@@ -1834,25 +1850,36 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                   </div>
                 )}
 
-                <div className="optimize-section">
-                  <h3>Remaining weeks above 100% or far from 90% ({optimizePlan.unresolved.length})</h3>
-                  {optimizePlan.unresolved.length === 0 ? (
-                    <p className="optimize-empty">Every booked week is at or below the hard limit and within a healthy distance of the target.</p>
-                  ) : (
-                    <div className="optimize-problems">
-                      {optimizePlan.unresolved.map((problem) => (
-                        <div key={`${problem.resourceId}-${problem.weekStart}-${problem.kind}`} className="optimize-problem">{problem.reason}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                {!nothingToChange && (
+                  <div className="optimize-section">
+                    <h3>Weeks that still need attention ({optimizePlan.unresolved.length})</h3>
+                    {optimizePlan.unresolved.length === 0 ? (
+                      <p className="optimize-empty">Every booked week of every employee of this project is at or below the hard limit and within a healthy distance of the target.</p>
+                    ) : (
+                      <div className="optimize-problems">
+                        {warningGroups.map((group) => (
+                          <div key={group.resourceId} className="optimize-problem">
+                            <b>
+                              {group.resourceName} — {group.weeks.length} week{group.weeks.length === 1 ? "" : "s"} to review
+                              {group.overCapacity > 0 ? `, ${group.overCapacity} above 100%` : ""}
+                            </b>
+                            {group.weeks.map((problem) => (
+                              <span key={`${problem.weekStart}-${problem.kind}`}>{problem.reason}</span>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="modal-actions">
                   <button className="tool-button" onClick={cancelOptimize}>Cancel</button>
                   <button className="tool-button primary" onClick={applyOptimize}>Apply</button>
                 </div>
               </>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

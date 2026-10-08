@@ -16,7 +16,16 @@ import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { applyPlanningModeMargins, copyTasksToVersion, type PlannerTask } from "./planner-model";
 import { createDefaultCalendarSystem, type CalendarSystem, type PlannerCalendar, type Weekday } from "./scheduling-engine";
-import { optimizeProject, maxDurationFor, EXTENSION_LIMIT, type OptimizationPlan, type OptimizeProjectInput } from "./resource-optimizer";
+import {
+  EXTENSION_LIMIT,
+  groupUnresolvedWeeks,
+  maxDurationFor,
+  optimizeProject,
+  type OptimizationPlan,
+  type OptimizeProjectInput,
+  type OptimizeResource,
+  type OptimizeUnresolved,
+} from "./resource-optimizer";
 import { computeResourceLoads } from "./capacity-engine";
 
 const modules = {
@@ -70,15 +79,17 @@ const run = (input: {
   fixedMilestoneIds?: string[];
   /** 0 turns duration extension off, which is how a case is compared to moves only. */
   maxExtensionDays?: number;
+  resources?: OptimizeResource[];
+  calendarSystem?: CalendarSystem;
 }) => optimizeProject({
   projectId: "proj-open",
   projects: [
     { projectId: "proj-open", projectName: "Open project", projectCalendarId: "base", tasks: input.tasks },
     ...(input.others ?? []),
   ],
-  resources: [anna],
+  resources: input.resources ?? [anna],
   assignments: input.assignments,
-  system,
+  system: input.calendarSystem ?? system,
   mode: input.mode ?? "planning",
   today: input.today ?? "2026-09-01",
   fixedMilestoneIds: input.fixedMilestoneIds,
@@ -427,6 +438,104 @@ describe("resource optimization — apply and cancel", () => {
     }
     // A version was created next to the original, and the original is active=false.
     expect(originals.size).toBe(tasks.length);
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Scope: which employees and which weeks a run looks at.                    */
+/* ------------------------------------------------------------------------ */
+
+const ben = { id: "res-ben", name: "Ben", hoursPerWeek: 40, calendarId: "cal-ben" };
+
+/** Everyone in the workspace, including people who never touch this project. */
+const twoPeople = [anna, ben];
+const twoCalendars = systemWith(["cal-anna", "cal-ben"]);
+
+describe("resource optimization — scope of a run", () => {
+  test("an employee who works only on another project is neither calculated nor shown", () => {
+    const tasks = [task({ id: "A", name: "A", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 36 })];
+    // Ben is at 200 % in the same week — on another project only. Anna's own week
+    // is exactly on target, so this project has nothing to report.
+    const other = [{
+      projectId: "proj-other",
+      projectName: "Other project",
+      projectCalendarId: "base",
+      tasks: [task({ id: "O", name: "O", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 80 })],
+    }];
+    const result = ok(run({
+      tasks,
+      others: other,
+      resources: twoPeople,
+      calendarSystem: twoCalendars,
+      assignments: [...onAnna(["A"]), { taskId: "O", resourceId: "res-ben" }],
+    }));
+
+    // Only the employees the open project uses are part of the preview…
+    expect(result.occupancy.map((entry) => entry.resourceName)).toEqual(["Anna"]);
+    // …and nothing is reported about anyone else, however busy they are.
+    expect(result.unresolved).toEqual([]);
+    expect(result.blockers).toEqual([]);
+  });
+
+  test("a week this project can never reach is neither calculated nor reported", () => {
+    const tasks = [
+      task({ id: "A", name: "A", duration: 5, start: "2026-10-05", finish: "2026-10-09", work: 36 }),
+      task({ id: "C", name: "C", duration: 5, start: "2026-10-12", finish: "2026-10-16", work: 36, predecessors: "AFS" }),
+    ];
+    // Eight months later — far outside the period this project could ever use.
+    const other = [{
+      projectId: "proj-other",
+      projectName: "Other project",
+      projectCalendarId: "base",
+      tasks: [task({ id: "O", name: "O", duration: 5, start: "2027-03-01", finish: "2027-03-05", work: 80 })],
+    }];
+    const result = ok(run({ tasks, others: other, assignments: onAnna(["A", "C", "O"]) }));
+
+    expect(result.occupancy.every((entry) => entry.weeks.every((week) => week.weekStart.startsWith("2026")))).toBe(true);
+    expect(result.unresolved).toEqual([]);
+    // The plan is already on target, so nothing needs to change either.
+    expect(result.moves).toEqual([]);
+  });
+
+  test("a week far below 90 % names the rule that blocked a move", () => {
+    // B may not start before D finishes, and the project ends with B, so Anna's
+    // light week cannot be filled — the warning says what stopped it.
+    const tasks = [
+      task({ id: "D", name: "D", duration: 5, start: "2026-10-05", finish: "2026-10-09" }),
+      task({ id: "B", name: "B", duration: 3, start: "2026-10-12", finish: "2026-10-14", work: 24, predecessors: "DFS" }),
+    ];
+    const result = ok(run({ tasks, assignments: onAnna(["B"]) }));
+
+    const problem = result.unresolved.find((item) => item.kind === "off-target")!;
+    expect(problem).toBeDefined();
+    expect(problem.weekStart).toBe("2026-10-12");
+    expect(problem.reason).toContain("Blocked by:");
+    expect(problem.reason).toContain("B");
+  });
+
+  test("leftover weeks are grouped per employee, the most overloaded first", () => {
+    const week = (kind: OptimizeUnresolved["kind"], resourceId: string, resourceName: string, weekStart: string): OptimizeUnresolved => ({
+      kind,
+      resourceId,
+      resourceName,
+      weekStart,
+      weekEnd: weekStart,
+      allocated: kind === "over-capacity" ? 48 : 12,
+      available: 40,
+      occupancy: kind === "over-capacity" ? 1.2 : 0.3,
+      reason: `${resourceName} ${weekStart}`,
+    });
+    const groups = groupUnresolvedWeeks([
+      week("off-target", "res-anna", "Anna", "2026-10-12"),
+      week("over-capacity", "res-ben", "Ben", "2026-10-05"),
+      week("over-capacity", "res-anna", "Anna", "2026-10-05"),
+    ]);
+
+    // One entry per employee instead of one per week, weeks in date order.
+    expect(groups.map((group) => group.resourceName)).toEqual(["Anna", "Ben"]);
+    expect(groups[0].weeks.map((item) => item.weekStart)).toEqual(["2026-10-05", "2026-10-12"]);
+    expect(groups[0].overCapacity).toBe(1);
+    expect(groups[1].weeks.length).toBe(1);
   });
 });
 

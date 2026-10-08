@@ -19,7 +19,7 @@ import {
   computeResourceLoads,
   type CapacityProjectInput,
 } from "./capacity-engine";
-import { weekEnd, weekStart } from "./capacity-period";
+import { shiftDays, weekEnd, weekStart } from "./capacity-period";
 
 /* --------------------------------------------------------------------------
  * Resource optimization (BES-009)
@@ -52,6 +52,14 @@ import { weekEnd, weekStart } from "./capacity-period";
  *  - a task a user marked "Fixed date": a fixed milestone keeps its exact date,
  *    not even a critical-path move may shift it;
  *  - in Monitoring mode, a task that has started (or therefore lies in the past).
+ *
+ * SCOPE — what a run looks at, and nothing else:
+ *  - employees: only those assigned to at least one task of the open project;
+ *  - weeks: only whole weeks a task of the open project could actually be placed
+ *    in — from the earliest allowed start to the latest allowed end of its
+ *    movable tasks — plus the weeks the project already books work in;
+ *  - other projects: counted for exactly those employees and weeks, and loaded
+ *    once at the start because nothing this run does can change them.
  *
  * A task always stays one continuous block: a change is a whole-start-date shift
  * and/or a duration extension, snapped to a working day, and a task can never
@@ -237,6 +245,42 @@ export interface OptimizeUnresolved {
   reason: string;
 }
 
+/**
+ * The leftover warnings of one employee. The preview shows one entry per
+ * employee instead of one per week, so a long run stays readable.
+ */
+export interface OptimizeWarningGroup {
+  resourceId: string;
+  resourceName: string;
+  /** Weeks of this employee that are still above the 100% limit. */
+  overCapacity: number;
+  /** The weeks that still need attention, in date order. */
+  weeks: OptimizeUnresolved[];
+}
+
+/**
+ * The unresolved weeks grouped per employee: the most overloaded employee first,
+ * then by name. Grouping is presentation only — every week keeps its own figures
+ * and its own reason.
+ */
+export function groupUnresolvedWeeks(problems: OptimizeUnresolved[]): OptimizeWarningGroup[] {
+  const groups = new Map<string, OptimizeWarningGroup>();
+  for (const problem of problems) {
+    const group = groups.get(problem.resourceId) ?? {
+      resourceId: problem.resourceId,
+      resourceName: problem.resourceName,
+      overCapacity: 0,
+      weeks: [],
+    };
+    if (problem.kind === "over-capacity") group.overCapacity += 1;
+    group.weeks.push(problem);
+    groups.set(problem.resourceId, group);
+  }
+  return [...groups.values()]
+    .map((group) => ({ ...group, weeks: [...group.weeks].sort((left, right) => left.weekStart.localeCompare(right.weekStart)) }))
+    .sort((left, right) => right.overCapacity - left.overCapacity || left.resourceName.localeCompare(right.resourceName) || left.resourceId.localeCompare(right.resourceId));
+}
+
 export interface OptimizationPlan {
   ok: true;
   moves: OptimizeMove[];
@@ -250,9 +294,15 @@ export interface OptimizationPlan {
   newProjectFinish: string;
   /** Signed change of the project end date, in working days. */
   finishDeltaWorkingDays: number;
-  /** Weekly occupancy per employee, before and after, including other projects. */
+  /**
+   * Weekly occupancy per employee, before and after, including other projects —
+   * only the employees of this project and only the weeks it could use.
+   */
   occupancy: OptimizeResourceOccupancy[];
-  /** Weeks still above 100% or far from 90%, each with a reason. */
+  /**
+   * Weeks still above 100% or far from 90% that are relevant to this project,
+   * each with a reason. Only weeks it has work in or could place work in.
+   */
   unresolved: OptimizeUnresolved[];
   /** Warnings caused by fixed milestones or by the +50% extension limit. */
   blockers: OptimizeBlocker[];
@@ -316,7 +366,7 @@ interface WeekRow {
 }
 
 interface Score {
-  /** Priority 1 — hours over 100% across every employee and week. */
+  /** Priority 1 — hours over 100%, across the project's own employees and weeks. */
   excess: number;
   /** Priority 2 — fixed milestones that left their date (must always be 0). */
   violations: number;
@@ -376,7 +426,19 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   for (const assignment of input.assignments) {
     assignedByTask.set(assignment.taskId, [...(assignedByTask.get(assignment.taskId) ?? []), assignment.resourceId]);
   }
-  const resourceNameById = new Map(input.resources.map((resource) => [resource.id, resource.name]));
+
+  /* ---- only the employees the open project actually uses ------------------ */
+
+  /**
+   * The employees with at least one task of the open project. Everyone else is
+   * left out of the calculation and the preview completely — and since this run
+   * never changes an assignment, no other employee can be affected either.
+   */
+  const relevantResourceIds = new Set(
+    input.assignments.filter((assignment) => sourceById.has(assignment.taskId)).map((assignment) => assignment.resourceId),
+  );
+  const resources = input.resources.filter((resource) => relevantResourceIds.has(resource.id));
+  const resourceNameById = new Map(resources.map((resource) => [resource.id, resource.name]));
 
   const projectInput = (tasks: PlannerTask[]): CapacityProjectInput => ({
     projectId: openProject.projectId,
@@ -385,57 +447,175 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     tasks,
   });
 
+  /** Tasks that carry occupancy of the open project and may change in this mode. */
+  const movableTasks = (computed: PlannerTask[]): PlannerTask[] =>
+    computed.filter((task) => {
+      if (summaryIds.has(task.id) || isMilestoneRow(task) || task.duration <= 0) return false;
+      if ((task.work ?? 0) <= 0) return false;
+      if (!(assignedByTask.get(task.id)?.length)) return false;
+      // A fixed milestone is never a candidate — it may not move at all.
+      if (fixedMilestoneIds.has(task.id)) return false;
+      // Monitoring tracks reality: a task that has started (and therefore any task
+      // lying in the past) is fixed — it may be neither moved nor extended.
+      if (input.mode === "monitoring" && task.start <= input.today) return false;
+      return true;
+    });
+
+  /** The working days a task of the open project really books. */
+  const bookedDates = (task: PlannerTask): string[] => taskWorkingDates(task, system, task.calendarId ?? calendarId);
+
   /**
-   * Whole calendar weeks (Monday–Sunday) around the whole plan, so a week at the
-   * edge of the span is never clipped to two days and mistaken for a full one.
+   * The tasks that put hours on an employee. Only these can make a week look
+   * different — and only these must therefore stay inside the window, or their
+   * hours would fall outside the calculation and the preview.
    */
-  const weekWindow = (tasks: PlannerTask[]): { start: string; end: string } | null => {
+  const carriedTasks = (tasks: PlannerTask[]): PlannerTask[] =>
+    tasks.filter((task) => (task.work ?? 0) > 0 && (assignedByTask.get(task.id)?.length ?? 0) > 0);
+
+  /**
+   * The earliest working day a task of the open project may start: as early as its
+   * dependencies allow, and never further back than one candidate may look.
+   */
+  const earliestAllowedStart = (task: PlannerTask, tasks: PlannerTask[]): string => {
+    const calendar = task.calendarId ?? calendarId;
+    const searchBound = addWorkingDays(task.start, -limits.maxShiftDays, calendar, system);
+    const earliest = earliestDependencyStart(task, tasks, dependenciesForTasks(tasks), {
+      calendarSystem: system,
+      projectCalendarId: calendarId,
+    })?.date ?? null;
+    const floor = earliest && earliest > searchBound ? earliest : searchBound;
+    return ensureWorkingDay(floor, calendar, system);
+  };
+
+  /** The latest working day a task may end: as far as a shift and the +50% cap reach. */
+  const latestAllowedEnd = (task: PlannerTask): string => {
+    const calendar = task.calendarId ?? calendarId;
+    const headroom = Math.max(
+      0,
+      maxDurationFor(baselineDurations.get(task.id) ?? task.duration, isMilestoneRow(task)) - task.duration,
+    );
+    return ensureWorkingDay(addWorkingDays(task.finish, limits.maxShiftDays + headroom, calendar, system), calendar, system);
+  };
+
+  /**
+   * The period the whole run works in, as whole Monday–Sunday weeks: every week a
+   * task of the open project could actually be placed in — from the earliest
+   * allowed start to the latest allowed end of its movable tasks — plus the weeks
+   * the project already books work in. `null` when the project has nothing that
+   * could be placed at all. Nothing outside this window is calculated, reported
+   * or changed.
+   */
+  const weekWindow = (() => {
     let earliest = "";
     let latest = "";
-    for (const project of [projectInput(tasks), ...others]) {
-      for (const task of project.tasks) {
-        for (const date of taskWorkingDates(task, system, project.projectCalendarId)) {
-          if (!earliest || date < earliest) earliest = date;
-          if (!latest || date > latest) latest = date;
-        }
-      }
+    const consider = (date: string) => {
+      if (!earliest || date < earliest) earliest = date;
+      if (!latest || date > latest) latest = date;
+    };
+    for (const task of movableTasks(source)) {
+      consider(earliestAllowedStart(task, source));
+      consider(latestAllowedEnd(task));
+    }
+    for (const task of carriedTasks(source)) {
+      consider(task.start);
+      consider(task.finish);
+      for (const date of bookedDates(task)) consider(date);
     }
     if (!earliest || !latest) return null;
     return { start: weekStart(earliest), end: weekEnd(weekStart(latest)) };
+  })();
+
+  /** Every Monday of the window — the only weeks this run looks at. */
+  const weekStarts: string[] = [];
+  if (weekWindow) {
+    for (let cursor = weekWindow.start; cursor <= weekWindow.end; cursor = shiftDays(cursor, 7)) weekStarts.push(cursor);
+  }
+
+  /** A candidate plan stays inside the window: a change may never leave it. */
+  const insideWindow = (tasks: PlannerTask[]): boolean => {
+    if (!weekWindow) return false;
+    const { start, end } = weekWindow;
+    return carriedTasks(tasks).every((task) => task.start >= start && task.finish <= end);
   };
 
   /**
-   * The weekly occupancy of every employee, exactly as the Capacity screen
-   * computes it: the open project's rows follow `tasks`, every other project
-   * contributes its own active version untouched.
+   * Availability and the other projects' hours per employee and week. Both are
+   * loaded once, up front, because neither depends on what this run does to the
+   * open project.
    */
-  const loadRows = (tasks: PlannerTask[]): WeekRow[] => {
+  const availability = new Map<string, number>();
+  const otherLoad = new Map<string, number>();
+  if (weekWindow && resources.length) {
     const reports = computeResourceLoads({
       system,
-      resources: input.resources,
+      resources,
       assignments: input.assignments,
-      projects: [projectInput(tasks), ...others],
-      range: weekWindow(tasks) ?? undefined,
+      projects: others,
+      range: weekWindow,
     });
-    return reports.flatMap((report) =>
-      aggregatePeriods(report, "week").map((period) => ({
-        resourceId: report.resourceId,
-        resourceName: report.resourceName,
-        weekStart: period.start,
-        weekEnd: period.end,
-        allocated: period.allocated,
-        available: period.available,
-      })));
+    for (const report of reports) {
+      for (const period of aggregatePeriods(report, "week")) {
+        availability.set(`${report.resourceId}|${period.start}`, period.available);
+        if (period.allocated > 0) otherLoad.set(`${report.resourceId}|${period.start}`, period.allocated);
+      }
+    }
+  }
+
+  /** The open project's own hours per employee and week, for one candidate plan. */
+  const ownLoad = (tasks: PlannerTask[]): Map<string, number> => {
+    const totals = new Map<string, number>();
+    if (!weekWindow || !resources.length) return totals;
+    const reports = computeResourceLoads({
+      system,
+      resources,
+      assignments: input.assignments,
+      projects: [projectInput(tasks)],
+      range: weekWindow,
+    });
+    for (const report of reports) {
+      for (const period of aggregatePeriods(report, "week")) {
+        if (period.allocated > 0) totals.set(`${report.resourceId}|${period.start}`, period.allocated);
+      }
+    }
+    return totals;
   };
 
-  /** The weekly occupancy of the other projects alone — the limit on the result. */
-  const otherLoad = new Map<string, number>();
-  if (others.length) {
-    const range = weekWindow(source) ?? undefined;
-    for (const report of computeResourceLoads({ system, resources: input.resources, assignments: input.assignments, projects: others, range })) {
-      for (const period of aggregatePeriods(report, "week")) {
-        otherLoad.set(`${report.resourceId}|${period.start}`, period.allocated);
+  /**
+   * The weekly occupancy every decision is made on: the open project's hours for
+   * one candidate plan plus the other projects' share loaded at the start — for
+   * the relevant employees and the relevant weeks only. A week without work
+   * carries nothing to spread and is skipped by the score.
+   */
+  const weekRows = (tasks: PlannerTask[]): WeekRow[] => {
+    if (!weekWindow) return [];
+    const mine = ownLoad(tasks);
+    const rows: WeekRow[] = [];
+    for (const resource of resources) {
+      for (const week of weekStarts) {
+        const key = `${resource.id}|${week}`;
+        rows.push({
+          resourceId: resource.id,
+          resourceName: resource.name,
+          weekStart: week,
+          weekEnd: weekEnd(week),
+          allocated: (mine.get(key) ?? 0) + (otherLoad.get(key) ?? 0),
+          available: availability.get(key) ?? 0,
+        });
       }
+    }
+    return rows;
+  };
+
+  /**
+   * The weeks the open project can reach at all: a movable task could be placed
+   * there, or the project already plans work there. Every warning is checked
+   * against this, so a week this project can neither touch nor improve is never
+   * reported.
+   */
+  const placeableWeeks = new Set<string>();
+  for (const task of movableTasks(source)) {
+    for (let cursor = weekStart(earliestAllowedStart(task, source)); cursor <= latestAllowedEnd(task); cursor = shiftDays(cursor, 7)) {
+      placeableWeeks.add(cursor);
     }
   }
 
@@ -459,7 +639,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   const score = (tasks: PlannerTask[]): Score => {
     let excess = 0;
     let deviation = 0;
-    for (const row of loadRows(tasks)) {
+    for (const row of weekRows(tasks)) {
       // Empty weeks carry no work to spread, so they cannot be brought closer to
       // the target: only booked weeks take part in the measure.
       if (row.allocated <= 0 || row.available <= 0) continue;
@@ -554,26 +734,16 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
       : candidate));
     const recalculated = recalculateTasks(next, { direction: "forward", calendarSystem: system, projectCalendarId: calendarId });
     if (recalculated.error) return {};
+    // The search only ever works inside the period the run is about: a candidate
+    // that would push work out of it is refused, so no task can leave the weeks
+    // the calculation and the preview cover.
+    if (!insideWindow(recalculated.tasks)) return {};
     // A fixed milestone that the re-planning would have shifted is a refusal,
     // never a silent move.
     const blockedBy = movedFixedMilestone(recalculated.tasks);
     if (blockedBy) return { blockedBy };
     return { tasks: recalculated.tasks };
   };
-
-  /** Tasks that carry occupancy of the open project and may change in this mode. */
-  const movableTasks = (computed: PlannerTask[]): PlannerTask[] =>
-    computed.filter((task) => {
-      if (summaryIds.has(task.id) || isMilestoneRow(task) || task.duration <= 0) return false;
-      if ((task.work ?? 0) <= 0) return false;
-      if (!(assignedByTask.get(task.id)?.length)) return false;
-      // A fixed milestone is never a candidate — it may not move at all.
-      if (fixedMilestoneIds.has(task.id)) return false;
-      // Monitoring tracks reality: a task that has started (and therefore any task
-      // lying in the past) is fixed — it may be neither moved nor extended.
-      if (input.mode === "monitoring" && task.start <= input.today) return false;
-      return true;
-    });
 
   let current = source;
   let computed = baselineComputed;
@@ -616,7 +786,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
   const blockedByMilestone = new Map<string, { resources: Set<string>; weeks: Set<string> }>();
   let overloadRows: WeekRow[] | null = null;
   const currentOverloads = (): WeekRow[] => {
-    overloadRows ??= loadRows(current).filter((row) => row.allocated > row.available + EPSILON);
+    overloadRows ??= weekRows(current).filter((row) => row.allocated > row.available + EPSILON);
     return overloadRows;
   };
 
@@ -772,8 +942,8 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     .sort((left, right) => left.oldDate.localeCompare(right.oldDate) || left.taskId.localeCompare(right.taskId));
 
   const newFinish = planFinishDate(current);
-  const beforeRows = loadRows(source);
-  const afterRows = loadRows(current);
+  const beforeRows = weekRows(source);
+  const afterRows = weekRows(current);
 
   /**
    * The hours each task really plans, summed from the same daily allocation the
@@ -785,10 +955,10 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     const totals = new Map<string, number>();
     for (const report of computeResourceLoads({
       system,
-      resources: input.resources,
+      resources,
       assignments: input.assignments,
       projects: [projectInput(tasks)],
-      range: weekWindow(tasks) ?? undefined,
+      range: weekWindow ?? undefined,
     })) {
       for (const day of report.days) {
         for (const contribution of day.contributions) {
@@ -823,9 +993,75 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     }))
     .sort((left, right) => left.resourceName.localeCompare(right.resourceName) || left.resourceId.localeCompare(right.resourceId));
 
+  /**
+   * Who follows whom, so a fixed milestone can be named as the reason a task
+   * cannot give way without moving the date the user pinned.
+   */
+  const successorsOf = new Map<string, string[]>();
+  for (const dependency of dependenciesForTasks(source)) {
+    successorsOf.set(dependency.predecessorId, [...(successorsOf.get(dependency.predecessorId) ?? []), dependency.successorId]);
+  }
+  const downstreamOf = (taskId: string): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [...(successorsOf.get(taskId) ?? [])];
+    while (queue.length) {
+      const next = queue.shift()!;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      queue.push(...(successorsOf.get(next) ?? []));
+    }
+    return seen;
+  };
+
+  /**
+   * The rule that stopped a task from being placed in one week — the honest answer
+   * to "why is this week still far below 90%?". `null` when no rule applies, i.e.
+   * the task could have gone there and the search had nothing to gain by it.
+   */
+  const blockedRule = (task: PlannerTask, week: WeekRow): string | null => {
+    if (input.mode === "monitoring" && task.start <= input.today) {
+      return `“${task.name}” has already started, and Monitoring keeps started work where it is`;
+    }
+    const pinned = [...downstreamOf(task.id)].filter((id) => fixedMilestoneIds.has(id));
+    if (pinned.length) {
+      const names = pinned.map((id) => sourceById.get(id)?.name ?? id);
+      return `moving or extending “${task.name}” would shift the fixed milestone${names.length > 1 ? "s" : ""} ${names.join(", ")}`;
+    }
+    const earliest = earliestDependencyStart(task, current, dependenciesForTasks(current), {
+      calendarSystem: system,
+      projectCalendarId: calendarId,
+    })?.date ?? null;
+    if (earliest && earliest > week.weekEnd) {
+      return `“${task.name}” cannot start before ${earliest}, after its predecessor`;
+    }
+    const headroom = maxDurationFor(baselineDurations.get(task.id) ?? task.duration, isMilestoneRow(task)) - task.duration;
+    if (headroom <= 0) return `the +50% limit leaves “${task.name}” no longer duration to spread over`;
+    const float = baselineById.get(task.id)?.totalFloat ?? 0;
+    if (float <= 0) return `“${task.name}” has no float, so moving it later would delay the project end`;
+    return null;
+  };
+
+  /** Every rule that blocks a move or extension able to reach one week. */
+  const blockedInWeek = (week: WeekRow): string[] => {
+    const rules = new Set<string>();
+    for (const task of movableTasks(computed)) {
+      if (earliestAllowedStart(task, current) > week.weekEnd) continue;
+      if (latestAllowedEnd(task) < week.weekStart) continue;
+      const rule = blockedRule(task, week);
+      if (rule) rules.add(rule);
+    }
+    return [...rules];
+  };
+
   const unresolved: OptimizeUnresolved[] = [];
+  const afterMine = ownLoad(current);
   for (const row of afterRows) {
     if (row.allocated <= 0 || row.available <= 0) continue;
+    const mine = afterMine.get(`${row.resourceId}|${row.weekStart}`) ?? 0;
+    // Only warnings that are relevant to the open project: a week it plans work
+    // in, or one of its movable tasks could be placed in. A week it can neither
+    // touch nor improve is not reported at all.
+    if (mine <= 0 && !placeableWeeks.has(row.weekStart)) continue;
     const ratio = row.allocated / row.available;
     const other = otherLoad.get(`${row.resourceId}|${row.weekStart}`) ?? 0;
     if (row.allocated > row.available + EPSILON) {
@@ -838,11 +1074,12 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
         allocated: row.allocated,
         available: row.available,
         occupancy: ratio,
-        reason: `${row.resourceName} is still over 100% in the week of ${row.weekStart}: ${hours(row.allocated)} h planned against ${hours(row.available)} h available.${other > 0 ? ` Other projects already plan ${hours(other)} h of that week.` : ""} No task of this project could be moved or extended without breaking a rule.`,
+        reason: `${row.resourceName} is still over 100% in the week of ${row.weekStart}: ${hours(row.allocated)} h planned against ${hours(row.available)} h available${mine > 0 ? `, ${hours(mine)} h of it from this project` : ", none of it from this project"}.${other > 0 ? ` Other projects already plan ${hours(other)} h of that week.` : ""} No task of this project could be moved or extended without breaking a rule.`,
       });
       continue;
     }
     if (ratio < OCCUPANCY_TARGET - OFF_TARGET_MARGIN) {
+      const rules = blockedInWeek(row);
       unresolved.push({
         kind: "off-target",
         resourceId: row.resourceId,
@@ -852,7 +1089,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
         allocated: row.allocated,
         available: row.available,
         occupancy: ratio,
-        reason: `${row.resourceName} is only ${percent(ratio)} booked in the week of ${row.weekStart} (${hours(row.allocated)} h of ${hours(row.available)} h). No task could be moved or extended closer to the 90% target without breaking a rule.`,
+        reason: `${row.resourceName} is only ${percent(ratio)} booked in the week of ${row.weekStart} (${hours(row.allocated)} h of ${hours(row.available)} h), and work of this project could be placed there. ${rules.length ? `Blocked by: ${rules.join("; ")}.` : "No move or extension of its tasks comes closer to the 90% target without breaking a rule."}`,
       });
     }
   }
@@ -891,7 +1128,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
     // Which tasks of the open project put hours on an employee's week, computed
     // once from the same engine the capacity screen uses.
     const contributors = new Map<string, string[]>();
-    for (const report of computeResourceLoads({ system, resources: input.resources, assignments: input.assignments, projects: [projectInput(current)] })) {
+    for (const report of computeResourceLoads({ system, resources, assignments: input.assignments, projects: [projectInput(current)], range: weekWindow ?? undefined })) {
       const byWeek = new Map<string, Set<string>>();
       for (const day of report.days) {
         const week = weekStart(day.date);
@@ -905,6 +1142,7 @@ export function optimizeProject(input: OptimizeInput): OptimizeResult {
       return maxDurationFor(before.duration, isMilestoneRow(before)) - (afterById.get(taskId)?.duration ?? before.duration);
     };
     for (const row of stillOverloads) {
+      if ((afterMine.get(`${row.resourceId}|${row.weekStart}`) ?? 0) <= 0) continue;
       const taskIds = contributors.get(`${row.resourceId}|${row.weekStart}`) ?? [];
       if (!taskIds.length) continue;
       if (taskIds.some((taskId) => headroomOf(taskId) > 0)) continue;
