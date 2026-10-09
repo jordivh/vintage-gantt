@@ -139,6 +139,68 @@ export function resetPasswordDecision(input: { actorRole: unknown; sameCompany: 
   return { ok: true };
 }
 
+/* ------------------------------------------- owner recovery (last-resort only) */
+
+/**
+ * The one situation this product cannot handle by itself.
+ *
+ * There is no email service, so a forgotten password is normally reset by another
+ * company admin. When the company's only admin has lost the password, no admin is
+ * left who could do that, and the company is locked out for good. The deployment
+ * owner therefore has a single deliberate escape hatch — `recoverAccountAccess`,
+ * which only the CLI or the Convex dashboard can run, never a browser. These are
+ * its rules.
+ */
+export const NO_ACCOUNT_FOR_EMAIL_MESSAGE = "No account uses that email address. Check the address and try again.";
+export const RECOVERY_NO_COMPANY_MESSAGE =
+  "That account has no company yet, so there is nothing to recover. Register the company instead.";
+export const NO_PASSWORD_CREDENTIAL_MESSAGE = "That account has no password to replace.";
+export const RECOVERY_NOTICE =
+  "Temporary password set. Sign in with it, then choose your own password on the Change password screen.";
+
+export interface RecoveryFacts {
+  accountExists: boolean;
+  /** The company the account belongs to, or null while it has none. */
+  companyId: string | null;
+  removed: boolean;
+  currentRole: unknown;
+  /** Active company admins in the account's company, not counting the account itself. */
+  otherActiveAdmins: number;
+}
+
+export interface RecoveryPlan {
+  ok: boolean;
+  message?: string;
+  /** Lift a removal, so the account may sign in again. */
+  reinstate: boolean;
+  /** Hand the account company admin, so the company is manageable again. */
+  grantAdmin: boolean;
+  /** The account holds a temporary password and can do nothing else until it sets its own. */
+  mustChangePassword: boolean;
+}
+
+/**
+ * What the owner's recovery does to one account, decided from the facts alone.
+ *
+ * It restores exactly what is missing and nothing more: a removal is lifted, and
+ * company admin is handed over only when no other active admin is left — an
+ * account that was already an admin, or whose company still has one, keeps the
+ * role it had. Either way the account leaves with a temporary password it must
+ * replace, so the escape hatch can never silently leave a shared password live.
+ */
+export function recoveryPlan(facts: RecoveryFacts): RecoveryPlan {
+  const refused = { ok: false, reinstate: false, grantAdmin: false, mustChangePassword: false };
+  if (!facts.accountExists) return { ...refused, message: NO_ACCOUNT_FOR_EMAIL_MESSAGE };
+  if (!facts.companyId) return { ...refused, message: RECOVERY_NO_COMPANY_MESSAGE };
+  const isAdmin = normalizeCompanyRole(facts.currentRole) === COMPANY_ADMIN;
+  return {
+    ok: true,
+    reinstate: facts.removed,
+    grantAdmin: !isAdmin && facts.otherActiveAdmins <= 0,
+    mustChangePassword: true,
+  };
+}
+
 /** The address to store: normalised, and validated for the common shapes. */
 export function normalizeAccountEmail(value: string): string {
   return normalizeEmail(value);

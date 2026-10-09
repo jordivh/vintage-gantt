@@ -14,14 +14,18 @@ import {
   EMAIL_TAKEN_MESSAGE,
   INVALID_EMAIL_MESSAGE,
   LAST_ADMIN_MESSAGE,
+  NO_ACCOUNT_FOR_EMAIL_MESSAGE,
   PASSWORD_MIN_LENGTH,
   PASSWORD_RULES_TEXT,
+  RECOVERY_NO_COMPANY_MESSAGE,
+  RECOVERY_NOTICE,
   SELF_REMOVE_MESSAGE,
   WEAK_PASSWORD_MESSAGE,
   addUserDecision,
   mustChangePassword,
   normalizeAccountEmail,
   passwordProblem,
+  recoveryPlan,
   removeMemberDecision,
   resetPasswordDecision,
   transferAdminDecision,
@@ -135,5 +139,48 @@ describe("company users — membership decisions", () => {
     expect(transferAdminDecision(base).ok).toBe(true);
     expect(transferAdminDecision({ ...base, targetUserId: "user-admin" }).message).toBe(ALREADY_ADMIN_MESSAGE);
     expect(transferAdminDecision({ ...base, targetRole: "company_admin" }).message).toBe(ALREADY_ADMIN_MESSAGE);
+  });
+});
+
+describe("company users — owner recovery, the last resort", () => {
+  const facts = {
+    accountExists: true,
+    companyId: "company-1",
+    removed: false,
+    currentRole: "company_admin",
+    otherActiveAdmins: 1,
+  };
+
+  test("an unknown address is refused, and so is an account without a company", () => {
+    expect(recoveryPlan({ ...facts, accountExists: false }).ok).toBe(false);
+    expect(recoveryPlan({ ...facts, accountExists: false }).message).toBe(NO_ACCOUNT_FOR_EMAIL_MESSAGE);
+    expect(recoveryPlan({ ...facts, companyId: null }).ok).toBe(false);
+    expect(recoveryPlan({ ...facts, companyId: null }).message).toBe(RECOVERY_NO_COMPANY_MESSAGE);
+  });
+
+  test("the account always leaves with a temporary password it must replace", () => {
+    const plan = recoveryPlan(facts);
+    expect(plan.ok).toBe(true);
+    expect(plan.mustChangePassword).toBe(true);
+    expect(RECOVERY_NOTICE.toLowerCase().includes("temporary")).toBe(true);
+    expect(RECOVERY_NOTICE.toLowerCase().includes("change")).toBe(true);
+  });
+
+  test("an admin keeps its role, and a company with another admin is not handed a second one", () => {
+    expect(recoveryPlan(facts).grantAdmin).toBe(false);
+    expect(recoveryPlan({ ...facts, currentRole: "user", otherActiveAdmins: 1 }).grantAdmin).toBe(false);
+  });
+
+  test("admin is handed over only when nobody else could manage the company", () => {
+    const plan = recoveryPlan({ ...facts, currentRole: "user", otherActiveAdmins: 0 });
+    expect(plan.ok).toBe(true);
+    expect(plan.grantAdmin).toBe(true);
+    // A missing role is a plain user, which must not leave the company frozen.
+    expect(recoveryPlan({ ...facts, currentRole: undefined, otherActiveAdmins: 0 }).grantAdmin).toBe(true);
+  });
+
+  test("a removal is lifted, and an active account is left alone", () => {
+    expect(recoveryPlan({ ...facts, removed: true }).reinstate).toBe(true);
+    expect(recoveryPlan(facts).reinstate).toBe(false);
   });
 });

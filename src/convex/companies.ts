@@ -29,15 +29,20 @@ import {
   ADMIN_ONLY_MESSAGE,
   CURRENT_PASSWORD_WRONG_MESSAGE,
   EMAIL_TAKEN_MESSAGE,
+  INVALID_EMAIL_MESSAGE,
   MISSING_NAME_MESSAGE,
   MUST_CHANGE_PASSWORD_MESSAGE,
   NOT_MEMBER_MESSAGE,
+  NO_ACCOUNT_FOR_EMAIL_MESSAGE,
+  NO_PASSWORD_CREDENTIAL_MESSAGE,
   PASSWORD_UNCHANGED_MESSAGE,
+  RECOVERY_NOTICE,
   REMOVED_ACCESS_MESSAGE,
   SAME_EMAIL_MESSAGE,
   addUserDecision,
   normalizeEmail,
   passwordProblem,
+  recoveryPlan,
   removeMemberDecision,
   resetPasswordDecision,
   transferAdminDecision,
@@ -886,5 +891,86 @@ export const changeOwnPassword = mutation({
     const keep = await currentSession(ctx);
     await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: user._id, except: keep });
     return { ok: true };
+  },
+});
+
+/* ---------------------------------------------------- owner recovery (last resort) */
+
+/**
+ * The owner's way back in, for the one situation the product cannot fix by
+ * itself: the company's only admin has lost the password, so no admin is left who
+ * could reset one, and there is no email service to send one to.
+ *
+ * Internal on purpose. It can only be called from the CLI or the Convex dashboard,
+ * with deployment credentials — never from a browser — so no account can recover
+ * itself, and knowledge of an address is never enough:
+ *
+ *   bunx convex run companies:recoverAccountAccess \
+ *     '{"email":"admin@example.com","password":"a temporary password"}'
+ *
+ *   (add `--prod` to run it against a production deployment)
+ *
+ * It replaces the password credential of the account with that address, lifts a
+ * removal, hands the account company admin when no other active admin is left,
+ * marks the account "must change password" and signs it out everywhere. Nothing
+ * else is touched: no project, task, calendar, person, version or capacity figure
+ * is read or written. The whole thing is one transaction, so a failure changes
+ * nothing at all.
+ */
+export const recoverAccountAccess = internalMutation({
+  args: { email: v.string(), password: v.string() },
+  handler: async (ctx, args) => {
+    const email = normalizeEmail(args.email);
+    if (!EMAIL_PATTERN.test(email)) throw new Error(INVALID_EMAIL_MESSAGE);
+    const problem = passwordProblem(args.password);
+    if (problem) throw new Error(problem);
+
+    const account = await findAccountByEmail(ctx, email);
+    const companyId = account?.companyId ?? null;
+    const members = companyId ? await activeMembers(ctx, companyId) : [];
+    const otherActiveAdmins = members.filter(
+      (member) => member._id !== account?._id && normalizeCompanyRole(member.companyRole) === COMPANY_ADMIN,
+    ).length;
+    const plan = recoveryPlan({
+      accountExists: account !== null,
+      companyId: companyId as string | null,
+      removed: Boolean(account?.removedAt),
+      currentRole: account?.companyRole,
+      otherActiveAdmins,
+    });
+    if (!plan.ok || !account) throw new Error(plan.message ?? NO_ACCOUNT_FOR_EMAIL_MESSAGE);
+
+    // The credential is found by the address the account signs in with, so the
+    // temporary password replaces the one that was lost for that same address.
+    const credential = await findPasswordAccount(ctx, account.email ?? email);
+    if (!credential) throw new Error(NO_PASSWORD_CREDENTIAL_MESSAGE);
+
+    await modifyAccountCredentials(ctx as unknown as GenericActionCtx<DataModel>, {
+      provider: PASSWORD_PROVIDER_ID,
+      account: { id: credential.providerAccountId, secret: args.password },
+    });
+    await ctx.db.patch(account._id, {
+      mustChangePassword: plan.mustChangePassword,
+      // Only a real change is written: the patch removes the mark of a removal,
+      // and leaves the account type alone unless the company needs an admin back.
+      ...(plan.reinstate ? { removedAt: undefined } : {}),
+      ...(plan.grantAdmin ? { companyRole: COMPANY_ADMIN } : {}),
+    });
+    await invalidateSessions(ctx as unknown as GenericActionCtx<DataModel>, { userId: account._id });
+
+    const company = companyId ? await ctx.db.get(companyId) : null;
+    return {
+      ok: true,
+      userId: account._id as string,
+      email: normalizeEmail(account.email ?? email),
+      name: account.name ?? null,
+      companyId: companyId as string | null,
+      companyName: company?.name ?? null,
+      reinstated: plan.reinstate,
+      grantedAdmin: plan.grantAdmin,
+      role: plan.grantAdmin ? COMPANY_ADMIN : normalizeCompanyRole(account.companyRole),
+      otherActiveAdmins,
+      notice: RECOVERY_NOTICE,
+    };
   },
 });
