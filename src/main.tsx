@@ -5,6 +5,7 @@ import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import { InstrumentationProvider } from "@/instrumentation.tsx";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import { CalendarStoreProvider } from "@/lib/calendar-store";
+import { authStorage } from "@/lib/auth-storage";
 import { ConvexReactClient } from "convex/react";
 import { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
@@ -37,6 +38,7 @@ function RouteLoading() {
 }
 
 const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
+const storage = authStorage(window);
 
 
 
@@ -68,7 +70,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <VlyToolbar />
     <InstrumentationProvider>
-      <ConvexAuthProvider client={convex}>
+      <ConvexAuthProvider client={convex} storage={storage}>
         <BrowserRouter>
           <RouteSyncer />
           {/* The store lives outside Suspense so lazy route changes never reset it. */}

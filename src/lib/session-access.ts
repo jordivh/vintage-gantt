@@ -36,6 +36,17 @@ export function accessState(facts: AccessFacts): AccessState {
   return "granted";
 }
 
+/** A skipped user query must not keep signed-out browsers on the loading screen. */
+export function authIsLoading(authLoading: boolean, authenticated: boolean, userPending: boolean): boolean {
+  return authLoading || (authenticated && userPending);
+}
+
+/** A seed in flight blocks another seed, not hydration of its reactive result. */
+export function workspaceLoadStep(hasState: boolean, initializing: boolean): "initialize" | "wait" | "hydrate" {
+  if (hasState) return "hydrate";
+  return initializing ? "wait" : "initialize";
+}
+
 /** True when protected data must be cleared and the visitor returned to Sign in. */
 export function accessEnded(state: AccessState): boolean {
   return state === "signed-out" || state === "denied";

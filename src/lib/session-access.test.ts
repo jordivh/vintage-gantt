@@ -7,11 +7,24 @@
  * returns to Sign in.
  */
 import { describe, expect, test } from "bun:test";
-import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
+import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, authIsLoading, workspaceLoadStep } from "./session-access";
 
 const granted = { isLoading: false, isAuthenticated: true, removed: false, companyActive: true };
 
 describe("session access", () => {
+  test("signed-out browsers don't wait for the skipped user subscription", () => {
+    expect(authIsLoading(false, false, true)).toBe(false);
+    expect(authIsLoading(true, false, true)).toBe(true);
+    expect(authIsLoading(false, true, true)).toBe(true);
+    expect(authIsLoading(false, true, false)).toBe(false);
+  });
+
+  test("workspace seed results hydrate even before the mutation promise resolves", () => {
+    expect(workspaceLoadStep(false, false)).toBe("initialize");
+    expect(workspaceLoadStep(false, true)).toBe("wait");
+    expect(workspaceLoadStep(true, true)).toBe("hydrate");
+    expect(workspaceLoadStep(true, false)).toBe("hydrate");
+  });
   test("a valid session is granted once resolved — refresh does not lose it", () => {
     expect(accessState({ ...granted, isLoading: true })).toBe("loading");
     expect(accessState(granted)).toBe("granted");

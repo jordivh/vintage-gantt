@@ -30,7 +30,7 @@ import {
 import { normalizeWorkspaceRelations } from "./company-integrity";
 import { withoutSnapshotLog } from "./remaining-work";
 import { REMOVED_ACCESS_MESSAGE } from "./company-users";
-import { ACCESS_ENDED_MESSAGE, accessEnded, accessState } from "./session-access";
+import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, workspaceLoadStep } from "./session-access";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
@@ -453,7 +453,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   // A valid session survives a refresh; a removed account, a suspended company
   // and a signed-out visitor all end access. One rule decides, everywhere.
   const access = accessState({
-    isLoading: isAuthLoading || (isAuthenticated && companyInfo === undefined),
+    isLoading: isAuthLoading || (isAuthenticated && (companyInfo === undefined || accessInfo === undefined)),
     isAuthenticated,
     removed: accessInfo?.removed === true,
     companyActive: company ? company.company.status === "active" : true,
@@ -522,8 +522,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (!isAuthenticated || accessInfo === undefined || mustChangePassword || remoteState === undefined || hydratedRef.current || migrationStartedRef.current) return;
-    if (remoteState === null) {
+    if (!isAuthenticated || accessInfo === undefined || accessInfo === null || accessInfo.removed || mustChangePassword || remoteState === undefined || hydratedRef.current || access !== "granted") return;
+    const loadStep = workspaceLoadStep(remoteState !== null, migrationStartedRef.current);
+    if (loadStep === "wait") return;
+    if (loadStep === "initialize") {
       // The signed-in company has no workspace yet, so it gets its own: an
       // empty one plus the built-in starter project. Nothing is inherited from
       // the browser — a browser is shared, so a snapshot left behind by an
@@ -533,10 +535,12 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // at all. The server creates the starter project and the demo scenario
       // once, and never recreates a record that was removed afterwards.
       migrationStartedRef.current = true;
-      void initializeWorkspace({}).catch(() => {
-        migrationStartedRef.current = false;
-        toast.error("Could not connect to the central planner database. Your changes were not saved.");
-      });
+      void initializeWorkspace({})
+        .then(() => { migrationStartedRef.current = false; })
+        .catch(() => {
+          migrationStartedRef.current = false;
+          toast.error("Could not connect to the central planner database. Your changes were not saved.");
+        });
       return;
     }
     const state = remoteState as { projects: ProjectRecord[]; tasks: Array<PlannerTask & { projectId: string }>; calendars: PlannerCalendar[]; exceptions: CalendarException[]; resources: ResourceRecord[]; assignments: TaskAssignment[]; planVersions?: PlanVersion[]; baselines?: Baseline[]; baselineTasks?: BaselineTask[] };
@@ -601,7 +605,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // workspace is deliberately not recorded as synced: the save effect may write
     // the repaired form, and the diff-based save then touches only those rows.
     if (deadReferences.length) lastSyncedRef.current = null;
-  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, initializeWorkspace, buildWorkspacePayload]);
+  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, access, initializeWorkspace, buildWorkspacePayload]);
 
   /**
    * Company-based access. The server creates exactly one company for the
