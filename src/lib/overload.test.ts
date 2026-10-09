@@ -161,17 +161,17 @@ describe("overload — project chip and tooltip", () => {
     const index = buildOverloadIndex(fullInput());
     const weeks = getOverloadForResource(index, "res-r3-anna", "2026-01-01", "2026-12-31");
     const lines = overloadTooltip(weeks);
-    expect(lines[0]).toBe(`Anna is overbelast in week van 5 okt 2026: 110 u gepland, 40 u beschikbaar (TP-R3-B 100 u, TP-R3-A 10 u)`);
+    expect(lines[0]).toBe(`Anna is overloaded in week of 5 Oct 2026: 110 h planned, 40 h available (TP-R3-B 100 h, TP-R3-A 10 h)`);
     expect(lines.length).toBe(Math.min(3, weeks.length));
   });
 
   test("the tooltip lists at most three weeks and then adds a remainder line", () => {
-    const base: OverloadWeek = { resourceId: "r", resourceName: "Anna", weekStart: "2026-10-05", weekEnd: "2026-10-11", label: "week van 5 okt 2026", allocated: 58, available: 40, breakdown: [{ projectId: "a", projectName: "TP-R3-A", allocated: 8 }] };
+    const base: OverloadWeek = { resourceId: "r", resourceName: "Anna", weekStart: "2026-10-05", weekEnd: "2026-10-11", label: "week of 5 Oct 2026", allocated: 58, available: 40, breakdown: [{ projectId: "a", projectName: "TP-R3-A", allocated: 8 }] };
     const weeks = [0, 1, 2, 3, 4].map((offset) => ({ ...base, weekStart: `2026-10-${String(5 + offset * 7).padStart(2, "0")}` }));
     const lines = overloadTooltip(weeks);
     expect(lines.length).toBe(4);
-    expect(lines[0]).toContain("58 u gepland, 40 u beschikbaar (TP-R3-A 8 u)");
-    expect(lines[3]).toBe("+ 2 weken meer");
+    expect(lines[0]).toContain("58 h planned, 40 h available (TP-R3-A 8 h)");
+    expect(lines[3]).toBe("+ 2 more weeks");
   });
 });
 

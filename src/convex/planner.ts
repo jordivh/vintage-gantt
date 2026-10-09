@@ -7,7 +7,7 @@ import {
   workspaceIsolationReport,
   type WorkspaceRelationRows,
 } from "../lib/company-integrity";
-import { remapPredecessorText } from "../lib/planner-model";
+import { pruneDeadPredecessors, remapPredecessorText } from "../lib/planner-model";
 import { R3_CHRIS_LEAVE, R3_PROJECTS, R3_RESOURCES, R3_SEED_KEY } from "../lib/r3-fixture";
 import { companyTable, requireCompany, rowsByOwner, viewerScope } from "./companies";
 import type { CompanyScopedTable } from "../lib/company-scope";
@@ -646,6 +646,11 @@ export const deleteTasks = mutation({
       }
     }
     for (const task of tasks) if (doomed.has(task.id)) await ctx.db.delete(task._id);
+    const survivors = tasks.filter(task => !doomed.has(task.id));
+    const repaired = pruneDeadPredecessors(survivors).tasks;
+    for (let i = 0; i < survivors.length; i++) {
+      if (repaired[i].predecessors !== survivors[i].predecessors) await ctx.db.patch(survivors[i]._id, { predecessors: repaired[i].predecessors });
+    }
     return { taskIds: [...doomed], assignments, dependencies };
   },
 });

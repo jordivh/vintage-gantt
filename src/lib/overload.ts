@@ -59,10 +59,10 @@ const plusDays = (date: string, amount: number): string => {
   return isoDate(value);
 };
 
-const nlWeekDay = new Intl.DateTimeFormat("nl-BE", { day: "numeric", month: "short", year: "numeric" });
+const nlWeekDay = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
 /** `week van 12 okt 2026` — the phrasing the overload tooltips use. */
 export const overloadWeekLabel = (weekStart: string): string =>
-  `week van ${nlWeekDay.format(parseIsoDate(weekStart)).replace(/\./g, "")}`;
+  `week of ${nlWeekDay.format(parseIsoDate(weekStart)).replace(/\./g, "")}`;
 
 /**
  * Build the overload index once: every resource's overloaded weeks, computed
@@ -221,10 +221,10 @@ export function projectOverload(index: OverloadIndex, tasks: OverloadTask[], ass
 export function overloadTooltip(weeks: OverloadWeek[], limit = 3): string[] {
   const lines = weeks.slice(0, limit).map((week) => {
     const split = week.breakdown
-      .map((row) => `${row.projectName} ${formatCapacityHours(row.allocated)} u`)
+      .map((row) => `${row.projectName} ${formatCapacityHours(row.allocated)} h`)
       .join(", ");
-    return `${week.resourceName} is overbelast in ${week.label}: ${formatCapacityHours(week.allocated)} u gepland, ${formatCapacityHours(week.available)} u beschikbaar${split ? ` (${split})` : ""}`;
+    return `${week.resourceName} is overloaded in ${week.label}: ${formatCapacityHours(week.allocated)} h planned, ${formatCapacityHours(week.available)} h available${split ? ` (${split})` : ""}`;
   });
-  if (weeks.length > limit) lines.push(`+ ${weeks.length - limit} weken meer`);
+  if (weeks.length > limit) lines.push(`+ ${weeks.length - limit} more weeks`);
   return lines;
 }

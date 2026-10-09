@@ -29,6 +29,7 @@ import {
 } from "./company-scope";
 import { normalizeWorkspaceRelations } from "./company-integrity";
 import { withoutSnapshotLog } from "./remaining-work";
+import { removeTaskSubtrees, restoreDeletedTasks } from "./task-table";
 import { REMOVED_ACCESS_MESSAGE } from "./company-users";
 import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, workspaceLoadStep } from "./session-access";
 import { api } from "@/convex/_generated/api";
@@ -481,6 +482,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   /** The newest workspace waiting to be written, and the one write in flight. */
   const pendingSaveRef = useRef<{ serialised: string; payload: unknown } | null>(null);
   const saveInFlightRef = useRef(false);
+  const deletionInFlightRef = useRef(false);
+  const [deletionRevision, setDeletionRevision] = useState(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** The whole workspace exactly as it is sent to the server, relations repaired. */
@@ -660,7 +663,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    * instead of being queued behind it.
    */
   const drainSaves = useCallback(async () => {
-    if (saveInFlightRef.current) return;
+    if (saveInFlightRef.current || deletionInFlightRef.current) return;
     const pending = pendingSaveRef.current;
     if (!pending) return;
     pendingSaveRef.current = null;
@@ -684,7 +687,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [replaceRemoteState, restoreLastSaved]);
 
   useEffect(() => {
-    if (!isAuthenticated || !hydratedRef.current) return;
+    if (!isAuthenticated || !hydratedRef.current || deletionInFlightRef.current) return;
     // One run is skipped while a refused write is rolled back, so the rollback
     // itself is not sent back to the server.
     if (restoringRef.current) { restoringRef.current = false; return; }
@@ -704,7 +707,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       saveTimerRef.current = null;
       void drainSaves();
     }, WORKSPACE_SAVE_QUIET_MS);
-  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload, drainSaves]);
+  }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload, drainSaves, deletionRevision]);
 
   useEffect(() => () => {
     // Leaving the screen never drops the last change: whatever is still waiting
@@ -1064,25 +1067,39 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [activeProjectId, assignments, baselineTasks, baselines, buildWorkspacePayload, deleteProjectRemote, planVersions, projects, resources, system, tasksByProject]);
 
   /**
-   * Deletes tasks (with their subtree) from one project. The database goes first
-   * and the answer is awaited, so the caller can leave its plan untouched when the
-   * delete is refused. The assignments those tasks owned are dropped here as well;
-   * the caller owns the task list and its recalculation.
+   * Removes tasks and assignments optimistically, then persists the targeted
+   * deletion behind any in-flight save. A refusal restores the rows and links
+   * without overwriting newer edits. Autosaves resume only after this resolves.
    */
   const deleteTasks = useCallback<CalendarStoreValue["deleteTasks"]>(async (projectId, taskIds) => {
     if (!taskIds.length) return { ok: true, removedTaskIds: [] };
-    let removedTaskIds = taskIds;
+    if (deletionInFlightRef.current) return { ok: false, removedTaskIds: [], message: "A task deletion is still saving. Please try again shortly." };
+    const before = tasksByProject[projectId] ?? [];
+    const change = removeTaskSubtrees(before, taskIds);
+    if (!change.removed.length) return { ok: false, removedTaskIds: [], message: "Task not found." };
+    const removedAssignments = assignments.filter(row => change.ids.has(row.taskId));
+    deletionInFlightRef.current = true;
+    if (saveTimerRef.current !== null) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    setTasksByProject(current => ({ ...current, [projectId]: change.survivors }));
+    setAssignments(current => current.filter(row => !change.ids.has(row.taskId)));
     try {
-      const result = (await deleteTasksRemote({ projectId, taskIds })) as { taskIds?: string[] } | null;
-      if (result?.taskIds?.length) removedTaskIds = result.taskIds;
+      // Yield a frame before preparing network work so removal can be painted.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      // Let an already-started save finish before the targeted delete; the next
+      // full save must never recreate rows removed by this mutation.
+      while (saveInFlightRef.current) await new Promise(resolve => setTimeout(resolve, 10));
+      pendingSaveRef.current = null;
+      const result = await deleteTasksRemote({ projectId, taskIds });
+      return { ok: true, removedTaskIds: result.taskIds };
     } catch (error: unknown) {
-      return { ok: false, removedTaskIds: [], message: error instanceof Error ? error.message : "The task could not be deleted." };
+      setTasksByProject(current => ({ ...current, [projectId]: restoreDeletedTasks(before, change.survivors, current[projectId] ?? []) }));
+      setAssignments(current => [...current, ...removedAssignments.filter(row => !current.some(live => live.id === row.id))]);
+      return { ok: false, removedTaskIds: [], message: `The task could not be deleted and was restored. ${error instanceof Error ? error.message : "Please try again."}` };
+    } finally {
+      deletionInFlightRef.current = false;
+      setDeletionRevision(revision => revision + 1);
     }
-    const doomed = new Set(removedTaskIds);
-    const nextAssignments = assignments.filter((assignment) => !doomed.has(assignment.taskId));
-    setAssignments(nextAssignments);
-    return { ok: true, removedTaskIds };
-  }, [assignments, deleteTasksRemote]);
+  }, [assignments, tasksByProject, deleteTasksRemote]);
 
   /**
    * Deletes one employee with everything that only existed for them: their

@@ -274,7 +274,7 @@ describe("saving the workspace — how the screens send it", () => {
     expect(text).toContain("WORKSPACE_SAVE_QUIET_MS");
     expect(text).toContain("pendingSaveRef.current = { serialised, payload }");
     expect(text).toContain("if (serialised === lastSyncedRef.current) return;");
-    expect(text).toContain("if (saveInFlightRef.current) return;");
+    expect(text).toContain("if (saveInFlightRef.current || deletionInFlightRef.current) return;");
     expect(text).toContain("if (pendingSaveRef.current) void drainSaves();");
     // The last change is not dropped when the screen goes away.
     expect(text).toContain("if (pendingSaveRef.current) void drainSaves();");
@@ -296,7 +296,9 @@ describe("saving the workspace — how the screens send it", () => {
     // is what refused every later copy with "Could not copy … could not be
     // remapped", i.e. what made "Optimize planning" impossible to apply again.
     const dashboard = readFileSync("src/pages/Dashboard.tsx", "utf8");
-    expect(dashboard).toContain("pruneDeadPredecessors(tasks.filter((task) => !removed.has(task.id)))");
+    expect(dashboard).toContain("removeTaskSubtrees(tasks, wanted)");
+    expect(text).toContain("removeTaskSubtrees(before, taskIds)");
+    expect(readFileSync("src/lib/task-table.ts", "utf8")).toContain("pruneDeadPredecessors(tasks.filter(task => !ids.has(task.id)))");
     // On the way in: a reference that names no task of its own version is dropped
     // per version, and the repaired workspace is written, so it is repaired once.
     expect(text).toContain("pruneDeadPredecessors(grouped[projectId])");

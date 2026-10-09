@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { toast } from "sonner";
 import { useNavigate, useSearchParams } from "react-router";
 import {
@@ -57,6 +57,7 @@ import { createPlannerPdfFile, releasePlannerPdfFile, startPdfDownload, type Pla
 import { CALENDAR_TYPE_LABELS, useCalendarStore, type Baseline } from "@/lib/calendar-store";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { columnWidth, insertTaskBelow, removeTaskSubtrees, syncVerticalScroll, readColumnWidths, writeColumnWidths } from "@/lib/task-table";
 import { AppBar } from "@/components/AppBar";
 import { AdjustRemainingWorkDialog } from "@/components/AdjustRemainingWorkDialog";
 
@@ -88,7 +89,7 @@ const columnDefs: { key: ColumnKey; label: string; width: number }[] = [
   { key: "predecessors", label: "Predecessors", width: 128 },
   { key: "totalFloat", label: "Float", width: 84 },
   { key: "resource", label: "Resource", width: 118 },
-  { key: "availability", label: "Beschikbaarheid", width: 124 },
+  { key: "availability", label: "Availability", width: 124 },
   { key: "percent", label: "% complete", width: 96 },
   { key: "actualStart", label: "Actual start", width: 110 },
   { key: "actualFinish", label: "Actual finish", width: 110 },
@@ -186,6 +187,18 @@ export default function Dashboard() {
   } = useCalendarStore();
   // The signed-in account, recorded on every adjustment log entry.
   const selfMember = company?.members.find((member) => member.isSelf);
+  const widthUserId = selfMember?.userId ?? "";
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  useEffect(() => {
+    try { setColumnWidths(readColumnWidths(window.localStorage, widthUserId)); } catch { setColumnWidths({}); }
+  }, [widthUserId]);
+  const resizeColumn = (event: ReactPointerEvent<HTMLSpanElement>, key: ColumnKey, defaultWidth: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    columnDrag.current = { key, x: event.clientX, width: columnWidths[key] ?? defaultWidth };
+  };
+  const columnDrag = useRef<{ key: ColumnKey; x: number; width: number } | null>(null);
   const adjustmentActor = { id: selfMember?.userId ?? "unknown", name: selfMember?.name || selfMember?.email || "You" };
   const calendarId = activeProject.calendarId;
   const calendarName = system.calendars.find((calendar) => calendar.id === calendarId)?.name ?? "Unlinked";
@@ -360,6 +373,12 @@ export default function Dashboard() {
   const [projectDialog, setProjectDialog] = useState(false);
   const [pendingCalendarId, setPendingCalendarId] = useState(calendarId);
   const [relinkConfirm, setRelinkConfirm] = useState<{ calendarId: string; projects: number; tasks: number } | null>(null);
+  const latestTasksRef = useRef(tasks);
+  latestTasksRef.current = tasks;
+  const activeProjectRef = useRef(activeProjectId);
+  activeProjectRef.current = activeProjectId;
+  const activeVersionRef = useRef(activeVersionId);
+  activeVersionRef.current = activeVersionId;
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
 
@@ -493,6 +512,12 @@ export default function Dashboard() {
     walk(null);
     return visible;
   }, [calculatedTasks, query, sort]);
+  useLayoutEffect(() => {
+    const grid = scrollRef.current;
+    const timeline = timelineScrollRef.current;
+    if (grid && timeline) syncVerticalScroll(grid, timeline);
+  }, [visibleTasks.length, columnWidths, split]);
+
   const taskDisplayIds = useMemo(
     () => new Map(orderTasksForDisplay(calculatedTasks).map((task, index) => [task.id, index + 1])),
     [calculatedTasks],
@@ -876,6 +901,14 @@ export default function Dashboard() {
     commit(next);
   };
 
+  const insertBelow = (clickedId: string) => {
+    const id = nextTaskId();
+    const next = insertTaskBelow(tasks, clickedId, newTaskRow(id, null));
+    if (next === tasks || !commit(next)) return;
+    setSort(null);
+    openNameEditor(id);
+  };
+
   /**
    * Confirms the pending row's typed name and opens the next empty row directly
    * below it in ONE commit. Committing twice would rebuild the second change from
@@ -903,14 +936,16 @@ export default function Dashboard() {
     setTasks((items) => items.filter((item) => item.id !== id));
   };
 
-  // Deleting goes to the database first and the answer is awaited. Only a
-  // confirmed delete changes the plan here; a refusal keeps every row and says
-  // what went wrong, so a task can never look deleted while the server keeps it.
-  const deleteSelected = async () => {
-    if (!selected.length) return;
-    const wanted = tasks.filter((task) => selected.includes(task.id) || selected.includes(task.parentId ?? "")).map((task) => task.id);
+  // The store removes rows and assignments immediately and restores them on
+  // refusal. Only linked/summary changes need a background scheduling pass.
+  const deleteSelected = async (wanted: string[] = selected) => {
+    if (!wanted.length) return;
+    const change = removeTaskSubtrees(tasks, wanted);
+    const previousSelection = selected;
+    setSelected([]);
     const result = await deleteTasks(activeProjectId, wanted);
     if (!result.ok) {
+      setSelected(previousSelection);
       toast.error(result.message ?? "The task could not be deleted.");
       return;
     }
@@ -922,9 +957,16 @@ export default function Dashboard() {
     // more (nothing was scheduled from it), but leaving it behind is what used to
     // make a later version copy refuse with "Could not copy … could not be
     // remapped" — so "Optimize planning" could never be applied again.
-    const survivors = pruneDeadPredecessors(tasks.filter((task) => !removed.has(task.id))).tasks;
-    commit(survivors);
-    setSelected([]);
+    if (change.needsScheduling && activeProjectRef.current === activeProjectId && activeVersionRef.current === activeVersionId) {
+      // Background work uses the newest rows, not a snapshot taken before saving.
+      window.setTimeout(() => {
+        if (activeProjectRef.current !== activeProjectId || activeVersionRef.current !== activeVersionId) return;
+        const survivors = latestTasksRef.current.filter(task => !removed.has(task.id));
+        const normalized = normalizeMilestones(survivors);
+        if (activeMode === "planning") recalculate(applyPlanningModeMargins(normalized));
+        else recalculate(settleMonitoringPlan(tasks, normalized, { calendarSystem: system, projectCalendarId: calendarId }).tasks);
+      }, 0);
+    }
   };
 
   /**
@@ -1587,7 +1629,7 @@ export default function Dashboard() {
             >
               <Layers size={14} />
               <span className="context-field-label">Baseline</span>
-              <b className="baseline-trigger-name">{activeBaseline ? activeBaseline.name : "Geen baseline"}</b>
+              <b className="baseline-trigger-name">{activeBaseline ? activeBaseline.name : "No baseline"}</b>
               <ChevronDown size={13} />
             </button>
             {baselineOpen && (
@@ -1595,9 +1637,9 @@ export default function Dashboard() {
                 <div className="popover-heading"><b>BASELINE</b><button onClick={() => setBaselineOpen(false)}><X size={14} /></button></div>
                 {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
                 <label><input type="checkbox" checked={showBaselineBars} onChange={(event) => setShowBaselineBars(event.target.checked)} /> Vergelijk met baseline</label>
-                <div className="popover-subheading">ACTIEVE BASELINE</div>
+                <div className="popover-subheading">ACTIVE BASELINE</div>
                 <div className="baseline-choices">
-                  <button className={`baseline-choice${activeBaselineId ? "" : " current"}`} onClick={() => setActiveBaselineId("")}>Geen baseline</button>
+                  <button className={`baseline-choice${activeBaselineId ? "" : " current"}`} onClick={() => setActiveBaselineId("")}>No baseline</button>
                   {projectBaselines.map((baseline) => (
                     <button
                       key={baseline.id}
@@ -1608,12 +1650,12 @@ export default function Dashboard() {
                   ))}
                 </div>
                 <div className="baseline-actions">
-                  <button className="tool-button" onClick={openBaseline}><FileSpreadsheet size={14} /> Baseline vastleggen</button>
-                  <button className="tool-button" aria-expanded={baselineManageOpen} onClick={() => setBaselineManageOpen((open) => !open)}><Layers size={14} /> Baselines beheren ({projectBaselines.length})</button>
+                  <button className="tool-button" onClick={openBaseline}><FileSpreadsheet size={14} /> Capture baseline</button>
+                  <button className="tool-button" aria-expanded={baselineManageOpen} onClick={() => setBaselineManageOpen((open) => !open)}><Layers size={14} /> Manage baselines ({projectBaselines.length})</button>
                 </div>
                 {baselineManageOpen && (
                   <div className="baseline-manage">
-                    {projectBaselines.length === 0 && <p className="baseline-empty">Nog geen baseline vastgelegd voor {activeProject.name}.</p>}
+                    {projectBaselines.length === 0 && <p className="baseline-empty">No baseline captured yet for {activeProject.name}.</p>}
                     {projectBaselines.map((baseline) => {
                       const version = planVersions.find((item) => item.id === baseline.versionId);
                       const isCompared = baseline.id === activeBaselineId;
@@ -1644,15 +1686,15 @@ export default function Dashboard() {
             <button
               className="context-overload"
               onClick={openProjectCapacity}
-              aria-label={`${projectOverloadInfo.resourceIds.length} medewerker${projectOverloadInfo.resourceIds.length === 1 ? "" : "s"} overbelast — open de capaciteit`}
-              title={`${projectOverloadInfo.resourceIds.length} medewerker${projectOverloadInfo.resourceIds.length === 1 ? " is" : "s zijn"} van ${activeProject.name} overbelast in minstens één week. Klik om de capaciteit te openen.\n${overloadTooltip(projectOverloadInfo.weeks).join("\n")}`}
+              aria-label={`${projectOverloadInfo.resourceIds.length} overloaded resource${projectOverloadInfo.resourceIds.length === 1 ? "" : "s"} — open capacity`}
+              title={`${projectOverloadInfo.resourceIds.length} resource${projectOverloadInfo.resourceIds.length === 1 ? " is" : "s are"} overloaded in at least one week of ${activeProject.name}. Click to open capacity.\n${overloadTooltip(projectOverloadInfo.weeks).join("\n")}`}
             >
               <TriangleAlert size={13} />
-              {projectOverloadInfo.resourceIds.length === 1 ? "1 medewerker overbelast" : `${projectOverloadInfo.resourceIds.length} medewerkers overbelast`}
+              {projectOverloadInfo.resourceIds.length === 1 ? "1 overloaded resource" : `${projectOverloadInfo.resourceIds.length} overloaded resources`}
             </button>
           )}
           <button className="context-margin" onClick={openMarginReport} title={`Planned ${marginTotals.planned} d · consumed ${marginTotals.consumed} d · remaining ${marginTotals.remaining} d for this plan version — leaf tasks only, exactly what the margin report shows`}>
-            Marge <b>{marginTotals.planned} d</b><span className="context-margin-seg"> · <b>{marginTotals.consumed} d</b> verbruikt</span><span className="context-margin-seg"> · <b>{marginTotals.remaining} d</b> over</span>
+            Margin <b>{marginTotals.planned} d</b><span className="context-margin-seg"> · <b>{marginTotals.consumed} d</b> consumed</span><span className="context-margin-seg"> · <b>{marginTotals.remaining} d</b> remaining</span>
           </button>
         </div>
       </header>
@@ -1663,7 +1705,7 @@ export default function Dashboard() {
           <span className="toolbar-divider" />
           <button className="icon-button" title="Indent (Tab)" aria-label="Indent (Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={16} /></button>
           <button className="icon-button" title="Outdent (Shift+Tab)" aria-label="Outdent (Shift+Tab)" disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={16} /></button>
-          <button className="icon-button" title="Delete (Delete)" aria-label="Delete (Delete)" disabled={!selected.length} onClick={deleteSelected}><Trash2 size={15} /></button>
+          <button className="icon-button" title="Delete (Delete)" aria-label="Delete (Delete)" disabled={!selected.length} onClick={() => void deleteSelected()}><Trash2 size={15} /></button>
           <span className="toolbar-divider" />
           <button className="icon-button" title="Undo (Ctrl/Cmd+Z)" aria-label="Undo" disabled={!history.length} onClick={undo}><Undo2 size={15} /></button>
           <button className="icon-button" title="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" disabled={!future.length} onClick={redo}><Redo2 size={15} /></button>
@@ -1677,13 +1719,13 @@ export default function Dashboard() {
             <label><input type="checkbox" checked={showCriticalPath} onChange={(event) => setShowCriticalPath(event.target.checked)} /> Critical path</label>
             <label><input type="checkbox" checked={showMarginsOnBars} onChange={(event) => setShowMarginsOnBars(event.target.checked)} /> Margin zones</label>
             <label><input type="checkbox" checked={showLeave} onChange={(event) => setShowLeave(event.target.checked)} /> Leave on bars</label>
-            <label><input type="checkbox" checked={showAvailability} onChange={(event) => setShowAvailability(event.target.checked)} /> Beschikbaarheid column</label>
+            <label><input type="checkbox" checked={showAvailability} onChange={(event) => setShowAvailability(event.target.checked)} /> Availability column</label>
             <div className="popover-subheading">COLUMNS</div>
             {(["totalFloat", "margin", "marginOriginal", "marginConsumed", "marginRemaining", "actualStart", "actualFinish", "predecessors", "resource"] as ColumnKey[]).map((key) => { const column = columnDefs.find((item) => item.key === key)!; return <label key={key}><input type="checkbox" checked={!hidden.includes(key)} onChange={() => setHidden((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} /> {column.label}</label>; })}
           </div>}</div>
           <select className="toolbar-zoom-select" value={zoom} onChange={(event) => setZoom(event.target.value as "day" | "week" | "month" | "quarter")} aria-label="Zoom"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option><option value="quarter">Quarter</option></select>
           <div className="toolbar-popover-wrap"><button className="icon-button" title="More actions" aria-label="More actions" onClick={() => { setOverflowOpen((open) => !open); setViewOpen(false); }}><MoreHorizontal size={18} /></button>{overflowOpen && <div className="toolbar-popover overflow-popover" onClick={(event) => event.stopPropagation()}>
-            <div className="responsive-task-actions"><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={14} /> <span>Indent</span></button><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={14} /> <span>Outdent</span></button><button disabled={!selected.length} onClick={deleteSelected}><Trash2 size={14} /> Delete</button><button disabled={!history.length} onClick={undo}><Undo2 size={14} /> Undo</button><button disabled={!future.length} onClick={redo}><Redo2 size={14} /> Redo</button><div className="menu-rule" /></div>
+            <div className="responsive-task-actions"><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0])}><IndentIncrease size={14} /> <span>Indent</span></button><button disabled={!selected.length} onClick={() => selected[0] && indent(selected[0], true)}><IndentDecrease size={14} /> <span>Outdent</span></button><button disabled={!selected.length} onClick={() => void deleteSelected()}><Trash2 size={14} /> Delete</button><button disabled={!history.length} onClick={undo}><Undo2 size={14} /> Undo</button><button disabled={!future.length} onClick={redo}><Redo2 size={14} /> Redo</button><div className="menu-rule" /></div>
             <button onClick={openRecalculate}><RefreshCw size={14} /> Recalculate</button>
             <button onClick={() => void runExport()}><Download size={14} /> Export</button>
             <button onClick={openMarginReport}><Columns3 size={14} /> Margin report</button>
@@ -2103,17 +2145,17 @@ a fixed milestone is never moved, and a task that would push it is left alone.
               <div className="baseline-warning" role="alert">
                 <TriangleAlert size={16} />
                 <div>
-                  <p>Let op: dit is de baseline waartegen deze versie wordt opgevolgd. Na verwijderen is er geen vergelijking met de oorspronkelijke planning meer mogelijk in deze versie.</p>
+                  <p>Warning: this is the baseline used to monitor this version. Deleting it removes comparison with the original plan.</p>
                   {deleteBaselineFallback
-                    ? <p>De opvolging valt terug op baseline {deleteBaselineFallback.name} ({formatFullDate(baselineDateOf(deleteBaselineFallback))}).</p>
-                    : <p>Er blijft geen baseline over in deze versie om tegen te vergelijken.</p>}
+                    ? <p>Monitoring falls back to baseline {deleteBaselineFallback.name} ({formatFullDate(baselineDateOf(deleteBaselineFallback))}).</p>
+                    : <p>No baseline remains for comparison in this version.</p>}
                 </div>
               </div>
             )}
             {baselineError && <p className="baseline-error" role="alert"><TriangleAlert size={13} /> {baselineError}</p>}
             <div className="modal-actions">
-              <button className="tool-button" onClick={closeDeleteBaseline}>Annuleren</button>
-              <button className="tool-button primary baseline-delete-confirm" onClick={confirmDeleteBaseline}>Verwijderen</button>
+              <button className="tool-button" onClick={closeDeleteBaseline}>Cancel</button>
+              <button className="tool-button primary baseline-delete-confirm" onClick={confirmDeleteBaseline}>Delete</button>
             </div>
           </div>
         </div>
@@ -2293,7 +2335,9 @@ a fixed milestone is never moved, and a task that would push it is left alone.
         </aside>
         <div className="workbench">
         <section className="grid-pane" style={{ width: `${split}%` }}>
-          <div className="grid-scroll" ref={scrollRef}>
+          <div className="grid-scroll" ref={scrollRef} onScroll={(event) => {
+            if (timelineScrollRef.current) syncVerticalScroll(event.currentTarget, timelineScrollRef.current);
+          }}>
             <div className="grid-header">
               {columnDefs
                 .filter((column) => column.key === "id" || (column.key === "availability" ? showAvailability : !hidden.includes(column.key)) || (activeBaselineId && ["baselineStart", "baselineFinish", "variance"].includes(column.key)))
@@ -2301,14 +2345,31 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                   <div
                     key={column.key}
                     className={`grid-head-cell ${column.key === "totalFloat" ? "float-head" : ""} ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""}`}
-                    style={{ width: column.width }}
+                    style={{ width: columnWidths[column.key] ?? column.width }}
                     role={column.key === "totalFloat" || column.key === "work" ? "button" : undefined}
                     aria-sort={sort?.key === column.key ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}
                     title={column.key === "totalFloat" ? "Float: click to sort the tightest tasks first" : column.key === "work" ? "Work: click to sort by total hours" : undefined}
                     onClick={column.key === "totalFloat" ? toggleFloatSort : column.key === "work" ? toggleWorkSort : undefined}
                     onContextMenu={(event) => { event.preventDefault(); toast(`${column.label}: column options ready`); }}
                   >
-                    {column.label}
+                    <span className="column-label">{column.label}</span>
+                    <span className="column-resize-handle" role="separator" aria-orientation="vertical" aria-label={`Resize ${column.label} column`}
+                      onClick={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => resizeColumn(event, column.key, column.width)}
+                      onPointerMove={(event) => {
+                        const drag = columnDrag.current;
+                        if (!drag || drag.key !== column.key) return;
+                        setColumnWidths((widths) => ({ ...widths, [drag.key]: columnWidth(drag.width + event.clientX - drag.x) }));
+                      }}
+                      onLostPointerCapture={() => { columnDrag.current = null; }}
+                      onPointerUp={(event) => {
+                        const drag = columnDrag.current;
+                        if (!drag) return;
+                        const next = { ...columnWidths, [drag.key]: columnWidth(drag.width + event.clientX - drag.x) };
+                        setColumnWidths(next);
+                        try { writeColumnWidths(window.localStorage, widthUserId, next); } catch { /* Storage can be blocked. */ }
+                        columnDrag.current = null;
+                      }} />
                     {sort?.key === column.key
                       ? (sort.direction === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />)
                       : <ChevronsUpDown size={12} />}
@@ -2422,7 +2483,7 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                         <div
                           key={column.key}
                           className={`grid-cell ${modeEmphasis[activeMode].includes(column.key) ? "mode-emphasis" : ""} ${isName ? "name-cell" : ""} ${column.key === "resource" ? "resource-cell" : ""} ${column.key === "totalFloat" ? "float-cell" : ""} ${column.key === "margin" ? "margin-cell" : ""} ${marginNotice?.taskId === task.id && column.key === "margin" ? "has-notice" : ""} ${absorptionNotice?.taskId === task.id && absorptionColumns.includes(column.key) ? "has-notice" : ""} ${column.key === "totalFloat" && !summary && (displayTask.totalFloat ?? 0) === 0 ? "critical-float" : ""} ${cellError?.taskId === task.id && cellError.column === column.key ? "cell-invalid" : ""} ${!canEdit ? "readonly" : ""}`}
-                          style={{ width: column.width }}
+                          style={{ width: columnWidths[column.key] ?? column.width }}
                           title={readOnlyReason}
                           onClick={() => {
                             if (canEdit && (column.key === "start" || column.key === "finish")) {
@@ -2526,13 +2587,13 @@ a fixed milestone is never moved, and a task that would push it is left alone.
                             // descendants that carry the flag, never a check of its own.
                             const label = leaf
                               ? overloadTooltip(overload.weeks).join("\n")
-                              : `${overload.count} subtask${overload.count === 1 ? "" : "s"} met een overbelaste resource.`;
+                              : `${overload.count} subtask${overload.count === 1 ? "" : "s"} with an overloaded resource.`;
                             return (
                               <button
                                 type="button"
                                 className="cell-overload-flag"
                                 title={label}
-                                aria-label={leaf ? "Overbelaste resource — open de capaciteit" : `${overload.count} subtaken met een overbelaste resource`}
+                                aria-label={leaf ? "Overloaded resource — open capacity" : `${overload.count} subtasks with an overloaded resource`}
                                 onClick={(event) => { event.stopPropagation(); openResourceCapacity(overload.weeks); }}
                               >
                                 <TriangleAlert size={12} />
@@ -2591,7 +2652,9 @@ a fixed milestone is never moved, and a task that would push it is left alone.
         </div>
 
         <section className="timeline-pane">
-          <div className="timeline-scroll">
+          <div className="timeline-scroll" ref={timelineScrollRef} onScroll={(event) => {
+            if (scrollRef.current) syncVerticalScroll(event.currentTarget, scrollRef.current);
+          }}>
             <div className="timeline-header" style={{ width: timelineWidth }}>
               <div className="month-row">
                 {timelineDays
@@ -2720,7 +2783,8 @@ a fixed milestone is never moved, and a task that would push it is left alone.
               ? <button onClick={() => { setAdjustError(null); setAdjustEdit(null); setAdjustTaskId(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Adjust remaining work</button>
               : null;
           })()}
-          <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add task</button>
+          <button onClick={() => { addTask(showMenu.id, showMenu.id); setShowMenu(null); }}><Plus size={14} /> Add subtask</button>
+          <button onClick={() => { insertBelow(showMenu.id); setShowMenu(null); }}><Plus size={14} /> Insert task below</button>
           <button
             onClick={() => {
               duplicateTask(showMenu.id);
@@ -2730,7 +2794,7 @@ a fixed milestone is never moved, and a task that would push it is left alone.
             <Copy size={14} /> Duplicate task
           </button>
           {taskById.get(showMenu.id)?.startConstraint && <button onClick={() => { removeConstraint(showMenu.id); setShowMenu(null); }}><RotateCcw size={14} /> Remove constraint</button>}
-          <button onClick={() => { setSelected([showMenu.id]); deleteSelected(); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button>
+          <button onClick={() => { void deleteSelected([showMenu.id]); setShowMenu(null); }} className="danger"><Trash2 size={14} /> Delete task</button>
           <div className="menu-rule" />
           <button
             onClick={() => {
