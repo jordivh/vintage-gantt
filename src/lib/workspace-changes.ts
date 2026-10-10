@@ -3,7 +3,8 @@ export type WorkspaceTable = typeof workspaceTables[number];
 export type WorkspaceRow = { id: string; [key: string]: unknown };
 export type Workspace = Partial<Record<WorkspaceTable, readonly WorkspaceRow[]>>;
 export interface WorkspaceChange { table: WorkspaceTable; id: string; before: WorkspaceRow | null; after: WorkspaceRow | null }
-export interface WorkspaceGuard { projectId: string; fingerprint: string }
+export interface ReadCoverage { projectId: string; versionIds: string[]; allVersions: boolean }
+export interface WorkspaceGuard { projectId: string; fingerprint: string; scope?: { versionIds: string[]; allVersions: boolean; baselineIds: string[] } }
 
 export function canonical(value: unknown): string {
   if (value === undefined) return "undefined";
@@ -69,8 +70,11 @@ export function affectedProjects(state: Workspace, changes: readonly WorkspaceCh
   return [...ids].sort();
 }
 
-export async function changeRequest(before: Workspace, after: Workspace) {
+export async function changeRequest(before: Workspace, after: Workspace, coverage?: readonly ReadCoverage[]) {
   const changes = workspaceChanges(before, after);
-  const guards = await Promise.all(affectedProjects(before, changes).map(async projectId => ({ projectId, fingerprint: await fingerprint(projectInputs(before, projectId)) })));
+  const guards = await Promise.all(affectedProjects(before, changes).map(async projectId => {
+    const loaded = coverage?.find(item => item.projectId === projectId);
+    return { projectId, fingerprint: await fingerprint(projectInputs(before, projectId)), ...(loaded ? { scope: { versionIds: loaded.versionIds, allVersions: loaded.allVersions, baselineIds: (before.baselineTasks ?? []).map(row => row.baselineId as string) } } : {}) };
+  }));
   return { changes, guards };
 }

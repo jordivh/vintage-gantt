@@ -12,6 +12,7 @@ import { pruneDeadPredecessors, remapPredecessorText } from "../lib/planner-mode
 import { R3_CHRIS_LEAVE, R3_PROJECTS, R3_RESOURCES, R3_SEED_KEY } from "../lib/r3-fixture";
 import { companyTable, requireCompany, rowsByOwner, viewerScope } from "./companies";
 import type { CompanyScopedTable } from "../lib/company-scope";
+import { scopedFingerprint } from "./plannerReads";
 
 /**
  * The workspace: projects, plans, calendars, people and capacity.
@@ -923,7 +924,7 @@ const conflict = () => new ConvexError({ code: "SAVE_CONFLICT", message: "Someon
 export const saveChanges = mutation({
   args: {
     changes: v.array(v.object({ table: v.union(...workspaceTables.map(table => v.literal(table))), id: v.string(), before: v.any(), after: v.any() })),
-    guards: v.array(v.object({ projectId: v.string(), fingerprint: v.string() })),
+    guards: v.array(v.object({ projectId: v.string(), fingerprint: v.string(), scope: v.optional(v.object({ versionIds: v.array(v.string()), allVersions: v.boolean(), baselineIds: v.array(v.string()) })) })),
   },
   handler: async (ctx, args) => {
     const { userId, companyId } = await requireCompany(ctx);
@@ -954,7 +955,7 @@ export const saveChanges = mutation({
     // Validate complete read sets per affected project, including unchanged
     // predecessors, calendars and version mode. This also detects inserted rows.
     const shared: Workspace = {};
-    if (guards.length) {
+    if (guards.some(guard => !guard.scope)) {
       shared.calendars = stripScope(await companyTable(ctx, "calendars", companyId));
       shared.exceptions = stripScope(await companyTable(ctx, "calendarExceptions", companyId));
       shared.resources = stripScope(await companyTable(ctx, "resources", companyId));
@@ -963,6 +964,15 @@ export const saveChanges = mutation({
     for (const guard of guards) {
       if (guarded.has(guard.projectId)) throw new Error("Duplicate planning guard.");
       guarded.add(guard.projectId);
+      if (guard.scope) {
+        if (await scopedFingerprint(ctx, companyId, { projectId: guard.projectId, ...guard.scope }, guard.scope.baselineIds) !== guard.fingerprint) throw conflict();
+        // A client cannot modify an existing task from outside its checked range.
+        for (const change of changes.filter(change => change.table === "tasks" && change.before?.projectId === guard.projectId)) {
+          const versionId = change.before?.versionId;
+          if (!guard.scope.allVersions && typeof versionId === "string" && !guard.scope.versionIds.includes(versionId)) throw conflict();
+        }
+        continue;
+      }
       const tasks = stripScope(await ctx.db.query("tasks").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect());
       const baselines = stripScope(await ctx.db.query("baselines").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect());
       const assignments = (await Promise.all(tasks.map(task => ctx.db.query("taskAssignments").withIndex("by_company_task", q => q.eq("companyId", companyId).eq("taskId", task.id)).collect()))).flat();

@@ -184,6 +184,7 @@ export default function Dashboard() {
     focusTask,
     clearFocusTask,
     company,
+    requestBaseline,
   } = useCalendarStore();
   // The signed-in account, recorded on every adjustment log entry.
   const selfMember = company?.members.find((member) => member.isSelf);
@@ -316,6 +317,7 @@ export default function Dashboard() {
   const [replanScope, setReplanScope] = useState<ReplanScope>("not-started");
   const [replanPct, setReplanPct] = useState("20");
   const [activeBaselineId, setActiveBaselineId] = useState("");
+  useEffect(() => { requestBaseline(activeBaselineId); }, [activeBaselineId, requestBaseline]);
   const [baselineDialog, setBaselineDialog] = useState(false);
   const [baselineName, setBaselineName] = useState("");
   const [baselineDate, setBaselineDate] = useState(todayLineDate);

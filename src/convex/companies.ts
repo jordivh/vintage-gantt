@@ -389,8 +389,8 @@ export const ensureCompany = mutation({
 
 /** The company behind the signed-in account, plus the account type. */
 export const current = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { includeMembers: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
     const user = await currentAccount(ctx);
     if (!user) return null;
     // A removed account has no company view at all.
@@ -399,7 +399,7 @@ export const current = query({
     const company = await ctx.db.get(user.companyId);
     if (!company) return null;
     const role = normalizeCompanyRole(user.companyRole);
-    const members = await ctx.db
+    const members = args.includeMembers === false ? [user] : await ctx.db
       .query("users")
       .withIndex("by_company", (q) => q.eq("companyId", user.companyId as never))
       .collect();

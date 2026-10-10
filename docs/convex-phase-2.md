@@ -1,5 +1,9 @@
 # Stap 2 — gerichte opslag, nog NIET vrijgegeven
 
+## Handmatige bevestiging door de gebruiker
+
+De gebruiker bevestigt in deze conversatie: “Ik heb stap 2 handmatig getest en bevestig dat het werkt.” Deze bevestiging is vastgelegd als door de gebruiker gerapporteerd testresultaat, niet als een door de agent uitgevoerde browsertest. Er zijn geen nadere testgevallen, meetwaarden of browserdetails aangeleverd. De gebruiker heeft akkoord gegeven voor stap 3; dit is geen akkoord voor een productie-release van stap 3.
+
 ## Status en scope
 
 Applicatie-opslag aangepast; stap 3 (opsplitsen live queries) niet uitgevoerd. De brede getState-query blijft aanwezig. Geen abonnement/databasedienst gewijzigd. Geen bestaande klantgegevens verwijderd of migraties van planningsregels uitgevoerd. Backendfuncties/indexen zijn op development bijgewerkt met `bun convex dev --once`; dit is geen productie-release.

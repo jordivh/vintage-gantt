@@ -129,7 +129,7 @@ describe("owner recovery", () => {
 
     await t.run((ctx) => ctx.db.patch(jordi, { removedAt: NOW }));
     // A removed account sees nothing of its company.
-    expect(await t.withIdentity({ subject: jordi }).query(api.companies.current)).toBeNull();
+    expect(await t.withIdentity({ subject: jordi }).query(api.companies.current, {})).toBeNull();
 
     const report = await recover(t, EMAIL, TEMPORARY);
     expect(report.reinstated).toBe(true);
@@ -140,7 +140,7 @@ describe("owner recovery", () => {
     expect(recovered?.removedAt).toBeUndefined();
     expect(recovered?.companyRole).toBe("company_admin");
     // Signs in, belongs to the company again, and can manage its accounts.
-    const current = await t.withIdentity({ subject: jordi }).query(api.companies.current);
+    const current = await t.withIdentity({ subject: jordi }).query(api.companies.current, {});
     expect(current?.company.name).toBe("SIATEC");
     expect(current?.canManageMembers).toBe(true);
   });

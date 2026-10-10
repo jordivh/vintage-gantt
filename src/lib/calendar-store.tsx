@@ -35,9 +35,11 @@ import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, workspaceLoadStep } fro
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useConvex, useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useLocation } from "react-router";
+import { plannerReadPolicy } from "./planner-read-policy";
 import { toast } from "sonner";
-import { changeRequest, fingerprint, projectInputs, canonical, workspaceTables, type Workspace, type WorkspaceRow } from "./workspace-changes";
+import { changeRequest, fingerprint, projectInputs, canonical, workspaceTables, type Workspace, type WorkspaceRow, type ReadCoverage } from "./workspace-changes";
 
 export type ProjectStatus = "active" | "archived" | "template";
 export interface ProjectRecord {
@@ -283,6 +285,7 @@ interface CalendarStoreValue {
    * never treated as proof of access.
    */
   company: CompanyInfo | null;
+  requestBaseline: (id: string) => void;
   /** "company_admin" or "user" — they differ only for user-account management. */
   companyRole: CompanyRole;
   /** True only for company admins. */
@@ -422,13 +425,31 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const [tasksByProject, setTasksByProject] = useState<Record<string, PlannerTask[]>>({});
   const [activeProjectId, setActiveProjectId] = useState("");
   const [activeVersionId, setActiveVersionId] = useState("");
+  const [requestedVersionId, setRequestedVersionId] = useState("");
   const [planVersions, setPlanVersions] = useState<PlanVersion[]>([]);
   const [baselines, setBaselines] = useState<Baseline[]>([]);
   const [baselineTasks, setBaselineTasks] = useState<BaselineTask[]>([]);
   const [focusTask, setFocusTask] = useState<{ projectId: string; versionId: string; taskId: string } | null>(null);
 
   const { isLoading: isAuthLoading, isAuthenticated } = useConvexAuth();
-  const remoteState = useQuery(api.planner.getState, isAuthenticated ? {} : "skip");
+  const convexClient = useConvex();
+  const location = useLocation();
+  const [requestedBaselineId, setRequestedBaselineId] = useState("");
+  const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
+  const catalogRemote = useQuery(api.plannerReads.catalog, isAuthenticated && ["/dashboard", "/projects", "/capacity", "/calendars", "/resources", "/reports/margins"].includes(location.pathname) ? {} : "skip");
+  const policy = plannerReadPolicy(location.pathname, catalogRemote?.projects ?? [], catalogRemote?.planVersions ?? [], activeProjectId, requestedVersionId || activeVersionId, expandedProjects);
+  const sharedRemote = useQuery(api.plannerReads.calendars, isAuthenticated && policy.workspace ? {} : "skip");
+  const peopleRemote = useQuery(api.plannerReads.people, isAuthenticated && policy.workspace ? {} : "skip");
+  const plansRemote = useQuery(api.plannerReads.plans, isAuthenticated && policy.workspace && catalogRemote ? { requests: policy.requests } : "skip");
+  const baselineFromLink = new URLSearchParams(location.search).get("baseline") ?? "";
+  const selectedBaseline = policy.planning ? baselineFromLink || requestedBaselineId || catalogRemote?.baselines.filter(row => row.projectId === activeProjectId && row.versionId === activeVersionId).slice(-1)[0]?.id || "" : "";
+  const snapshotsRemote = useQuery(api.plannerReads.snapshots, isAuthenticated && policy.planning && selectedBaseline ? { baselineIds: [selectedBaseline] } : "skip");
+  const remoteState = useMemo(() => {
+    if (!policy.workspace || catalogRemote === undefined || sharedRemote === undefined || peopleRemote === undefined || plansRemote === undefined || (selectedBaseline && snapshotsRemote === undefined)) return undefined;
+    if (!catalogRemote || !sharedRemote || !peopleRemote || !plansRemote) return null;
+    return { ...catalogRemote, ...sharedRemote, ...peopleRemote, tasks: plansRemote.tasks, dependencies: plansRemote.dependencies, assignments: plansRemote.assignments, baselineTasks: snapshotsRemote?.baselineTasks ?? [] };
+  }, [catalogRemote, sharedRemote, peopleRemote, plansRemote, snapshotsRemote, selectedBaseline, policy.workspace]);
+  const readCoverageRef = useRef<ReadCoverage[]>([]);
   const initializeWorkspace = useMutation(api.planner.initializeWorkspace);
   const createProjectFromTemplateRemote = useMutation(api.planner.createProjectFromTemplate);
   const saveAsTemplateRemote = useMutation(api.planner.saveAsTemplate);
@@ -448,7 +469,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const changeOwnNameRemote = useMutation(api.companies.changeOwnName);
   const changeOwnEmailRemote = useMutation(api.companies.changeOwnEmail);
   const changeOwnPasswordRemote = useMutation(api.companies.changeOwnPassword);
-  const companyInfo = useQuery(api.companies.current, isAuthenticated ? {} : "skip");
+  const companyInfo = useQuery(api.companies.current, isAuthenticated ? { includeMembers: location.pathname === "/company/users" } : "skip");
   const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
   const companyRole: CompanyRole = company?.role ?? "user";
   const accessInfo = useQuery(api.companies.access, isAuthenticated ? {} : "skip");
@@ -507,7 +528,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     }) => {
       const state = {
         projects: source.projects,
-        tasks: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...withoutSnapshotLog(task), projectId, sortOrder: index }))),
+        tasks: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => rows.map((task, index) => ({ ...withoutSnapshotLog(task), projectId, sortOrder: (task as PlannerTask & { sortOrder?: number }).sortOrder ?? index }))),
         dependencies: Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map((dependency, index) => ({ ...dependency, id: `dep-${projectId}-${index}`, projectId }))),
         calendars: source.system.calendars,
         exceptions: source.system.exceptions,
@@ -522,7 +543,12 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // stored: the only other rows that exist belong to other companies, and a
       // relation naming one of those is exactly what must never be written. The
       // server refuses a payload that fails this, so the two agree.
-      const repaired = normalizeWorkspaceRelations(state);
+      const previousDependencies = confirmedBaseRef.current.dependencies ?? [];
+      const dependencies = Object.entries(source.tasksByProject).flatMap(([projectId, rows]) => dependenciesForTasks(rows).map(dependency => {
+        const existing = previousDependencies.find(row => row.projectId === projectId && row.predecessorId === dependency.predecessorId && row.successorId === dependency.successorId && row.type === dependency.type && row.lagDays === dependency.lagDays);
+        return { ...dependency, id: existing?.id ?? `dep-${projectId}-${dependency.predecessorId}-${dependency.successorId}-${dependency.type}`, projectId };
+      }));
+      const repaired = { rows: { ...state, dependencies }, dropped: [] };
       if (repaired.dropped.length) {
         console.info("[vintage-gantt] dropped relations that are not part of this company:", repaired.dropped);
       }
@@ -545,7 +571,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       if (saveBlockedRef.current || saveInFlightRef.current || deletionInFlightRef.current || pendingSaveRef.current || JSON.stringify(latestLocalRef.current) !== lastSyncedRef.current) return;
       if (canonical(remoteState) === canonical(lastServerStateRef.current)) return;
     }
-    const loadStep = workspaceLoadStep(remoteState !== null, migrationStartedRef.current);
+    const hasWorkspace = remoteState !== null && Boolean(remoteState.projects.length || remoteState.calendars.length || remoteState.tasks.length || remoteState.resources.length);
+    const loadStep = workspaceLoadStep(hasWorkspace, migrationStartedRef.current);
     if (loadStep === "wait") return;
     if (loadStep === "initialize") {
       // The signed-in company has no workspace yet, so it gets its own: an
@@ -586,7 +613,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setSystem({ calendars: state.calendars ?? [], exceptions: state.exceptions ?? [], defaultCalendarId: state.calendars?.find((calendar) => calendar.isDefault)?.id ?? "" });
     setResources(state.resources ?? []);
     setAssignments(state.assignments ?? []);
-    setPlanVersions(versions);
+    const selectedVersion = versions.find(version => version.id === requestedVersionId && version.projectId === activeProjectId);
+    setPlanVersions(selectedVersion ? versions.map(version => version.projectId === activeProjectId ? { ...version, isActive: version.id === selectedVersion.id } : version) : versions);
+    if (selectedVersion) { setActiveVersionId(selectedVersion.id); setRequestedVersionId(""); }
     setActiveVersionId((current) => versions.some((version) => version.id === current && version.projectId === activeProjectId) ? current : versions.find((version) => version.projectId === activeProjectId && version.isActive)?.id ?? versions.find((version) => version.projectId === activeProjectId)?.id ?? "");
     setBaselines(state.baselines ?? []);
     setBaselineTasks(state.baselineTasks ?? []);
@@ -627,10 +656,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // When a dead reference was removed above, the database still holds it, so the
     // workspace is deliberately not recorded as synced: the save effect may write
     // the repaired form, and the diff-based save then touches only those rows.
+    readCoverageRef.current = plansRemote?.coverage ?? [];
     confirmedBaseRef.current = remoteState as Workspace;
     latestLocalRef.current = JSON.parse(lastSyncedRef.current ?? "{}") as Workspace;
     if (deadReferences.length) lastSyncedRef.current = null;
-  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, access, initializeWorkspace, buildWorkspacePayload, saveRevision]);
+  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, access, initializeWorkspace, buildWorkspacePayload, saveRevision, plansRemote, requestedVersionId]);
 
   /**
    * Company-based access. The server creates exactly one company for the
@@ -639,8 +669,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    * migration server-side, so nothing is deleted, recreated or rewritten.
    */
   useEffect(() => {
-    if (!isAuthenticated || companyStartedRef.current) return;
+    if (!isAuthenticated || companyInfo === undefined || companyStartedRef.current) return;
     companyStartedRef.current = true;
+    if (companyInfo?.company.id) return;
     void ensureCompanyRemote({})
       .then((report) => {
         const migration = report as CompanyMigrationReport;
@@ -652,7 +683,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         console.error("[vintage-gantt] company migration failed:", error);
         toast.error(`Could not prepare your company workspace. ${reason}`);
       });
-  }, [isAuthenticated, ensureCompanyRemote]);
+  }, [isAuthenticated, ensureCompanyRemote, companyInfo]);
 
   /**
    * Puts the workspace back exactly as the database has it, after a refused
@@ -691,10 +722,11 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     pendingSaveRef.current = null;
     saveInFlightRef.current = true;
     try {
-      const request = await changeRequest(confirmedBaseRef.current, pending.payload as Workspace);
+      const request = await changeRequest(confirmedBaseRef.current, pending.payload as Workspace, readCoverageRef.current);
       for (const projectId of calculationProjectsRef.current) {
         if (!request.guards.some(guard => guard.projectId === projectId)) {
-          request.guards.push({ projectId, fingerprint: await fingerprint(projectInputs(confirmedBaseRef.current, projectId)) });
+          const coverage = readCoverageRef.current.find(row => row.projectId === projectId);
+          request.guards.push({ projectId, fingerprint: await fingerprint(projectInputs(confirmedBaseRef.current, projectId)), ...(coverage ? { scope: { ...coverage, baselineIds: (confirmedBaseRef.current.baselineTasks ?? []).map(row => row.baselineId as string) } } : {}) });
         }
       }
       await replaceRemoteState(request);
@@ -756,8 +788,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const warn = (event: BeforeUnloadEvent) => {
       if (saveBlockedRef.current || pendingSaveRef.current || saveInFlightRef.current) { event.preventDefault(); event.returnValue = ""; }
     };
+    const onBlur = () => { setTimeout(() => setSaveRevision(revision => revision + 1), 0); };
     window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
+    window.addEventListener("focusout", onBlur);
+    return () => { window.removeEventListener("beforeunload", warn); window.removeEventListener("focusout", onBlur); };
   }, []);
 
   useEffect(() => () => {
@@ -787,8 +821,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   const setActiveVersion = useCallback((versionId: string) => {
     if (!planVersions.some((version) => version.id === versionId && version.projectId === activeProjectId)) return;
-    setActiveVersionId(versionId);
-    setPlanVersions((current) => current.map((version) => version.projectId === activeProjectId ? { ...version, isActive: version.id === versionId } : version));
+    setRequestedVersionId(versionId);
   }, [activeProjectId, planVersions]);
 
   const setPlanMode = useCallback<CalendarStoreValue["setPlanMode"]>((versionId, mode) => {
@@ -815,7 +848,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [activeProjectId, planVersions, baselines]);
 
   const createPlanVersion = useCallback((name: string, rows?: PlannerTask[]) => {
-    if (rows) for (const project of projects) calculationProjectsRef.current.add(project.id);
+    if (rows) for (const project of projects.filter(project => project.status === "active" && project.kind !== "template")) calculationProjectsRef.current.add(project.id);
     const source = rows ?? (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
     const id = `version-${uid()}`;
     // A new version always starts out being planned: consumed margin resets and
@@ -867,6 +900,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [activeProjectId, activeVersionId, assignments, tasksByProject, system, activeProject.calendarId]);
 
   const deletePlanVersion = useCallback<CalendarStoreValue["deletePlanVersion"]>((versionId) => {
+    if (!requireHistory(activeProjectId)) return { ok: false, message: "Loading project history. Please try again when loading completes." };
     const versions = planVersions.filter((version) => version.projectId === activeProjectId);
     if (versions.length <= 1) return { ok: false, message: "A project must keep at least one plan version." };
     const target = versions.find((version) => version.id === versionId);
@@ -882,7 +916,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const version = planVersions.find((item) => item.projectId === activeProjectId && item.isActive) ?? planVersions.find((item) => item.projectId === activeProjectId);
-    if (version && version.id !== activeVersionId) setActiveVersionId(version.id);
+    if (!planVersions.some(item => item.id === activeVersionId && item.projectId === activeProjectId) && version) setActiveVersionId(version.id);
   }, [activeProjectId, planVersions, activeVersionId]);
 
   const createBaseline = useCallback<CalendarStoreValue["createBaseline"]>((name, note, captureDate) => {
@@ -910,6 +944,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const baseline = baselines.find((item) => item.id === baselineId);
     // Drop the baseline and its snapshots together — one state change, so they
     // are also persisted together — and find what Monitoring compares next.
+    if (!snapshotsRemote?.baselineIds.includes(baselineId)) {
+      setRequestedBaselineId(baselineId);
+      return { ok: false, message: "Loading this baseline before deletion. Please try again when loading completes." };
+    }
     const removal = removeBaselineAndSnapshots(baselines, baselineTasks, baselineId);
     if (!removal || !baseline) {
       const message = `Baseline ${baselineId ? `"${baselineId}"` : "(no id)"} is not in this workspace, so there was nothing to delete.`;
@@ -972,6 +1010,24 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setActiveVersionId(version.id);
     setActiveProjectId(id);
     return id;
+  }, []);
+
+  const deletionBase = async () => {
+    // Rare destructive operations explicitly obtain a complete comparison set.
+    // Compare every loaded row first; never advance a stale editor to the latest
+    // data silently. The returned full fingerprint is checked during the write.
+    const full = await convexClient.query(api.planner.getState, {});
+    if (!full) throw new Error("This workspace is unavailable.");
+    for (const table of workspaceTables) for (const row of confirmedBaseRef.current[table] ?? []) {
+      if (canonical(row) !== canonical((full[table] as WorkspaceRow[]).find(item => item.id === row.id))) throw new Error("The planning changed. Your operation was not applied. Review the latest planning first.");
+    }
+    return fingerprint(full as Workspace);
+  };
+  const requireHistory = useCallback((projectId: string) => {
+    if (readCoverageRef.current.some(row => row.projectId === projectId && row.allVersions)) return true;
+    setExpandedProjects(current => [...new Set([...current, projectId])]);
+    toast.info("Loading project history for this operation. Please try again when loading completes.");
+    return false;
   }, []);
 
   const recordCreated = (created: { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; dependencies: unknown[] }) => {
@@ -1040,7 +1096,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [setTemplateHiddenRemote]);
 
   const deleteTemplate = useCallback<CalendarStoreValue["deleteTemplate"]>(async (templateId) => {
-    await deleteTemplateRemote({ templateId, expected: await fingerprint(confirmedBaseRef.current) });
+    await deleteTemplateRemote({ templateId, expected: await deletionBase() });
     recordDeleted("projects", new Set([templateId]));
     const taskIds = new Set((tasksByProject[templateId] ?? []).map((task) => task.id));
     const removedBaselines = new Set(baselines.filter((baseline) => baseline.projectId === templateId).map((baseline) => baseline.id));
@@ -1067,17 +1123,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const openTask = useCallback((projectId: string, versionId: string, taskId: string) => {
     const project = projects.find((item) => item.id === projectId && (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
     const version = planVersions.find((item) => item.id === versionId && item.projectId === projectId);
-    const task = (tasksByProject[projectId] ?? []).find((item) => item.id === taskId && (!item.versionId || item.versionId === versionId));
-    if (!project || !version || !task) return;
+    if (!project || !version) return;
     setActiveProjectId(projectId);
-    setPlanVersions((current) => current.map((item) => item.projectId === projectId ? { ...item, isActive: item.id === versionId } : item));
-    setActiveVersionId(versionId);
+    setRequestedVersionId(versionId);
     setFocusTask({ projectId, versionId, taskId });
   }, [projects, planVersions, tasksByProject]);
 
   const clearFocusTask = useCallback(() => setFocusTask(null), []);
 
   const duplicateProject = useCallback<CalendarStoreValue["duplicateProject"]>((projectId, name) => {
+    if (!requireHistory(projectId)) return "";
     const source = projects.find((project) => project.id === projectId && (project.kind ?? (project.status === "template" ? "template" : "project")) === "project");
     const id = `proj-${uid()}`;
     const now = new Date().toISOString();
@@ -1122,7 +1177,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const regularProjects = projects.filter((item) => (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
     if (regularProjects.length <= 1) return { ok: false, taskCount, message: "You must keep at least one project." };
     try {
-      await deleteProjectRemote({ projectId, expected: await fingerprint(confirmedBaseRef.current) });
+      await deleteProjectRemote({ projectId, expected: await deletionBase() });
       recordDeleted("projects", new Set([projectId]));
     } catch (error: unknown) {
       return { ok: false, taskCount, message: error instanceof Error ? error.message : "The project could not be deleted." };
@@ -1182,7 +1237,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // full save must never recreate rows removed by this mutation.
       while (saveInFlightRef.current) await new Promise(resolve => setTimeout(resolve, 10));
       pendingSaveRef.current = null;
-      const result = await deleteTasksRemote({ projectId, taskIds, expected: await fingerprint(confirmedBaseRef.current) });
+      const result = await deleteTasksRemote({ projectId, taskIds, expected: await deletionBase() });
       recordDeleted("tasks", new Set(result.taskIds));
       return { ok: true, removedTaskIds: result.taskIds };
     } catch (error: unknown) {
@@ -1203,7 +1258,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    */
   const deleteResource = useCallback<CalendarStoreValue["deleteResource"]>(async (id) => {
     try {
-      await deleteResourceRemote({ resourceId: id, expected: await fingerprint(confirmedBaseRef.current) });
+      await deleteResourceRemote({ resourceId: id, expected: await deletionBase() });
       recordDeleted("resources", new Set([id]));
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : "The employee could not be deleted." };
@@ -1249,7 +1304,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         const nextIds = new Set(next.map((task) => task.id));
         const preserved = all.filter((task) => task.versionId && task.versionId !== activeVersionId && !nextIds.has(task.id));
         setProjects((projectList) => projectList.map((project) => project.id === activeProjectId ? { ...project, updatedAt: new Date().toISOString() } : project));
-        return { ...current, [activeProjectId]: [...preserved, ...next.map((task) => ({ ...task, versionId: task.versionId ?? activeVersionId }))] };
+        return { ...current, [activeProjectId]: [...preserved, ...next.map((task, sortOrder) => ({ ...task, sortOrder, versionId: task.versionId ?? activeVersionId }))] };
       });
     },
     [activeProjectId, activeVersionId],
@@ -1429,7 +1484,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         };
       }
       try {
-        await deleteCalendarRemote({ calendarId: id, expected: await fingerprint(confirmedBaseRef.current) });
+        await deleteCalendarRemote({ calendarId: id, expected: await deletionBase() });
         recordDeleted("calendars", new Set([id]));
       } catch (error: unknown) {
         return { ok: false, message: error instanceof Error ? error.message : "The calendar could not be deleted." };
@@ -1461,6 +1516,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setTasksByProject({});
     setActiveProjectId("");
     setActiveVersionId("");
+    setRequestedVersionId("");
     setPlanVersions([]);
     setBaselines([]);
     setBaselineTasks([]);
@@ -1477,6 +1533,9 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     latestLocalRef.current = {};
     saveBlockedRef.current = false;
     calculationProjectsRef.current.clear();
+    readCoverageRef.current = [];
+    setExpandedProjects([]);
+    setRequestedBaselineId("");
     pendingSaveRef.current = null;
     if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = null;
@@ -1630,6 +1689,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       focusTask,
       clearFocusTask,
       company,
+      requestBaseline: setRequestedBaselineId,
       companyRole,
       canManageMembers: roleCanManageMembers(companyRole),
       setCompanyMemberRole,
@@ -1655,7 +1715,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <CalendarStoreContext.Provider value={value}>{children}</CalendarStoreContext.Provider>;
+  const loadingReads = policy.workspace && !pendingSaveRef.current && !saveBlockedRef.current && ((!hydratedRef.current && remoteState === undefined) || (requestedVersionId && !readCoverageRef.current.some(row => row.projectId === activeProjectId && row.versionIds.includes(requestedVersionId))));
+  return <CalendarStoreContext.Provider value={value}>{loadingReads ? <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading planning data…</div> : children}</CalendarStoreContext.Provider>;
 }
 
 export function useCalendarStore() {

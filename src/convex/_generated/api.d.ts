@@ -12,6 +12,7 @@ import type * as auth from "../auth.js";
 import type * as companies from "../companies.js";
 import type * as http from "../http.js";
 import type * as planner from "../planner.js";
+import type * as plannerReads from "../plannerReads.js";
 import type * as users from "../users.js";
 
 import type {
@@ -25,6 +26,7 @@ declare const fullApi: ApiFromModules<{
   companies: typeof companies;
   http: typeof http;
   planner: typeof planner;
+  plannerReads: typeof plannerReads;
   users: typeof users;
 }>;
 
