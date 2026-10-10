@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { createAccount, retrieveAccount } from "@convex-dev/auth/server";
 import type { GenericActionCtx, GenericMutationCtx } from "convex/server";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import type { DataModel, Id } from "../convex/_generated/dataModel";
 import schema from "../convex/schema";

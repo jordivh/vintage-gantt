@@ -1,5 +1,5 @@
 import { removeTaskSubtrees } from "./task-table";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { applyPlanningModeMargins, dependenciesForTasks, recalculateTasks, pruneDeadPredecessors, withCalculatedPlanningFields, type PlannerTask } from "./planner-model";

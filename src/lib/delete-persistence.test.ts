@@ -6,7 +6,7 @@
  * the screen.
  */
 import { describe, expect, test } from "bun:test";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import schema from "../convex/schema";

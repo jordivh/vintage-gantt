@@ -17,7 +17,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { normalizeWorkspaceRelations } from "./company-integrity";
@@ -274,19 +274,19 @@ describe("saving the workspace — how the screens send it", () => {
     expect(text).toContain("WORKSPACE_SAVE_QUIET_MS");
     expect(text).toContain("pendingSaveRef.current = { serialised, payload }");
     expect(text).toContain("if (serialised === lastSyncedRef.current) return;");
-    expect(text).toContain("if (saveInFlightRef.current || deletionInFlightRef.current) return;");
+    expect(text).toContain("if (saveInFlightRef.current || deletionInFlightRef.current || saveBlockedRef.current) return;");
     expect(text).toContain("if (pendingSaveRef.current) void drainSaves();");
     // The last change is not dropped when the screen goes away.
     expect(text).toContain("if (pendingSaveRef.current) void drainSaves();");
   });
 
-  test("a refused write is still reported and the workspace is restored", () => {
+  test("a refused write blocks retries and preserves the user's input", () => {
     const text = store();
-    expect(text).toContain("Could not save to the central planner database");
-    expect(text).toContain("The last saved data was restored.");
-    expect(text).toContain("restoreLastSaved()");
-    // The state that failed is dropped, not retried in a loop.
-    expect(text).toContain("pendingSaveRef.current = null;\n      restoreLastSaved();");
+    expect(text).toContain("Your changes were not saved.");
+    expect(text).toContain("Your input is still on screen.");
+    expect(text).toContain("saveBlockedRef.current = true;");
+    expect(text).toContain("pendingSaveRef.current ??= pending;");
+    expect(text).toContain("if (pendingSaveRef.current && !saveBlockedRef.current) void drainSaves();");
   });
 
   test("a dead predecessor reference is removed where it is made, and before every copy", () => {

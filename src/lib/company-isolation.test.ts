@@ -14,7 +14,7 @@
  * modules.
  */
 import { describe, expect, test } from "bun:test";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api, internal } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import {

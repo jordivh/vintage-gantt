@@ -5,7 +5,7 @@
  * same save/read pair the app uses (`replaceState` / `getState`).
  */
 import { describe, expect, test } from "bun:test";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import type { PlannerTask } from "./planner-model";

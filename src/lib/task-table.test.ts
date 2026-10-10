@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import schema from "../convex/schema";
 import { api } from "../convex/_generated/api";
 import type { PlannerTask } from "./planner-model";

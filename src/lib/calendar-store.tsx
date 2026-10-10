@@ -37,6 +37,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
+import { changeRequest, fingerprint, projectInputs, canonical, workspaceTables, type Workspace, type WorkspaceRow } from "./workspace-changes";
 
 export type ProjectStatus = "active" | "archived" | "template";
 export interface ProjectRecord {
@@ -437,7 +438,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const deleteTasksRemote = useMutation(api.planner.deleteTasks);
   const deleteResourceRemote = useMutation(api.planner.deleteResource);
   const deleteCalendarRemote = useMutation(api.planner.deleteCalendar);
-  const replaceRemoteState = useMutation(api.planner.replaceState);
+  const replaceRemoteState = useMutation(api.planner.saveChanges);
   const ensureCompanyRemote = useMutation(api.companies.ensureCompany);
   const setCompanyMemberRoleRemote = useMutation(api.companies.setMemberRole);
   const addCompanyUserRemote = useMutation(api.companies.addCompanyUser);
@@ -467,6 +468,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const { signOut } = useAuthActions();
   const removalSignOutRef = useRef(false);
   const hydratedRef = useRef(false);
+  const hydratingRef = useRef(false);
   const migrationStartedRef = useRef(false);
   const companyStartedRef = useRef(false);
   /** Set for exactly one run while a failed write is being rolled back. */
@@ -479,12 +481,17 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    * dropped on a timer. A skipped write is impossible; only an identical one is.
    */
   const lastSyncedRef = useRef<string | null>(null);
+  const saveBlockedRef = useRef(false);
+  const confirmedBaseRef = useRef<Workspace>({});
+  const latestLocalRef = useRef<Workspace>({});
   /** The newest workspace waiting to be written, and the one write in flight. */
   const pendingSaveRef = useRef<{ serialised: string; payload: unknown } | null>(null);
   const saveInFlightRef = useRef(false);
   const deletionInFlightRef = useRef(false);
   const [deletionRevision, setDeletionRevision] = useState(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [saveRevision, setSaveRevision] = useState(0);
+  const calculationProjectsRef = useRef(new Set<string>());
 
   /** The whole workspace exactly as it is sent to the server, relations repaired. */
   const buildWorkspacePayload = useCallback(
@@ -524,8 +531,20 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  latestLocalRef.current = buildWorkspacePayload({ projects, tasksByProject, system, resources, assignments, planVersions, baselines, baselineTasks }) as unknown as Workspace;
+
   useEffect(() => {
-    if (!isAuthenticated || accessInfo === undefined || accessInfo === null || accessInfo.removed || mustChangePassword || remoteState === undefined || hydratedRef.current || access !== "granted") return;
+    if (!isAuthenticated || accessInfo === undefined || accessInfo === null || accessInfo.removed || mustChangePassword || remoteState === undefined || access !== "granted") return;
+    if (hydratedRef.current) {
+      // Inline editors own uncommitted input outside the store. Do not advance
+      // their base while they are typing, even before setTasks commits the draft.
+      const focused = typeof document !== "undefined" ? document.activeElement : null;
+      if (focused?.matches("input, textarea, [contenteditable='true']")) return;
+      // Never replace local drafts or in-flight edits with a subscription result.
+      // Clean workspaces may consume live updates without echoing them back.
+      if (saveBlockedRef.current || saveInFlightRef.current || deletionInFlightRef.current || pendingSaveRef.current || JSON.stringify(latestLocalRef.current) !== lastSyncedRef.current) return;
+      if (canonical(remoteState) === canonical(lastServerStateRef.current)) return;
+    }
     const loadStep = workspaceLoadStep(remoteState !== null, migrationStartedRef.current);
     if (loadStep === "wait") return;
     if (loadStep === "initialize") {
@@ -562,6 +581,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // every entry of the history in place.
       (grouped[task.projectId] ??= []).push(withoutSnapshotLog({ ...task, versionId }));
     }
+    hydratingRef.current = true;
     setProjects(state.projects ?? []);
     setSystem({ calendars: state.calendars ?? [], exceptions: state.exceptions ?? [], defaultCalendarId: state.calendars?.find((calendar) => calendar.isDefault)?.id ?? "" });
     setResources(state.resources ?? []);
@@ -607,8 +627,10 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // When a dead reference was removed above, the database still holds it, so the
     // workspace is deliberately not recorded as synced: the save effect may write
     // the repaired form, and the diff-based save then touches only those rows.
+    confirmedBaseRef.current = remoteState as Workspace;
+    latestLocalRef.current = JSON.parse(lastSyncedRef.current ?? "{}") as Workspace;
     if (deadReferences.length) lastSyncedRef.current = null;
-  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, access, initializeWorkspace, buildWorkspacePayload]);
+  }, [isAuthenticated, accessInfo, mustChangePassword, remoteState, access, initializeWorkspace, buildWorkspacePayload, saveRevision]);
 
   /**
    * Company-based access. The server creates exactly one company for the
@@ -663,35 +685,56 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    * instead of being queued behind it.
    */
   const drainSaves = useCallback(async () => {
-    if (saveInFlightRef.current || deletionInFlightRef.current) return;
+    if (saveInFlightRef.current || deletionInFlightRef.current || saveBlockedRef.current) return;
     const pending = pendingSaveRef.current;
     if (!pending) return;
     pendingSaveRef.current = null;
     saveInFlightRef.current = true;
     try {
-      await replaceRemoteState({ state: pending.payload });
+      const request = await changeRequest(confirmedBaseRef.current, pending.payload as Workspace);
+      for (const projectId of calculationProjectsRef.current) {
+        if (!request.guards.some(guard => guard.projectId === projectId)) {
+          request.guards.push({ projectId, fingerprint: await fingerprint(projectInputs(confirmedBaseRef.current, projectId)) });
+        }
+      }
+      await replaceRemoteState(request);
+      calculationProjectsRef.current.clear();
+      confirmedBaseRef.current = pending.payload as Workspace;
       lastSyncedRef.current = pending.serialised;
       lastServerStateRef.current = pending.payload;
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error("[vintage-gantt] could not persist planner state:", error);
-      toast.error(`Could not save to the central planner database (${reason}). The last saved data was restored.`);
-      // The refused state is dropped, not retried: the screen goes back to what
-      // the database holds, and the next change starts from there.
-      pendingSaveRef.current = null;
-      restoreLastSaved();
+      saveBlockedRef.current = true;
+      // Keep both the local workspace and the queued input. Never silently retry
+      // a stale calculation or restore over the user's draft after a conflict.
+      pendingSaveRef.current ??= pending;
+      toast.error(`Your changes were not saved. Another user may have changed this planning. Your input is still on screen. Download your draft before reloading to review the latest planning. (${reason})`, {
+        duration: Infinity,
+        action: { label: "Download draft", onClick: () => {
+          const blob = new Blob([JSON.stringify(latestLocalRef.current, null, 2)], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url; link.download = "unsaved-planning-draft.json"; link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } },
+      });
     } finally {
       saveInFlightRef.current = false;
-      if (pendingSaveRef.current) void drainSaves();
+      setSaveRevision(revision => revision + 1);
+      if (pendingSaveRef.current && !saveBlockedRef.current) void drainSaves();
     }
   }, [replaceRemoteState, restoreLastSaved]);
 
   useEffect(() => {
     if (!isAuthenticated || !hydratedRef.current || deletionInFlightRef.current) return;
+    // Hydration scheduled new state; this render still holds the old rows.
+    if (hydratingRef.current) { hydratingRef.current = false; return; }
     // One run is skipped while a refused write is rolled back, so the rollback
     // itself is not sent back to the server.
     if (restoringRef.current) { restoringRef.current = false; return; }
     const payload = buildWorkspacePayload({ projects, tasksByProject, system, resources, assignments, planVersions, baselines, baselineTasks });
+    latestLocalRef.current = payload as unknown as Workspace;
     const serialised = JSON.stringify(payload);
     // Nothing to write when the workspace is already what the database holds.
     // Only an identical payload is skipped — never a change the user made.
@@ -699,7 +742,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     // The newest state is what will be written; an earlier waiting one is
     // replaced rather than written first and thrown away after.
     pendingSaveRef.current = { serialised, payload };
-    if (saveInFlightRef.current || saveTimerRef.current !== null) return;
+    if (saveInFlightRef.current || saveTimerRef.current !== null || saveBlockedRef.current) return;
     // A burst of changes (typing a name, dragging a bar) is written as one save
     // once the workspace has been still for a moment, instead of one save per
     // keystroke — each of which rewrites the whole workspace on the server.
@@ -708,6 +751,14 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       void drainSaves();
     }, WORKSPACE_SAVE_QUIET_MS);
   }, [isAuthenticated, projects, system, resources, assignments, tasksByProject, planVersions, baselines, baselineTasks, replaceRemoteState, buildWorkspacePayload, drainSaves, deletionRevision]);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (saveBlockedRef.current || pendingSaveRef.current || saveInFlightRef.current) { event.preventDefault(); event.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
 
   useEffect(() => () => {
     // Leaving the screen never drops the last change: whatever is still waiting
@@ -764,6 +815,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [activeProjectId, planVersions, baselines]);
 
   const createPlanVersion = useCallback((name: string, rows?: PlannerTask[]) => {
+    if (rows) for (const project of projects) calculationProjectsRef.current.add(project.id);
     const source = rows ?? (tasksByProject[activeProjectId] ?? []).filter((task) => !task.versionId || task.versionId === activeVersionId);
     const id = `version-${uid()}`;
     // A new version always starts out being planned: consumed margin resets and
@@ -922,9 +974,47 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     return id;
   }, []);
 
+  const recordCreated = (created: { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; dependencies: unknown[] }) => {
+    const additions = {
+      projects: [created.project], planVersions: [created.version], tasks: created.tasks.map((task, sortOrder) => ({ ...task, projectId: created.project.id, sortOrder })),
+      assignments: created.assignments, dependencies: created.dependencies,
+    } as unknown as Workspace;
+    confirmedBaseRef.current = Object.fromEntries(workspaceTables.map(table => [table, [...(confirmedBaseRef.current[table] ?? []), ...(additions[table] ?? [])]]));
+  };
+
+  const recordDeleted = (table: "projects" | "tasks" | "resources" | "calendars", ids: Set<string>) => {
+    const base = confirmedBaseRef.current;
+    const taskIds = new Set(table === "tasks" ? ids : table === "projects" ? (base.tasks ?? []).filter(row => ids.has(row.projectId as string)).map(row => row.id) : []);
+    const baselineIds = new Set(table === "projects" ? (base.baselines ?? []).filter(row => ids.has(row.projectId as string)).map(row => row.id) : []);
+    const removedResource = table === "resources" ? base.resources?.find(row => ids.has(row.id)) : undefined;
+    const calendarId = removedResource?.calendarId as string | undefined;
+    const own = calendarId ? base.calendars?.find(row => row.id === calendarId) : undefined;
+    const dropCalendar = Boolean(own && !own.isDefault && !(base.projects ?? []).some(row => row.calendarId === calendarId) && !(base.resources ?? []).some(row => row.calendarId === calendarId && !ids.has(row.id)));
+    const next: Workspace = {};
+    for (const key of workspaceTables) next[key] = (base[key] ?? []).filter(row => {
+      if (key === table && ids.has(row.id)) return false;
+      if (key === "tasks" && taskIds.has(row.id)) return false;
+      if (key === "dependencies" && (taskIds.has(row.predecessorId as string) || taskIds.has(row.successorId as string) || (table === "projects" && ids.has(row.projectId as string)))) return false;
+      if (key === "assignments" && (taskIds.has(row.taskId as string) || (table === "resources" && ids.has(row.resourceId as string)))) return false;
+      if (key === "planVersions" && table === "projects" && ids.has(row.projectId as string)) return false;
+      if (key === "baselines" && baselineIds.has(row.id)) return false;
+      if (key === "baselineTasks" && baselineIds.has(row.baselineId as string)) return false;
+      if (key === "exceptions" && ((table === "calendars" && ids.has(row.calendarId as string)) || (dropCalendar && row.calendarId === calendarId))) return false;
+      if (key === "calendars" && dropCalendar && row.id === calendarId) return false;
+      return true;
+    });
+    if (table === "tasks") {
+      const groups = new Map<string, WorkspaceRow[]>();
+      for (const task of next.tasks ?? []) { const key = String(task.projectId); groups.set(key, [...(groups.get(key) ?? []), task]); }
+      next.tasks = [...groups.values()].flatMap(rows => pruneDeadPredecessors(rows as unknown as PlannerTask[]).tasks as unknown as WorkspaceRow[]);
+    }
+    confirmedBaseRef.current = next;
+  };
+
   const createProjectFromTemplate = useCallback<CalendarStoreValue["createProjectFromTemplate"]>(async (input) => {
     const result = await createProjectFromTemplateRemote({ ...input, includeAssignments: input.includeAssignments ?? false });
-    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; skippedAssignments: number };
+    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; dependencies: unknown[]; skippedAssignments: number };
+    recordCreated(created);
     setProjects((current) => [...current, created.project]);
     setPlanVersions((current) => [...current, created.version]);
     setTasksByProject((current) => ({ ...current, [created.project.id]: created.tasks.map((task) => ({ ...task, versionId: created.version.id })) }));
@@ -936,7 +1026,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
 
   const saveAsTemplate = useCallback<CalendarStoreValue["saveAsTemplate"]>(async (projectId, versionId, name) => {
     const result = await saveAsTemplateRemote({ projectId, versionId, name });
-    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[] };
+    const created = result as { project: ProjectRecord; version: PlanVersion; tasks: PlannerTask[]; assignments: TaskAssignment[]; dependencies: unknown[] };
+    recordCreated(created);
     setProjects((current) => [...current, created.project]);
     setPlanVersions((current) => [...current, created.version]);
     setTasksByProject((current) => ({ ...current, [created.project.id]: created.tasks.map((task) => ({ ...task, versionId: created.version.id })) }));
@@ -944,12 +1035,13 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   }, [saveAsTemplateRemote]);
 
   const setTemplateHidden = useCallback<CalendarStoreValue["setTemplateHidden"]>(async (templateId, hidden) => {
-    await setTemplateHiddenRemote({ templateId, hidden });
+    // Ordinary metadata edits use the same guarded delta path.
     setProjects((current) => current.map((project) => project.id === templateId ? { ...project, hidden, updatedAt: new Date().toISOString() } : project));
   }, [setTemplateHiddenRemote]);
 
   const deleteTemplate = useCallback<CalendarStoreValue["deleteTemplate"]>(async (templateId) => {
-    await deleteTemplateRemote({ templateId });
+    await deleteTemplateRemote({ templateId, expected: await fingerprint(confirmedBaseRef.current) });
+    recordDeleted("projects", new Set([templateId]));
     const taskIds = new Set((tasksByProject[templateId] ?? []).map((task) => task.id));
     const removedBaselines = new Set(baselines.filter((baseline) => baseline.projectId === templateId).map((baseline) => baseline.id));
     setProjects((current) => current.filter((project) => project.id !== templateId));
@@ -1030,7 +1122,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     const regularProjects = projects.filter((item) => (item.kind ?? (item.status === "template" ? "template" : "project")) === "project");
     if (regularProjects.length <= 1) return { ok: false, taskCount, message: "You must keep at least one project." };
     try {
-      await deleteProjectRemote({ projectId });
+      await deleteProjectRemote({ projectId, expected: await fingerprint(confirmedBaseRef.current) });
+      recordDeleted("projects", new Set([projectId]));
     } catch (error: unknown) {
       return { ok: false, taskCount, message: error instanceof Error ? error.message : "The project could not be deleted." };
     }
@@ -1089,7 +1182,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       // full save must never recreate rows removed by this mutation.
       while (saveInFlightRef.current) await new Promise(resolve => setTimeout(resolve, 10));
       pendingSaveRef.current = null;
-      const result = await deleteTasksRemote({ projectId, taskIds });
+      const result = await deleteTasksRemote({ projectId, taskIds, expected: await fingerprint(confirmedBaseRef.current) });
+      recordDeleted("tasks", new Set(result.taskIds));
       return { ok: true, removedTaskIds: result.taskIds };
     } catch (error: unknown) {
       setTasksByProject(current => ({ ...current, [projectId]: restoreDeletedTasks(before, change.survivors, current[projectId] ?? []) }));
@@ -1109,7 +1203,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
    */
   const deleteResource = useCallback<CalendarStoreValue["deleteResource"]>(async (id) => {
     try {
-      await deleteResourceRemote({ resourceId: id });
+      await deleteResourceRemote({ resourceId: id, expected: await fingerprint(confirmedBaseRef.current) });
+      recordDeleted("resources", new Set([id]));
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : "The employee could not be deleted." };
     }
@@ -1334,7 +1429,8 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
         };
       }
       try {
-        await deleteCalendarRemote({ calendarId: id });
+        await deleteCalendarRemote({ calendarId: id, expected: await fingerprint(confirmedBaseRef.current) });
+        recordDeleted("calendars", new Set([id]));
       } catch (error: unknown) {
         return { ok: false, message: error instanceof Error ? error.message : "The calendar could not be deleted." };
       }
@@ -1370,12 +1466,20 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     setBaselineTasks([]);
     setFocusTask(null);
     hydratedRef.current = false;
+    hydratingRef.current = false;
     migrationStartedRef.current = false;
     companyStartedRef.current = false;
     removalSignOutRef.current = false;
     restoringRef.current = false;
     lastServerStateRef.current = null;
     lastSyncedRef.current = null;
+    confirmedBaseRef.current = {};
+    latestLocalRef.current = {};
+    saveBlockedRef.current = false;
+    calculationProjectsRef.current.clear();
+    pendingSaveRef.current = null;
+    if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
   }, []);
 
   /**

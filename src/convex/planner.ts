@@ -1,5 +1,6 @@
 import { internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
+import { canonical as stableCanonical, fingerprint, projectInputs, affectedProjects, type Workspace, type WorkspaceChange, type WorkspaceGuard, type WorkspaceRow, workspaceTables } from "../lib/workspace-changes";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   describeReferences,
@@ -39,7 +40,7 @@ const readableScope = async (ctx: QueryCtx | MutationCtx) => {
 /** Never persists a company or owner supplied by the browser. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const withoutScope = (item: any): any => {
-  const { companyId: _companyId, ownerId: _ownerId, ...rest } = item;
+  const { companyId: _companyId, ownerId: _ownerId, _id: _storageId, _creationTime: _storageTime, ...rest } = item;
   return rest;
 };
 
@@ -113,6 +114,12 @@ const collectOwnerState = async (ctx: QueryCtx | MutationCtx, userId: Id<"users"
     rowsByOwner(ctx, "baselineTasks", userId) as Promise<Doc<"baselineTasks">[]>,
   ]);
   return stateFrom({ projects, tasks, dependencies, calendars, calendarExceptions, resources, taskAssignments, planVersions, baselines, baselineTasks });
+};
+
+const checkWorkspaceBase = async (ctx: MutationCtx, companyId: Id<"companies">, expected?: string) => {
+  if (!expected || expected !== await fingerprint(await collectCompanyState(ctx, companyId) as Workspace)) {
+    throw new ConvexError({ code: "SAVE_CONFLICT", message: "This workspace changed. The operation was not applied. Your input is still available." });
+  }
 };
 
 const COMPANY_FIELDS = (company: { name: string; status: string }) => ({ name: company.name, status: company.status });
@@ -509,9 +516,10 @@ export const createProjectFromTemplate = mutation({
 });
 
 export const hideTemplate = mutation({
-  args: { templateId: v.string(), hidden: v.boolean() },
+  args: { templateId: v.string(), hidden: v.boolean(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const project = await ctx.db.query("projects").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
     if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "template") throw new Error("Template not found.");
     await ctx.db.patch(project._id, { hidden: args.hidden, updatedAt: new Date().toISOString() });
@@ -519,9 +527,10 @@ export const hideTemplate = mutation({
 });
 
 export const deleteTemplate = mutation({
-  args: { templateId: v.string() },
+  args: { templateId: v.string(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const project = await ctx.db.query("projects").withIndex("by_company", (q) => q.eq("companyId", companyId as never)).filter((q) => q.eq(q.field("id"), args.templateId)).first();
     if (!project || (project.kind ?? (project.status === "template" ? "template" : "project")) !== "template") throw new Error("Template not found.");
     if (project.isBuiltin) throw new Error("Built-in templates can be hidden, not deleted.");
@@ -554,9 +563,10 @@ const companyProjectRows = (ctx: MutationCtx, companyId: Id<"companies">) => com
  * company index, so a project id from another company cannot be deleted.
  */
 export const deleteProject = mutation({
-  args: { projectId: v.string() },
+  args: { projectId: v.string(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const projects = await companyProjectRows(ctx, companyId);
     const project = projects.find((row) => row.id === args.projectId);
     if (!project) throw new Error("That project is not part of this company.");
@@ -612,10 +622,11 @@ export const deleteProject = mutation({
  * never outlive the task it points at.
  */
 export const deleteTasks = mutation({
-  args: { projectId: v.string(), taskIds: v.array(v.string()) },
+  args: { projectId: v.string(), taskIds: v.array(v.string()), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
     const tasks = await ctx.db.query("tasks").withIndex("by_company_project", (q) => q.eq("companyId", companyId as never).eq("projectId", args.projectId)).collect();
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const wanted = new Set(args.taskIds);
     const doomed = new Set(tasks.filter((task) => wanted.has(task.id)).map((task) => task.id));
     if (!doomed.size) throw new Error("That task is not part of this company.");
@@ -661,9 +672,10 @@ export const deleteTasks = mutation({
  * assignment can survive pointing at an employee who is gone.
  */
 export const deleteResource = mutation({
-  args: { resourceId: v.string() },
+  args: { resourceId: v.string(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const resources = await companyTable(ctx, "resources", companyId);
     const resource = resources.find((row) => row.id === args.resourceId);
     if (!resource) throw new Error("That employee is not part of this company.");
@@ -703,9 +715,10 @@ export const deleteResource = mutation({
  * plans on, one an employee still uses, and one other calendars inherit from.
  */
 export const deleteCalendar = mutation({
-  args: { calendarId: v.string() },
+  args: { calendarId: v.string(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const { companyId } = await requireCompany(ctx);
+    await checkWorkspaceBase(ctx, companyId, args.expected);
     const calendars = await companyTable(ctx, "calendars", companyId);
     const calendar = calendars.find((row) => row.id === args.calendarId);
     if (!calendar) throw new Error("That calendar is not part of this company.");
@@ -856,12 +869,18 @@ const orderedTasks = (rows: readonly unknown[]): unknown[] =>
   });
 
 export const replaceState = mutation({
-  args: { state: v.any() },
+  args: { state: v.any(), expected: v.optional(v.string()) },
   handler: async (ctx, args) => {
     // The company always comes from the session: a company id in the payload is
     // discarded, so a browser can never write into (or hide data from) another
     // company.
     const { userId, companyId } = await requireCompany(ctx);
+    const storedState = await collectCompanyState(ctx, companyId);
+    // Legacy full replacement is never allowed to overwrite an existing workspace
+    // without a transactionally checked base. Empty first-time initialization only.
+    if (workspaceTables.some(table => storedState[table].length) && args.expected !== await fingerprint(storedState as Workspace)) {
+      throw new ConvexError({ code: "SAVE_CONFLICT", message: "The workspace changed. Your input has not been saved or overwritten." });
+    }
     const state = args.state as WorkspaceRelationRows;
     // Relations are the one place where a payload could name something the
     // company does not own. The only rows that exist besides this company's own
@@ -888,6 +907,134 @@ export const replaceState = mutation({
     await syncCompanyTable(ctx, "baselineTasks", companyId, scope, state.baselineTasks ?? [], totals);
     // What this save actually had to write, so a save that rewrote the whole
     // workspace is visible rather than silent.
+    return totals;
+  },
+});
+
+const storageTable = {
+  projects: "projects", tasks: "tasks", dependencies: "dependencies", calendars: "calendars",
+  exceptions: "calendarExceptions", resources: "resources", assignments: "taskAssignments",
+  planVersions: "planVersions", baselines: "baselines", baselineTasks: "baselineTasks",
+} as const;
+
+const conflict = () => new ConvexError({ code: "SAVE_CONFLICT", message: "Someone changed this planning while you were editing. Nothing in this save was applied. Your input is still available." });
+
+/** Changed rows only; comparison and all writes are ONE Convex transaction. */
+export const saveChanges = mutation({
+  args: {
+    changes: v.array(v.object({ table: v.union(...workspaceTables.map(table => v.literal(table))), id: v.string(), before: v.any(), after: v.any() })),
+    guards: v.array(v.object({ projectId: v.string(), fingerprint: v.string() })),
+  },
+  handler: async (ctx, args) => {
+    const { userId, companyId } = await requireCompany(ctx);
+    const changes = args.changes as WorkspaceChange[];
+    const guards = args.guards as WorkspaceGuard[];
+    const cache = new Map<string, Record<string, unknown> | null>();
+    const find = async (table: keyof typeof storageTable, id: string) => {
+      const key = `${table}:${id}`;
+      if (!cache.has(key)) {
+        const rows = await ctx.db.query(storageTable[table]).withIndex("by_company_id", q => q.eq("companyId", companyId).eq("id", id)).collect();
+        if (rows.length > 1) throw new Error("Duplicate record identifiers must be resolved before saving.");
+        cache.set(key, rows[0] as unknown as Record<string, unknown> ?? null);
+      }
+      return cache.get(key) ?? null;
+    };
+    const appRow = (row: Record<string, unknown> | null) => {
+      if (!row) return null;
+      const { _id, _creationTime, ownerId, companyId, ...app } = row;
+      return app;
+    };
+    const keys = new Set<string>();
+    for (const change of changes) {
+      if (keys.has(`${change.table}:${change.id}`)) throw new Error("Duplicate change.");
+      keys.add(`${change.table}:${change.id}`);
+      if (!change.id || (change.before && change.before.id !== change.id) || (change.after && change.after.id !== change.id)) throw new Error("Invalid change identifier.");
+      if (stableCanonical(appRow(await find(change.table, change.id))) !== stableCanonical(change.before)) throw conflict();
+    }
+    // Validate complete read sets per affected project, including unchanged
+    // predecessors, calendars and version mode. This also detects inserted rows.
+    const shared: Workspace = {};
+    if (guards.length) {
+      shared.calendars = stripScope(await companyTable(ctx, "calendars", companyId));
+      shared.exceptions = stripScope(await companyTable(ctx, "calendarExceptions", companyId));
+      shared.resources = stripScope(await companyTable(ctx, "resources", companyId));
+    }
+    const guarded = new Set<string>();
+    for (const guard of guards) {
+      if (guarded.has(guard.projectId)) throw new Error("Duplicate planning guard.");
+      guarded.add(guard.projectId);
+      const tasks = stripScope(await ctx.db.query("tasks").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect());
+      const baselines = stripScope(await ctx.db.query("baselines").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect());
+      const assignments = (await Promise.all(tasks.map(task => ctx.db.query("taskAssignments").withIndex("by_company_task", q => q.eq("companyId", companyId).eq("taskId", task.id)).collect()))).flat();
+      const snapshots = (await Promise.all(baselines.map(baseline => ctx.db.query("baselineTasks").withIndex("by_company_baseline", q => q.eq("companyId", companyId).eq("baselineId", baseline.id)).collect()))).flat();
+      const project = appRow(await find("projects", guard.projectId));
+      const inputs: Workspace = { ...shared, projects: project ? [project as WorkspaceRow] : [], tasks,
+        planVersions: stripScope(await ctx.db.query("planVersions").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect()), baselines,
+        dependencies: stripScope(await ctx.db.query("dependencies").withIndex("by_company_project", q => q.eq("companyId", companyId).eq("projectId", guard.projectId)).collect()),
+        assignments: stripScope(assignments), baselineTasks: stripScope(snapshots),
+      };
+      if (await fingerprint(inputs) !== guard.fingerprint) throw conflict();
+    }
+    const beforeRows: Workspace = Object.fromEntries(workspaceTables.map(table => [table, changes.filter(change => change.table === table && change.before).map(change => change.before)]));
+    for (const projectId of affectedProjects(beforeRows, changes)) {
+      // New projects have no earlier calculation inputs. Existing ones do.
+      if (await find("projects", projectId) && !guarded.has(projectId)) throw new Error("A planning read guard is required.");
+    }
+    for (const change of changes) for (const row of [change.before, change.after]) {
+      if (!row) continue;
+      for (const [field, target] of [["taskId", "tasks"], ["baselineId", "baselines"]] as const) {
+        if (typeof row[field] !== "string") continue;
+        const storedTarget = await find(target, row[field]);
+        const projectId = storedTarget?.projectId;
+        if (typeof projectId === "string" && !guarded.has(projectId)) throw new Error("A planning read guard is required.");
+      }
+    }
+    // Resolve changed relations against this company's current rows plus this
+    // transaction's delta, not against a caller-provided complete workspace.
+    const resolve = async (table: keyof typeof storageTable, id: unknown) => {
+      if (typeof id !== "string" || !id) return true;
+      const changed = changes.find(change => change.table === table && change.id === id);
+      return changed ? changed.after !== null : (await find(table, id)) !== null;
+    };
+    const rules: Partial<Record<keyof typeof storageTable, [string, keyof typeof storageTable][]>> = {
+      tasks: [["projectId", "projects"], ["parentId", "tasks"], ["versionId", "planVersions"]],
+      projects: [["calendarId", "calendars"]], resources: [["calendarId", "calendars"]],
+      dependencies: [["projectId", "projects"], ["predecessorId", "tasks"], ["successorId", "tasks"]],
+      assignments: [["taskId", "tasks"], ["resourceId", "resources"]], exceptions: [["calendarId", "calendars"]],
+      planVersions: [["projectId", "projects"]], baselines: [["projectId", "projects"]],
+      baselineTasks: [["baselineId", "baselines"]], calendars: [["parentCalendarId", "calendars"]],
+    };
+    for (const change of changes) {
+      if (!change.after) continue;
+      for (const [field, target] of rules[change.table] ?? []) {
+        if (!await resolve(target, change.after[field])) throw conflict();
+      }
+    }
+    // Destructive deltas must validate inbound relationships too; uncommon
+    // deletes use a company snapshot for integrity, ordinary edits do not.
+    if (changes.some(change => change.after === null)) {
+      const full = await collectCompanyState(ctx, companyId);
+      const next = Object.fromEntries(workspaceTables.map(table => {
+        const rows = new Map<string, WorkspaceRow>((full[table] as WorkspaceRow[]).map(row => [row.id, row]));
+        for (const change of changes.filter(change => change.table === table)) {
+          if (change.after) rows.set(change.id, change.after); else rows.delete(change.id);
+        }
+        return [table, [...rows.values()]];
+      }));
+      if (outsideCompanyReferences(next).length) throw conflict();
+      const previousProjects = full.projects.filter(isRegularProject);
+      if (previousProjects.length && !next.projects.some(row => isRegularProject({ kind: typeof row.kind === "string" ? row.kind : undefined, status: String(row.status) }))) throw new Error("You must keep at least one project.");
+    }
+    const totals: WorkspaceWriteCount = { inserted: 0, updated: 0, removed: 0, kept: 0 };
+    for (const change of changes) {
+      const stored = await find(change.table, change.id);
+      if (!change.after) { if (stored) { await ctx.db.delete(stored._id as Id<"tasks">); totals.removed++; } }
+      else {
+        const row = { ...withoutScope(change.after), ownerId: userId, companyId };
+        if (stored) { await ctx.db.replace(stored._id as Id<"tasks">, row); totals.updated++; }
+        else { await ctx.db.insert(storageTable[change.table], row); totals.inserted++; }
+      }
+    }
     return totals;
   },
 });

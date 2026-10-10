@@ -12,7 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { convexTest } from "convex-test";
+import { convexTest } from "./convex-test-workspace";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { applyPlanningModeMargins, copyTasksToVersion, type PlannerTask } from "./planner-model";
