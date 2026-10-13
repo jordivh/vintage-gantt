@@ -49,7 +49,7 @@ export async function fingerprint(state: Workspace): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(value => value.toString(16).padStart(2, "0")).join("");
 }
 
-export function affectedProjects(state: Workspace, changes: readonly WorkspaceChange[]): string[] {
+export function affectedProjects(state: Workspace, changes: readonly WorkspaceChange[], coverage?: readonly ReadCoverage[]): string[] {
   const ids = new Set<string>();
   for (const change of changes) for (const row of [change.before, change.after]) {
     if (!row) continue;
@@ -64,7 +64,13 @@ export function affectedProjects(state: Workspace, changes: readonly WorkspaceCh
       if (typeof baseline?.projectId === "string") ids.add(baseline.projectId);
     }
     if (["calendars", "exceptions", "resources"].includes(change.table)) {
-      for (const project of state.projects ?? []) ids.add(project.id);
+      // Scoped screens calculate only from loaded plans. Catalog-only projects
+      // (notably templates) have no task read set to fingerprint: treating their
+      // missing tasks as an empty full plan causes a conflict on every edit.
+      // Full-workspace callers still guard every project.
+      for (const project of state.projects ?? []) {
+        if (!coverage || coverage.some(item => item.projectId === project.id)) ids.add(project.id);
+      }
     }
   }
   return [...ids].sort();
@@ -72,7 +78,7 @@ export function affectedProjects(state: Workspace, changes: readonly WorkspaceCh
 
 export async function changeRequest(before: Workspace, after: Workspace, coverage?: readonly ReadCoverage[]) {
   const changes = workspaceChanges(before, after);
-  const guards = await Promise.all(affectedProjects(before, changes).map(async projectId => {
+  const guards = await Promise.all(affectedProjects(before, changes, coverage).map(async projectId => {
     const loaded = coverage?.find(item => item.projectId === projectId);
     return { projectId, fingerprint: await fingerprint(projectInputs(before, projectId)), ...(loaded ? { scope: { versionIds: loaded.versionIds, allVersions: loaded.allVersions, baselineIds: (before.baselineTasks ?? []).map(row => row.baselineId as string) } } : {}) };
   }));

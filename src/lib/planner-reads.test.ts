@@ -87,6 +87,40 @@ test("partial save preserves unloaded versions, baselines, assignments and other
   expect(all?.tasks.find(row => row.id === "p-v2-0")?.notes).toBe("");
 });
 
+test("calendar day off saves with unloaded templates and survives a fresh read", async () => {
+  const { a, read } = await setup();
+  const data = fixture();
+  const policy = plannerReadPolicy("/calendars", data.projects, data.planVersions, "p", "p-v1");
+  const { state, coverage } = await read(a, policy.requests);
+  expect(coverage.map(row => row.projectId)).toEqual(["p", "q", "archive"]);
+  const dayOff = { id: "day-off", calendarId: "cal", startDate: "2026-10-06", endDate: "2026-10-06", label: "Non-working day", type: "shutdown", isWorkingDay: false, source: "manual" };
+  const next = { ...state, exceptions: [...(state.exceptions ?? []), dayOff] };
+  const result = await a.mutation(api.planner.saveChanges, await changeRequest(state, next, coverage));
+  expect(result.inserted).toBe(1);
+  const fresh = await read(a, policy.requests);
+  expect(fresh.state.exceptions?.find(row => row.id === dayOff.id)).toEqual(dayOff);
+  const full = await a.query(api.planner.getState, {});
+  expect(full?.tasks.filter(row => row.projectId === "template")).toEqual(data.tasks.filter(row => row.projectId === "template"));
+  expect(full?.baselineTasks.length).toBe(500);
+  expect(full?.assignments.length).toBe(1000);
+  await a.mutation(api.planner.saveChanges, await changeRequest(fresh.state, { ...fresh.state, exceptions: fresh.state.exceptions?.filter(row => row.id !== dayOff.id) }, fresh.coverage));
+  expect((await read(a, policy.requests)).state.exceptions?.some(row => row.id === dayOff.id)).toBe(false);
+});
+
+test("calendar save still rejects concurrent changes to loaded planning inputs atomically", async () => {
+  const { a, b, read } = await setup();
+  const data = fixture();
+  const requests = plannerReadPolicy("/calendars", data.projects, data.planVersions, "p", "p-v1").requests;
+  const stale = await read(a, requests);
+  const colleague = await read(b);
+  await b.mutation(api.planner.saveChanges, await changeRequest(colleague.state, { ...colleague.state, tasks: colleague.state.tasks?.map(row => row.id === "p-v1-0" ? { ...row, notes: "Colleague edit" } : row) }, colleague.coverage));
+  const dayOff = { id: "conflicting-day-off", calendarId: "cal", startDate: "2026-10-06", endDate: "2026-10-06", label: "Non-working day", type: "shutdown", isWorkingDay: false, source: "manual" };
+  await expect(a.mutation(api.planner.saveChanges, await changeRequest(stale.state, { ...stale.state, exceptions: [...(stale.state.exceptions ?? []), dayOff] }, stale.coverage))).rejects.toThrow("Someone changed");
+  const full = await a.query(api.planner.getState, {});
+  expect(full?.exceptions.some(row => row.id === dayOff.id)).toBe(false);
+  expect(full?.tasks.find(row => row.id === "p-v1-0")?.notes).toBe("Colleague edit");
+});
+
 test("scoped stale same-project save conflicts; different-project saves survive", async () => {
   const { a, b, read } = await setup();
   const baseA = await read(a);
