@@ -47,6 +47,30 @@ export function workspaceLoadStep(hasState: boolean, initializing: boolean): "in
   return initializing ? "wait" : "initialize";
 }
 
+/**
+ * Whether the store should cover the route with "Loading planning data…".
+ *
+ * `RequireAuth` lives inside the store's children, so blocking `children`
+ * before `access === "granted"` — or while `mustChangePassword` is true —
+ * freezes an unauthenticated visitor or a temporary-password account on the
+ * loading screen forever and prevents `<RequireAuth>` from redirecting to
+ * `/auth` or `/account/password`.
+ */
+export function shouldBlockForPlanningReads(facts: {
+  workspaceRoute: boolean;
+  access: AccessState;
+  mustChangePassword: boolean;
+  hasPendingSave: boolean;
+  saveBlocked: boolean;
+  hydrated: boolean;
+  remoteStatePending: boolean;
+  waitingForRequestedVersion: boolean;
+}): boolean {
+  if (!facts.workspaceRoute || facts.access !== "granted" || facts.mustChangePassword) return false;
+  if (facts.hasPendingSave || facts.saveBlocked) return false;
+  return (!facts.hydrated && facts.remoteStatePending) || facts.waitingForRequestedVersion;
+}
+
 /** True when protected data must be cleared and the visitor returned to Sign in. */
 export function accessEnded(state: AccessState): boolean {
   return state === "signed-out" || state === "denied";

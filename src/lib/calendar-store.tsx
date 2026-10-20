@@ -31,7 +31,7 @@ import { normalizeWorkspaceRelations } from "./company-integrity";
 import { withoutSnapshotLog } from "./remaining-work";
 import { removeTaskSubtrees, restoreDeletedTasks } from "./task-table";
 import { REMOVED_ACCESS_MESSAGE } from "./company-users";
-import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, workspaceLoadStep } from "./session-access";
+import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, shouldBlockForPlanningReads, workspaceLoadStep } from "./session-access";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useAuthActions } from "@convex-dev/auth/react";
@@ -436,14 +436,32 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
   const [requestedBaselineId, setRequestedBaselineId] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
-  const catalogRemote = useQuery(api.plannerReads.catalog, isAuthenticated && ["/dashboard", "/projects", "/capacity", "/calendars", "/resources", "/reports/margins"].includes(location.pathname) ? {} : "skip");
+  const companyInfo = useQuery(api.companies.current, isAuthenticated ? { includeMembers: location.pathname === "/company/users" } : "skip");
+  const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
+  const companyRole: CompanyRole = company?.role ?? "user";
+  const accessInfo = useQuery(api.companies.access, isAuthenticated ? {} : "skip");
+  // A valid session survives a refresh; a removed account, a suspended company
+  // and a signed-out visitor all end access. One rule decides, everywhere.
+  const access = accessState({
+    isLoading: isAuthLoading || (isAuthenticated && (companyInfo === undefined || accessInfo === undefined)),
+    isAuthenticated,
+    removed: accessInfo?.removed === true,
+    companyActive: company ? company.company.status === "active" : true,
+  });
+  const accessRemoved = access === "denied";
+  // An account with a temporary password reads no planning data at all until it
+  // has set its own. The server enforces the same rule; this keeps the shell from
+  // asking for anything it may not have.
+  const mustChangePassword = accessInfo?.mustChangePassword === true;
+  const canReadPlanning = access === "granted" && !mustChangePassword;
+  const catalogRemote = useQuery(api.plannerReads.catalog, canReadPlanning && ["/dashboard", "/projects", "/capacity", "/calendars", "/resources", "/reports/margins"].includes(location.pathname) ? {} : "skip");
   const policy = plannerReadPolicy(location.pathname, catalogRemote?.projects ?? [], catalogRemote?.planVersions ?? [], activeProjectId, requestedVersionId || activeVersionId, expandedProjects);
-  const sharedRemote = useQuery(api.plannerReads.calendars, isAuthenticated && policy.workspace ? {} : "skip");
-  const peopleRemote = useQuery(api.plannerReads.people, isAuthenticated && policy.workspace ? {} : "skip");
-  const plansRemote = useQuery(api.plannerReads.plans, isAuthenticated && policy.workspace && catalogRemote ? { requests: policy.requests } : "skip");
+  const sharedRemote = useQuery(api.plannerReads.calendars, canReadPlanning && policy.workspace ? {} : "skip");
+  const peopleRemote = useQuery(api.plannerReads.people, canReadPlanning && policy.workspace ? {} : "skip");
+  const plansRemote = useQuery(api.plannerReads.plans, canReadPlanning && policy.workspace && catalogRemote ? { requests: policy.requests } : "skip");
   const baselineFromLink = new URLSearchParams(location.search).get("baseline") ?? "";
   const selectedBaseline = policy.planning ? baselineFromLink || requestedBaselineId || catalogRemote?.baselines.filter(row => row.projectId === activeProjectId && row.versionId === activeVersionId).slice(-1)[0]?.id || "" : "";
-  const snapshotsRemote = useQuery(api.plannerReads.snapshots, isAuthenticated && policy.planning && selectedBaseline ? { baselineIds: [selectedBaseline] } : "skip");
+  const snapshotsRemote = useQuery(api.plannerReads.snapshots, canReadPlanning && policy.planning && selectedBaseline ? { baselineIds: [selectedBaseline] } : "skip");
   const remoteState = useMemo(() => {
     if (!policy.workspace || catalogRemote === undefined || sharedRemote === undefined || peopleRemote === undefined || plansRemote === undefined || (selectedBaseline && snapshotsRemote === undefined)) return undefined;
     if (!catalogRemote || !sharedRemote || !peopleRemote || !plansRemote) return null;
@@ -469,23 +487,6 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
   const changeOwnNameRemote = useMutation(api.companies.changeOwnName);
   const changeOwnEmailRemote = useMutation(api.companies.changeOwnEmail);
   const changeOwnPasswordRemote = useMutation(api.companies.changeOwnPassword);
-  const companyInfo = useQuery(api.companies.current, isAuthenticated ? { includeMembers: location.pathname === "/company/users" } : "skip");
-  const company = (companyInfo as CompanyInfo | null | undefined) ?? null;
-  const companyRole: CompanyRole = company?.role ?? "user";
-  const accessInfo = useQuery(api.companies.access, isAuthenticated ? {} : "skip");
-  // A valid session survives a refresh; a removed account, a suspended company
-  // and a signed-out visitor all end access. One rule decides, everywhere.
-  const access = accessState({
-    isLoading: isAuthLoading || (isAuthenticated && (companyInfo === undefined || accessInfo === undefined)),
-    isAuthenticated,
-    removed: accessInfo?.removed === true,
-    companyActive: company ? company.company.status === "active" : true,
-  });
-  const accessRemoved = access === "denied";
-  // An account with a temporary password reads no planning data at all until it
-  // has set its own. The server enforces the same rule; this keeps the shell from
-  // asking for anything it may not have.
-  const mustChangePassword = accessInfo?.mustChangePassword === true;
   const { signOut } = useAuthActions();
   const removalSignOutRef = useRef(false);
   const hydratedRef = useRef(false);
@@ -1715,7 +1716,16 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  const loadingReads = policy.workspace && !pendingSaveRef.current && !saveBlockedRef.current && ((!hydratedRef.current && remoteState === undefined) || (requestedVersionId && !readCoverageRef.current.some(row => row.projectId === activeProjectId && row.versionIds.includes(requestedVersionId))));
+  const loadingReads = shouldBlockForPlanningReads({
+    workspaceRoute: policy.workspace,
+    access,
+    mustChangePassword,
+    hasPendingSave: Boolean(pendingSaveRef.current),
+    saveBlocked: saveBlockedRef.current,
+    hydrated: hydratedRef.current,
+    remoteStatePending: remoteState === undefined,
+    waitingForRequestedVersion: Boolean(requestedVersionId && !readCoverageRef.current.some(row => row.projectId === activeProjectId && row.versionIds.includes(requestedVersionId))),
+  });
   return <CalendarStoreContext.Provider value={value}>{loadingReads ? <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading planning data…</div> : children}</CalendarStoreContext.Provider>;
 }
 

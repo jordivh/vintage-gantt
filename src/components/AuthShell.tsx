@@ -1,4 +1,5 @@
 import { useAuth } from "@/hooks/use-auth";
+import { CHANGE_PASSWORD_PATH } from "@/lib/navigation";
 import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 
@@ -31,13 +32,15 @@ type AuthShellProps = {
  * company environment instead.
  */
 export function AuthShell({ eyebrow, title, description, redirect, wide, children, footer, allowAuthenticated }: AuthShellProps) {
-  const { isLoading, isAuthenticated } = useAuth();
+  const { isLoading, isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
     if (allowAuthenticated) return;
-    if (!isLoading && isAuthenticated) navigate(redirect, { replace: true });
-  }, [allowAuthenticated, isLoading, isAuthenticated, navigate, redirect]);
+    if (!isLoading && isAuthenticated) {
+      navigate(user?.mustChangePassword ? CHANGE_PASSWORD_PATH : redirect, { replace: true });
+    }
+  }, [allowAuthenticated, isLoading, isAuthenticated, navigate, redirect, user?.mustChangePassword]);
 
   return (
     <main className="auth-screen">

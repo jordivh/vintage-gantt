@@ -7,7 +7,7 @@
  * returns to Sign in.
  */
 import { describe, expect, test } from "bun:test";
-import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, authIsLoading, workspaceLoadStep } from "./session-access";
+import { ACCESS_ENDED_MESSAGE, accessEnded, accessState, authIsLoading, shouldBlockForPlanningReads, workspaceLoadStep } from "./session-access";
 
 const granted = { isLoading: false, isAuthenticated: true, removed: false, companyActive: true };
 
@@ -24,6 +24,31 @@ describe("session access", () => {
     expect(workspaceLoadStep(false, true)).toBe("wait");
     expect(workspaceLoadStep(true, true)).toBe("hydrate");
     expect(workspaceLoadStep(true, false)).toBe("hydrate");
+  });
+
+  test("a temporary-password or ungranted session never freezes on 'Loading planning data…'", () => {
+    const base = {
+      workspaceRoute: true,
+      access: "granted" as const,
+      mustChangePassword: false,
+      hasPendingSave: false,
+      saveBlocked: false,
+      hydrated: false,
+      remoteStatePending: true,
+      waitingForRequestedVersion: false,
+    };
+    // A normal granted session with no temporary password waits for its initial read.
+    expect(shouldBlockForPlanningReads(base)).toBe(true);
+    // An account with a temporary password must render <RequireAuth> so it can
+    // redirect to /account/password instead of freezing on "Loading planning data…".
+    expect(shouldBlockForPlanningReads({ ...base, mustChangePassword: true })).toBe(false);
+    // While access is still resolving or signed out, <RequireAuth> handles the
+    // spinner or redirect rather than freezing on skipped planning reads.
+    expect(shouldBlockForPlanningReads({ ...base, access: "loading" })).toBe(false);
+    expect(shouldBlockForPlanningReads({ ...base, access: "signed-out" })).toBe(false);
+    expect(shouldBlockForPlanningReads({ ...base, access: "denied" })).toBe(false);
+    // Non-workspace routes (such as /account/password) never block.
+    expect(shouldBlockForPlanningReads({ ...base, workspaceRoute: false })).toBe(false);
   });
   test("a valid session is granted once resolved — refresh does not lose it", () => {
     expect(accessState({ ...granted, isLoading: true })).toBe("loading");
