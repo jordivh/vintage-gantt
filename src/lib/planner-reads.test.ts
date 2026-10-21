@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { convexTest } from "convex-test";
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
-import { changeRequest, type Workspace } from "./workspace-changes";
+import { changeRequest, fingerprint, projectInputs, workspaceGuardScope, type Workspace } from "./workspace-changes";
 import { plannerReadPolicy } from "./planner-read-policy";
 import { createHash } from "node:crypto";
 import { computeResourceLoads, type CapacityInput } from "./capacity-engine";
@@ -105,6 +105,24 @@ test("calendar day off saves with unloaded templates and survives a fresh read",
   expect(full?.assignments.length).toBe(1000);
   await a.mutation(api.planner.saveChanges, await changeRequest(fresh.state, { ...fresh.state, exceptions: fresh.state.exceptions?.filter(row => row.id !== dayOff.id) }, fresh.coverage));
   expect((await read(a, policy.requests)).state.exceptions?.some(row => row.id === dayOff.id)).toBe(false);
+});
+
+test("added calculation guards send only fields accepted by the backend validator", async () => {
+  const { a, read } = await setup();
+  const { state, coverage } = await read(a);
+  const calculated = await changeRequest(state, state, coverage);
+  // Reproduce the extra guard the store adds after an optimization even when its
+  // planner calculation made no persisted row changes (the optimized result can
+  // be identical to the selected version).
+  const projectId = "p";
+  const scope = coverage.find(row => row.projectId === projectId)!;
+  calculated.guards.push({
+    projectId,
+    fingerprint: await fingerprint(projectInputs(state, projectId)),
+    scope: workspaceGuardScope(scope, []),
+  });
+  expect(calculated.guards.every(guard => !guard.scope || Object.keys(guard.scope).sort().join(",") === "allVersions,baselineIds,versionIds")).toBe(true);
+  await a.mutation(api.planner.saveChanges, calculated);
 });
 
 test("calendar save still rejects concurrent changes to loaded planning inputs atomically", async () => {

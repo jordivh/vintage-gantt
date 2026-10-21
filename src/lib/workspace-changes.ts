@@ -76,11 +76,15 @@ export function affectedProjects(state: Workspace, changes: readonly WorkspaceCh
   return [...ids].sort();
 }
 
+export function workspaceGuardScope(coverage: ReadCoverage, baselineIds: string[]) {
+  return { versionIds: coverage.versionIds, allVersions: coverage.allVersions, baselineIds };
+}
+
 export async function changeRequest(before: Workspace, after: Workspace, coverage?: readonly ReadCoverage[]) {
   const changes = workspaceChanges(before, after);
   const guards = await Promise.all(affectedProjects(before, changes, coverage).map(async projectId => {
     const loaded = coverage?.find(item => item.projectId === projectId);
-    return { projectId, fingerprint: await fingerprint(projectInputs(before, projectId)), ...(loaded ? { scope: { versionIds: loaded.versionIds, allVersions: loaded.allVersions, baselineIds: (before.baselineTasks ?? []).map(row => row.baselineId as string) } } : {}) };
+    return { projectId, fingerprint: await fingerprint(projectInputs(before, projectId)), ...(loaded ? { scope: workspaceGuardScope(loaded, (before.baselineTasks ?? []).map(row => row.baselineId as string)) } : {}) };
   }));
   return { changes, guards };
 }

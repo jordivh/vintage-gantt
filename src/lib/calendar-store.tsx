@@ -39,7 +39,7 @@ import { useConvex, useConvexAuth, useMutation, useQuery } from "convex/react";
 import { useLocation } from "react-router";
 import { plannerReadPolicy } from "./planner-read-policy";
 import { toast } from "sonner";
-import { changeRequest, fingerprint, projectInputs, canonical, workspaceTables, type Workspace, type WorkspaceRow, type ReadCoverage } from "./workspace-changes";
+import { changeRequest, fingerprint, projectInputs, workspaceGuardScope, canonical, workspaceTables, type Workspace, type WorkspaceRow, type ReadCoverage } from "./workspace-changes";
 
 export type ProjectStatus = "active" | "archived" | "template";
 export interface ProjectRecord {
@@ -727,7 +727,7 @@ export function CalendarStoreProvider({ children }: { children: ReactNode }) {
       for (const projectId of calculationProjectsRef.current) {
         if (!request.guards.some(guard => guard.projectId === projectId)) {
           const coverage = readCoverageRef.current.find(row => row.projectId === projectId);
-          request.guards.push({ projectId, fingerprint: await fingerprint(projectInputs(confirmedBaseRef.current, projectId)), ...(coverage ? { scope: { ...coverage, baselineIds: (confirmedBaseRef.current.baselineTasks ?? []).map(row => row.baselineId as string) } } : {}) });
+          request.guards.push({ projectId, fingerprint: await fingerprint(projectInputs(confirmedBaseRef.current, projectId)), ...(coverage ? { scope: workspaceGuardScope(coverage, (confirmedBaseRef.current.baselineTasks ?? []).map(row => row.baselineId as string)) } : {}) });
         }
       }
       await replaceRemoteState(request);
